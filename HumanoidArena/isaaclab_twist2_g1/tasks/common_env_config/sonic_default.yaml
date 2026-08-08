@@ -1,0 +1,7 @@
+name: sonic_default
+description: Default environment timing overrides for SONIC-backed simulation.
+
+overrides:
+  sim:
+    dt: 0.005
+  decimation: 4

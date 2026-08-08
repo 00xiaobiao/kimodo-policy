@@ -1,0 +1,27 @@
+name: doubledesk_twist2
+description: TWIST2 env config for Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody.
+task_name: Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody
+backend: twist2
+
+overrides:
+  sim:
+    dt: 0.001
+  decimation: 20
+  object_reset_seed_source: time
+  deterministic_object_resets:
+    - record_name: hammer
+      scene_keys: [object_l, ObjectL]
+      pose_range:
+        x: [-3.2, -2.4]
+        y: [-3.15, -3.0]
+        z: [0.8, 0.8]
+        yaw: [-0.35, 0.35]
+      zero_velocity_on_reset: true
+    - record_name: basket
+      prim_paths: ["/World/envs/env_{env_idx}/Basket"]
+      pose_range:
+        x: [-3.6, -2.0]
+        y: [-0.3, -0.005]
+        z: [0.745, 0.745]
+        yaw: [-0.785398, 0.785398]
+      zero_velocity_on_reset: true

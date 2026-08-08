@@ -1,0 +1,76 @@
+main:
+  batch_size: 32
+  max_steps: 200000
+  save_steps: 50000
+  action_chunk: 50
+  action_history: 100
+  seed: 42
+  save_root: "log/"
+  dtype: "bf16"
+  dataset_roots:
+    HumanoidArena: "/data/local-data/data/Humanoid/HumanoidArena_dataset_v3_1"
+    HumanoidEveryday: "/data/local-data/data/Humanoid/HumanoidEveryday_debug"
+    HIW500: "/data/local-data/data/Humanoid/HIW500_debug"
+    UnifoLM_WBT_Dataset: "/data/local-data/data/Humanoid/UnifoLM_WBT_Dataset"
+  dataset_selection:
+    # HumanoidArena:
+    #   task: "HOI_double_desk"
+    #   backend: "sonic"             # sonic 或 twist2
+    HumanoidArena:
+      merged: "all_16_refpose_v3_1" # sonic_8_refpose_v3_1、twist2_8_refpose_v3_1
+    # HumanoidEveryday:
+    #   tasks: ["*"]                # 全部已下载 G1 episode；使用 egocentric
+    # HIW500:
+    #   tasks: ["*"]
+    #   camera: "observation.images.head"
+    #   stereo_view: "left"         # 1280x480 双目拼接裁为左目 640x480
+    # UnifoLM_WBT_Dataset:
+    #   tasks: ["*"]
+    #   camera: "observation.images.head_stereo_left"  # MainCamOnly 自动回退 cam_0
+  sampling:
+    mode: "episode_uniform"
+  episode_cache_size: 1600           # Merge16 共 1600 episodes；内存充足，保留全量 LRU，避免反复 FK/417D 转换
+  cpu_workers_num: 32                # 实测约 1.60-1.62 s/step；4 ranks 共 128 workers，以 I/O/视频解码并行换取最高吞吐
+  precompute_text_embeddings: true
+  wandb: "offline"
+  gradient:
+    grad_clip_norm: 0.5
+    hand_grad_clip_norm: 1.0
+    grad_accumulation_steps: 1
+
+
+model:
+  fps: 30
+  motion_mask_mode: "concat"
+  dinov3_model_name: "dinov3-vitl16-pretrain-lvd1689m"
+  dinov3_checkpoint: null           # 本地目录或 Hugging Face model id
+  text_feature_dim: 4096
+  controlnet_num_layers: 8         # 每个 root/body ControlNet 各 8 层，隔层注入 16 层 Kimodo
+  enable_hand_head: true
+  hand_hidden_dim: 256
+  hand_num_layers: 4
+  hand_num_heads: 4
+  hand_ffn_dim: 1024
+  hand_init_seed: 3407
+  compile: true                    # 固定 shape 训练使用 torch.compile 加速前后向
+  compile_mode: "reduce-overhead"
+
+
+training:
+  loss:
+    root_weight: 2.0               # root/body 分别求均值后加权
+    body_weight: 1.0
+    hand_weight: 1.0
+    hand_transition_weight: 0.2
+  optimizer:
+    control_backbone_lr: 3.0e-5    # 从 Kimodo 复制的 ControlNet Transformer 层
+    control_adapter_lr: 1.0e-4     # 新初始化 image/token-MLP/shared-attention/fusion-zero 与 timestep embedder
+    hand_lr: 1.0e-4
+    weight_decay: 0.01             # Weight decay for regularization
+    betas: [0.9, 0.999]            # Adam optimizer beta parameters
+    eps: 1.0e-8                    # Adam optimizer epsilon
+    fused: true
+  scheduler:
+    warmup_ratio: 0.01             # 1000-step warmup，快速激活 zero-init visual residual
+    num_cycles: 0.5                # Number of cosine annealing cycles
+    min_lr_ratio: 0.1              # 训练末期分别衰减到 3e-6 / 1e-5

@@ -1,0 +1,26 @@
+name: open_door_sonic_test
+description: Test-only SONIC eval config for Isaac-Move-Open-Door-G129-Dex3-Wholebody.
+task_name: Isaac-Move-Open-Door-G129-Dex3-Wholebody
+backend: sonic
+
+test_defaults:
+  seeds: [0, 1, 2]
+  repeats_per_seed: 20
+  persistent_sim: true
+  episode_seed_formula: sha256(task_name|group_seed|repeat_idx)_positive_int32
+
+overrides:
+  wait_for_textures: false
+  sim:
+    dt: 0.005
+  decimation: 4
+  object_reset_seed_source: env_seed
+  deterministic_object_resets:
+    - record_name: door
+      prim_paths: ["/World/envs/env_{env_idx}/Door"]
+      prim_pose_write_mode: local_matrix
+      pose_range:
+        x: [-0.754, 0.55]
+        y: [-0.8, 0.1]
+        z: [0, 0]
+      zero_velocity_on_reset: true

@@ -1,0 +1,48 @@
+name: sit_sofa_twist2_test
+description: Test-only TWIST2 eval config for Isaac-Move-Sit-Sofa-G129-Dex3-Wholebody.
+task_name: Isaac-Move-Sit-Sofa-G129-Dex3-Wholebody
+backend: twist2
+
+test_defaults:
+  seeds: [0, 1, 2]
+  repeats_per_seed: 20
+  persistent_sim: true
+  episode_seed_formula: sha256(task_name|group_seed|repeat_idx)_positive_int32
+
+  vision_randomization:
+    enabled: true
+    prim_path: "/World/light"
+    rotation:
+      yaw_deg: [0, 0]
+      pitch_deg: [-20, 20]
+      roll_deg: [-20, 20]
+    intensity_range: [3000, 7000]
+    color_range:
+      r: [0.65, 0.85]
+      g: [0.65, 0.85]
+      b: [0.65, 0.85]
+
+overrides:
+  scene.room_walls.spawn.usd_path: "${PROJECT_ROOT}/assets/objects/small_warehouse/small_warehouse_sitsofa/small_warehouse_digital_twin_sitsofa_vision.usd"
+  wait_for_textures: false
+  sim:
+    dt: 0.001
+  decimation: 20
+  object_reset_seed_source: env_seed
+  deterministic_object_resets:
+    - record_name: carton_obstacle_01
+      scene_keys: [carton_obstacle_01, CartonObstacle01]
+      pose_range:
+        x: [-2.1, -1.7]
+        y: [0.6, 0.8]
+        z: [0.1, 0.1]
+        yaw: [0, 0]
+      zero_velocity_on_reset: true
+    - record_name: carton_obstacle_02
+      scene_keys: [carton_obstacle_02, CartonObstacle02]
+      pose_range:
+        x: [-1.7, -2.3]
+        y: [-0.1, 0.4]
+        z: [0.1, 0.1]
+        yaw: [0, 0]
+      zero_velocity_on_reset: true

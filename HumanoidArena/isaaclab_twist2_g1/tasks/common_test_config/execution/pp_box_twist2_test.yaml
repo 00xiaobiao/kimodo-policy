@@ -1,0 +1,34 @@
+name: pp_box_twist2_test
+description: Test-only TWIST2 eval config for Isaac-Move-PickPlace-Box-G129-Dex3-Wholedoby.
+task_name: Isaac-Move-PickPlace-Box-G129-Dex3-Wholedoby
+backend: twist2
+
+test_defaults:
+  seeds: [0, 1, 2]
+  repeats_per_seed: 20
+  persistent_sim: true
+  episode_seed_formula: sha256(task_name|group_seed|repeat_idx)_positive_int32
+
+overrides:
+  wait_for_textures: false
+  sim:
+    dt: 0.001
+  decimation: 20
+  object_reset_seed_source: env_seed
+  deterministic_object_resets:
+    - record_name: box
+      scene_keys: [box, Box]
+      pose_range:
+        x: [-0.58, -0.40]
+        y: [-5.97, -3.92]
+        z: [0.75, 0.75]
+        yaw: [-0.785398, 0.785398]
+      zero_velocity_on_reset: true
+    - record_name: shelf
+      prim_paths: ["/World/envs/env_{env_idx}/Shelf"]
+      pose_range:
+        x: [-0.48, 1.2]
+        y: [-3.3, -2.0]
+        z: [0.0, 0.0]
+        yaw: [-0.261799, 0.261799]
+      zero_velocity_on_reset: true

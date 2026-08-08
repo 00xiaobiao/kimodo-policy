@@ -1,0 +1,380 @@
+diff --git a/sim_main.py b/sim_main.py
+index 1111111..2222222 100644
+--- a/sim_main.py
++++ b/sim_main.py
+@@
+ parser.add_argument("--sonic_decoder_path", type=str, default="",
+                     help="Path to GEAR-SONIC decoder ONNX model")
+ 
+-# VLA / OpenPI-specific arguments (used when action_source=openpi or input_source=vla)
++# OpenPI-specific arguments (legacy provider only)
+ parser.add_argument("--openpi_checkpoint", type=str, default="",
+                     help="Path to OpenPI checkpoint directory")
+ parser.add_argument("--language_instruction", type=str, default="",
+                     help="Language instruction for OpenPI/VLA")
++# LeRobot VLA-specific arguments (used when input_source=vla)
++parser.add_argument("--lerobot_policy_path", type=str, default="",
++                    help="Path to a LeRobot pretrained_model directory")
++parser.add_argument("--lerobot_policy_device", type=str, default="",
++                    help="Inference device for LeRobot policy. Defaults to --device when empty.")
++parser.add_argument("--lerobot_gripper_threshold", type=float, default=0.5,
++                    help="Threshold for binarizing LeRobot grip outputs in vla mode")
+ parser.add_argument("--smplx_model_path", type=str,
+                     default="/home/hcl4070-1/Desktop/taowen/projects/smplx_models",
+                     help="Path to SMPL-X model files")
+@@
+ def _normalize_control_routing(args_cli):
+     """Normalize input_source/gmt_backend aliases back to the legacy action_source."""
+     if args_cli.input_source and args_cli.gmt_backend:
+         route_map = {
+             ("pico_twist2", "twist2"): "twist2_wholebody",
+             ("pico_sonic", "sonic"): "sonic_wholebody",
+-            ("vla", "twist2"): "openpi",
++            ("vla", "twist2"): "twist2_wholebody",
+             ("replay", "twist2"): "twist2_wholebody",
+             ("replay", "sonic"): "sonic_wholebody",
+         }
+         mapped = route_map.get((args_cli.input_source, args_cli.gmt_backend))
+@@
+     elif args_cli.action_source == "twist2_wholebody":
+         args_cli.input_source = args_cli.input_source or "pico_twist2"
+         args_cli.gmt_backend = args_cli.gmt_backend or "twist2"
+     elif args_cli.action_source == "openpi":
+-        args_cli.input_source = args_cli.input_source or "vla"
+         args_cli.gmt_backend = args_cli.gmt_backend or "twist2"
+     elif args_cli.action_source == "replay":
+         args_cli.input_source = args_cli.input_source or "replay"
+         if args_cli.gmt_backend == "twist2":
+             args_cli.action_source = "twist2_wholebody"
+@@
+     print(f"Action source: {args_cli.action_source}")
+     if args_cli.input_source or args_cli.gmt_backend:
+         print(f"Input source: {args_cli.input_source or 'legacy'}")
+         print(f"GMT backend: {args_cli.gmt_backend or 'legacy'}")
++    if args_cli.input_source == "vla":
++        if args_cli.gmt_backend and args_cli.gmt_backend != "twist2":
++            raise ValueError("input_source=vla currently only supports --gmt_backend twist2")
++        if not args_cli.lerobot_policy_path:
++            raise ValueError("--lerobot_policy_path is required when using input_source=vla")
+     if args_cli.action_source == "openpi":
+         if not args_cli.openpi_checkpoint:
+-            raise ValueError("--openpi_checkpoint is required when using action_source=openpi / input_source=vla")
++            raise ValueError("--openpi_checkpoint is required when using action_source=openpi")
+         if not args_cli.language_instruction:
+-            raise ValueError("--language_instruction is required when using action_source=openpi / input_source=vla")
++            raise ValueError("--language_instruction is required when using action_source=openpi")
+         if not args_cli.twist2_model_path:
+             args_cli.twist2_model_path = args_cli.model_path
+     print("=" * 60)
+diff --git a/action_provider/action_provider_wh_twist2.py b/action_provider/action_provider_wh_twist2.py
+index 3333333..4444444 100644
+--- a/action_provider/action_provider_wh_twist2.py
++++ b/action_provider/action_provider_wh_twist2.py
+@@
+         self.enable_inspire = args_cli.enable_inspire_dds
+         self.wh = args_cli.enable_wholebody_dds
+         self._replay_file = getattr(args_cli, "replay_file", "")
+         self._replay_mode = self._normalize_replay_mode(getattr(args_cli, "replay_mode", "inference_replay"))
+         self._replay_loop = bool(getattr(args_cli, "replay_loop", False))
+         self._replay_enabled = bool(self._replay_file)
++        self._input_source = getattr(args_cli, "input_source", "") or ""
++        self._use_lerobot_vla = self._input_source == "vla"
++        self._lerobot_policy = None
++        self._lerobot_preprocessor = None
++        self._lerobot_postprocessor = None
++        self._lerobot_predict_action = None
++        self._lerobot_device = None
++        self._lerobot_gripper_threshold = float(getattr(args_cli, "lerobot_gripper_threshold", 0.5))
+         self.policy_path = self._resolve_policy_path(args_cli.model_path)
+         if (not self._replay_enabled or self._replay_mode != "direct_replay") and not os.path.exists(self.policy_path):
+             raise FileNotFoundError(f"[{self.name}] Policy file not found: {self.policy_path}")
++        if self._use_lerobot_vla and self._replay_enabled:
++            raise ValueError(f"[{self.name}] input_source=vla and replay_file are mutually exclusive")
+         self.env = env
+         self.task_name = args_cli.task  # Store task name for recording
+@@
+         self._twist2_action_hand_right = torch.zeros(1, self._twist2_hand_dim, device=self.env.device,
+                                                      dtype=torch.float32)
+         self._twist2_action_neck = torch.zeros(1, self._twist2_neck_dim, device=self.env.device, dtype=torch.float32)
+         self._twist2_hand_valid = False
++        self._vla_gripper_binary = torch.zeros(1, 2, device=self.env.device, dtype=torch.float32)
+@@
+         self.policy = None
+         if not self._replay_enabled or self._replay_mode != "direct_replay":
+             self.policy = self.load_policy(self.policy_path)
++        if self._use_lerobot_vla:
++            self._setup_lerobot_vla(args_cli)
+@@
+     def _normalize_replay_mode(self, replay_mode: str) -> str:
+         if replay_mode in ("direct", "direct_replay"):
+             return "direct_replay"
+         if replay_mode in ("inference", "inference_replay"):
+             return "inference_replay"
+         raise ValueError(f"[{self.name}] Unsupported replay_mode: {replay_mode}")
++
++    def _setup_lerobot_vla(self, args_cli) -> None:
++        lerobot_policy_path = Path(getattr(args_cli, "lerobot_policy_path", "")).expanduser().resolve()
++        if not lerobot_policy_path.is_dir():
++            raise FileNotFoundError(f"[{self.name}] LeRobot policy directory not found: {lerobot_policy_path}")
++
++        isaaclab_root = Path(project_root) if project_root else Path(__file__).resolve().parents[1]
++        lerobot_src = isaaclab_root.parent / "lerobot" / "src"
++        if not lerobot_src.is_dir():
++            raise FileNotFoundError(f"[{self.name}] LeRobot src directory not found: {lerobot_src}")
++
++        import sys
++
++        if str(lerobot_src) not in sys.path:
++            sys.path.insert(0, str(lerobot_src))
++
++        from lerobot.configs.policies import PreTrainedConfig
++        from lerobot.policies.factory import _reconnect_relative_absolute_steps, get_policy_class
++        from lerobot.processor import PolicyProcessorPipeline
++        from lerobot.utils.constants import (
++            POLICY_POSTPROCESSOR_DEFAULT_NAME,
++            POLICY_PREPROCESSOR_DEFAULT_NAME,
++        )
++        from lerobot.utils.control_utils import predict_action
++
++        device_name = getattr(args_cli, "lerobot_policy_device", "") or getattr(args_cli, "device", "cuda:0")
++        config = PreTrainedConfig.from_pretrained(lerobot_policy_path)
++        config.device = device_name
++        policy_cls = get_policy_class(config.type)
++
++        self._lerobot_policy = policy_cls.from_pretrained(lerobot_policy_path, config=config)
++        self._lerobot_preprocessor = PolicyProcessorPipeline.from_pretrained(
++            lerobot_policy_path,
++            config_filename=f"{POLICY_PREPROCESSOR_DEFAULT_NAME}.json",
++        )
++        self._lerobot_postprocessor = PolicyProcessorPipeline.from_pretrained(
++            lerobot_policy_path,
++            config_filename=f"{POLICY_POSTPROCESSOR_DEFAULT_NAME}.json",
++        )
++        _reconnect_relative_absolute_steps(self._lerobot_preprocessor, self._lerobot_postprocessor)
++
++        self._lerobot_predict_action = predict_action
++        self._lerobot_device = torch.device(device_name)
++        self._lerobot_policy.reset()
++        self._lerobot_preprocessor.reset()
++        self._lerobot_postprocessor.reset()
++
++        print(
++            f"[{self.name}] LeRobot VLA enabled: "
++            f"path={lerobot_policy_path} type={config.type} device={self._lerobot_device}"
++        )
++
++    def _get_front_camera_rgb_for_vla(self) -> np.ndarray:
++        if "front_camera" not in self.env.scene.keys():
++            raise RuntimeError(f"[{self.name}] front_camera not found in scene for LeRobot VLA inference")
++
++        camera = self.env.scene["front_camera"]
++        if "rgb" not in camera.data.output:
++            raise RuntimeError(f"[{self.name}] front_camera has no rgb output for LeRobot VLA inference")
++
++        rgb = camera.data.output["rgb"][0].detach().cpu().numpy()
++        if rgb.ndim != 3:
++            raise RuntimeError(f"[{self.name}] Unexpected front_camera rgb shape: {rgb.shape}")
++        if rgb.shape[-1] == 4:
++            rgb = rgb[..., :3]
++        if rgb.dtype != np.uint8:
++            rgb = np.clip(rgb, 0, 255).astype(np.uint8)
++        return rgb
++
++    def _infer_lerobot_high_level_command(self, obs_proprio: torch.Tensor) -> torch.Tensor:
++        if self._lerobot_policy is None or self._lerobot_predict_action is None:
++            raise RuntimeError(f"[{self.name}] LeRobot VLA requested before initialization")
++
++        observation = {
++            "observation.images.front": self._get_front_camera_rgb_for_vla(),
++            "observation.state": obs_proprio.squeeze(0).detach().cpu().numpy().astype(np.float32),
++        }
++
++        action = self._lerobot_predict_action(
++            observation=observation,
++            policy=self._lerobot_policy,
++            device=self._lerobot_device,
++            preprocessor=self._lerobot_preprocessor,
++            postprocessor=self._lerobot_postprocessor,
++            use_amp=self._lerobot_device.type == "cuda",
++            task=None,
++            robot_type=self.enable_robot,
++        )
++
++        if not isinstance(action, torch.Tensor):
++            action = torch.as_tensor(action)
++        action = action.to(self.env.device, dtype=torch.float32)
++        if action.dim() == 1:
++            action = action.unsqueeze(0)
++        if action.shape[-1] != 37:
++            raise ValueError(f"[{self.name}] Expected LeRobot action dim 37, got {tuple(action.shape)}")
++
++        self._vla_gripper_binary.copy_(torch.clamp(action[:, 35:37], 0.0, 1.0))
++        return action[:, :35]
++
++    def _apply_vla_gripper_command(self, full_action: torch.Tensor) -> bool:
++        if not self._use_lerobot_vla or not self.enable_gripper or not hasattr(self, "_gripper_source_idx_t"):
++            return False
++
++        left_closed = bool(self._vla_gripper_binary[0, 0].item() >= self._lerobot_gripper_threshold)
++        right_closed = bool(self._vla_gripper_binary[0, 1].item() >= self._lerobot_gripper_threshold)
++        left_position = 0.03 if left_closed else -0.02
++        right_position = 0.03 if right_closed else -0.02
++
++        self._gripper_buf.copy_(
++            torch.tensor([right_position, left_position], dtype=torch.float32, device=self.env.device)
++        )
++        gp_vals = self._gripper_buf.index_select(0, self._gripper_source_idx_t)
++        full_action.index_copy_(0, self._gripper_target_idx_t, gp_vals)
++        return True
+@@
+         self._twist2_publish_state(state_body.squeeze(0).tolist(), state_hand_left, state_hand_right, state_neck)
+ 
+-        # TWIST2 mimic from Redis (and hand actions)
+-        action_mimic = self._twist2_fetch_actions()  # [1,35]
+-
+         # Amplify XY velocity to compensate for slower teleop movement
+         # Structure: [xy_vel(2), z_pos(1), roll_pitch(2), yaw_vel(1), joints(29)]
+         # Scale factor: 5.0x makes teleop movement more responsive
+         # Real robot gets ~0.5-0.6x operator speed, so 5x amplification gives ~2.5-3x final speed
+-        velocity_amplification = 1.0
+-        action_mimic[:, 0:2] = action_mimic[:, 0:2] * velocity_amplification  # Amplify XY velocity
+-
+-        # Also amplify yaw angular velocity for consistent turning
+-        action_mimic[:, 5:6] = action_mimic[:, 5:6] * velocity_amplification  # Amplify yaw velocity
+ 
+         # zero ankle velocities (TWIST2 convention)
+         if len(self._twist2_ankle_idx) > 0:
+             dof_vel = dof_vel.clone()
+             dof_vel[:, self._twist2_ankle_idx] = 0.0
+@@
+             ],
+             dim=-1,
+         )  # [1,92]
++
++        if self._use_lerobot_vla:
++            action_mimic = self._infer_lerobot_high_level_command(obs_proprio)  # [1,35]
++        else:
++            action_mimic = self._twist2_fetch_actions()  # [1,35]
++
++        velocity_amplification = 1.0
++        action_mimic[:, 0:2] = action_mimic[:, 0:2] * velocity_amplification
++        action_mimic[:, 5:6] = action_mimic[:, 5:6] * velocity_amplification
+ 
+         obs_full = torch.cat([action_mimic, obs_proprio], dim=-1)  # [1,127]
+@@
+-            hand_from_redis = False
+-            if self.enable_dex3 and self._twist2_hand_valid and hasattr(self, "_left_hand_source_idx_t"):
++            hand_or_gripper_applied = False
++            if self._apply_vla_gripper_command(full_action):
++                hand_or_gripper_applied = True
++            elif self.enable_dex3 and self._twist2_hand_valid and hasattr(self, "_left_hand_source_idx_t"):
+                 self._left_hand_buf.copy_(self._twist2_action_hand_left.squeeze(0))
+                 self._right_hand_buf.copy_(self._twist2_action_hand_right.squeeze(0))
+                 l_vals = self._left_hand_buf.index_select(0, self._left_hand_source_idx_t)
+                 r_vals = self._right_hand_buf.index_select(0, self._right_hand_source_idx_t)
+                 full_action.index_copy_(0, self._left_hand_target_idx_t, l_vals)
+                 full_action.index_copy_(0, self._right_hand_target_idx_t, r_vals)
+-                hand_from_redis = True
++                hand_or_gripper_applied = True
+ 
+-            if not hand_from_redis:
++            if not hand_or_gripper_applied:
+                 if self.gripper_dds and hasattr(self, "_gripper_source_idx_t"):
+                     gripper_cmd = self.gripper_dds.get_gripper_command()
+                     if gripper_cmd:
+                         left_gripper_cmd = gripper_cmd.get('left_gripper_cmd', {})
+@@
+             self._twist2_action_hand_left.zero_()
+             self._twist2_action_hand_right.zero_()
+             self._twist2_action_neck.zero_()
++            self._vla_gripper_binary.zero_()
+ 
+             # Reset hand validity flag
+             self._twist2_hand_valid = False
+@@
+             self._replay_joint_mae_count = 0
+             self._replay_object_err_sums = {}
+             self._replay_object_err_counts = {}
++            if self._use_lerobot_vla:
++                if self._lerobot_policy is not None:
++                    self._lerobot_policy.reset()
++                if self._lerobot_preprocessor is not None:
++                    self._lerobot_preprocessor.reset()
++                if self._lerobot_postprocessor is not None:
++                    self._lerobot_postprocessor.reset()
+ 
+             print(f"[{self.name}] ✅ Internal buffers reset successfully")
+ 
+         except Exception as e:
+diff --git a/run_vla.sh b/run_vla.sh
+index 5555555..6666666 100755
+--- a/run_vla.sh
++++ b/run_vla.sh
+@@
+-#!/usr/bin/env bash
+-
+-set -e
+-
+-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+-
+-OPENPI_CHECKPOINT="${OPENPI_CHECKPOINT:-}"
+-LANGUAGE_INSTRUCTION="${LANGUAGE_INSTRUCTION:-}"
+-TWIST2_MODEL_PATH="${TWIST2_MODEL_PATH:-${SCRIPT_DIR}/../TWIST2/assets/ckpts/twist2_1017_20k.onnx}"
+-TASK_NAME="${TASK_NAME:-Isaac-Move-Football-G129-Dex3-Wholebody}"
+-ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/twist2_default.yaml}"
+-
+-if [[ -z "${OPENPI_CHECKPOINT}" ]]; then
+-  echo "OPENPI_CHECKPOINT is required"
+-  exit 1
+-fi
+-
+-if [[ -z "${LANGUAGE_INSTRUCTION}" ]]; then
+-  echo "LANGUAGE_INSTRUCTION is required"
+-  exit 1
+-fi
+-
+-cd "${SCRIPT_DIR}"
+-python sim_main.py \
+-  --input_source vla \
+-  --gmt_backend twist2 \
+-  --env_config_yaml "${ENV_CONFIG_YAML}" \
+-  --task "${TASK_NAME}" \
+-  --robot_type g129 \
+-  --enable_dex3_dds \
+-  --openpi_checkpoint "${OPENPI_CHECKPOINT}" \
+-  --language_instruction "${LANGUAGE_INSTRUCTION}" \
+-  --twist2_model_path "${TWIST2_MODEL_PATH}" \
+-  "$@"
++#!/usr/bin/env bash
++
++set -euo pipefail
++
++SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++
++LEROBOT_ROOT="${LEROBOT_ROOT:-${SCRIPT_DIR}/../lerobot}"
++LEROBOT_POLICY_PATH="${LEROBOT_POLICY_PATH:-}"
++LEROBOT_POLICY_DEVICE="${LEROBOT_POLICY_DEVICE:-cuda:0}"
++TWIST2_MODEL_PATH="${TWIST2_MODEL_PATH:-${SCRIPT_DIR}/../TWIST2/assets/ckpts/twist2_1017_20k.onnx}"
++TASK_NAME="${TASK_NAME:-Isaac-Move-Football-G129-Dex3-Wholebody}"
++ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/twist2_default.yaml}"
++
++if [[ -z "${LEROBOT_POLICY_PATH}" ]]; then
++  echo "LEROBOT_POLICY_PATH is required"
++  echo "Example:"
++  echo "  LEROBOT_POLICY_PATH=/abs/path/to/checkpoints/last/pretrained_model bash run_vla.sh"
++  exit 1
++fi
++
++export PYTHONPATH="${LEROBOT_ROOT}/src:${PYTHONPATH:-}"
++
++cd "${SCRIPT_DIR}"
++python sim_main.py \
++  --input_source vla \
++  --gmt_backend twist2 \
++  --env_config_yaml "${ENV_CONFIG_YAML}" \
++  --task "${TASK_NAME}" \
++  --robot_type g129 \
++  --model_path "${TWIST2_MODEL_PATH}" \
++  --lerobot_policy_path "${LEROBOT_POLICY_PATH}" \
++  --lerobot_policy_device "${LEROBOT_POLICY_DEVICE}" \
++  "$@"

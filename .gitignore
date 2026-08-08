@@ -1,0 +1,26 @@
+/HumanoidArena/**/asset/
+/HumanoidArena/**/assets/
+/log/
+/data/cache/
+/scripts/logs/
+
+# Local caches and generated artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.hypothesis/
+.mypy_cache/
+.ruff_cache/
+.DS_Store
+.idea/
+.vscode/
+.codex/
+.codex-artifacts/
+
+# Model/runtime outputs should not be committed to the source repository.
+wandb/
+outputs/
+results/
+eval_results/
+checkpoints/
+*.ckpt

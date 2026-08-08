@@ -1,0 +1,74 @@
+{
+  "dataset_root": "/ai/Yichi/taowen/dataset",
+  "lerobot_root": "/ai/Yichi/taowen/HumanoidArena/lerobot",
+  "train_entrypoint": "src/lerobot/scripts/lerobot_train.py",
+  "python_bin": "python",
+  "pythonpath": "src",
+  "results_root": "/ai/Yichi/taowen/HumanoidArena/lerobot/results/humanoidarena_batch_train",
+  "scheduler_log_root": "/ai/Yichi/taowen/HumanoidArena/lerobot/results/humanoidarena_batch_train/scheduler_logs",
+  "model_config_dir": "/ai/Yichi/taowen/HumanoidArena/lerobot/configs/humanoidarena_batch_train",
+  "model_order": [
+    "pi05",
+    "mtp",
+    "dp",
+    "act"
+  ],
+  "poll_interval_seconds": 15,
+  "torch_home": "/ai/Yichi/taowen/ckpts/checkpoints/resnet",
+  "env": {
+    "HF_HUB_OFFLINE": "0"
+  },
+  "ignore_task_names": [
+    ".cache"
+  ],
+  "dataset_kind_rules": [
+    {
+      "token": "twist2",
+      "kind": "twist2"
+    },
+    {
+      "token": "sonic",
+      "kind": "sonic"
+    },
+    {
+      "token": "merged",
+      "kind": "merge"
+    },
+    {
+      "token": "merge",
+      "kind": "merge"
+    }
+  ],
+  "completed_search_roots": [
+    "/ai/Yichi/taowen/HumanoidArena/lerobot/results",
+    "/mnt/workspace/users/xujunzhe/yunhengwang/lerobot/lerobot/results"
+  ],
+  "wandb_api_key": "2afe2846a028d2bc651361a4fbdf85cfbd9d9eab",
+  "wandb_project": "HumanoidArena",
+  "single_gpu_capacity": 1,
+  "pi05_gpu_groups": [
+    [
+      0,
+      1
+    ],
+    [
+      2,
+      3
+    ]
+  ],
+  "pi05_model_aliases": [
+    "pi05"
+  ],
+  "single_gpu_model_aliases": [
+    "mtp",
+    "dp",
+    "act"
+  ],
+  "single_gpu_capacity_by_gpu": {
+    "4": 2,
+    "5": 2,
+    "6": 2,
+    "7": 2
+  },
+  "resume_incomplete_jobs": false
+}

@@ -1,0 +1,27 @@
+name: livingroom_sitsofa_sonic
+description: SONIC env config for Isaac-Move-Sit-Sofa-G129-Dex3-Wholebody.
+task_name: Isaac-Move-Sit-Sofa-G129-Dex3-Wholebody
+backend: sonic
+
+overrides:
+  sim:
+    dt: 0.005
+  decimation: 4
+  object_reset_seed_source: time
+  deterministic_object_resets:
+    - record_name: carton_obstacle_01
+      scene_keys: [carton_obstacle_01, CartonObstacle01]
+      pose_range:
+        x: [-2.1, -1.7]
+        y: [0.6, 0.8]
+        z: [0.1, 0.1]
+        yaw: [0, 0]
+      zero_velocity_on_reset: true
+    - record_name: carton_obstacle_02
+      scene_keys: [carton_obstacle_02, CartonObstacle02]
+      pose_range:
+        x: [-1.7, -2.3]
+        y: [-0.1, 0.4]
+        z: [0.1, 0.1]
+        yaw: [0, 0]
+      zero_velocity_on_reset: true

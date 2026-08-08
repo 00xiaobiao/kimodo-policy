@@ -1,0 +1,40 @@
+name: boxing_sonic_test
+description: Test-only SONIC eval config for Isaac-Move-Boxing-Bag-G129-Dex3-Wholebody.
+task_name: Isaac-Move-Boxing-Bag-G129-Dex3-Wholebody
+backend: sonic
+
+test_defaults:
+  seeds: [0, 1, 2]
+  repeats_per_seed: 20
+  persistent_sim: true
+  episode_seed_formula: sha256(task_name|group_seed|repeat_idx)_positive_int32
+
+overrides:
+  wait_for_textures: false
+  sim:
+    dt: 0.005
+  decimation: 4
+  object_reset_seed_source: env_seed
+  boxing_target_randomization:
+    enabled: true
+    record_name: boxing_target
+    cylinder_selection: uniform
+    cylinders:
+      - name: bag_1
+        center: [-0.97, -3.7, 0.8]
+        radius: 0.15
+        height_range: [0.65, 0.95]
+        azimuth_range: [-3.141592653589793, 3.141592653589793]
+        yaw_range: [0.0, 0.0]
+      - name: bag_2
+        center: [-3.0, -3.7, 0.8]
+        radius: 0.15
+        height_range: [0.65, 0.95]
+        azimuth_range: [-3.141592653589793, 3.141592653589793]
+        yaw_range: [0.0, 0.0]
+    # Legacy single-cylinder fields kept for compatibility with older code/config.
+    center: [-0.97, -3.7, 0.8]
+    radius: 0.15
+    height_range: [0.73, 0.87]
+    azimuth_range: [-3.141592653589793, 3.141592653589793]
+    yaw_range: [0.0, 0.0]

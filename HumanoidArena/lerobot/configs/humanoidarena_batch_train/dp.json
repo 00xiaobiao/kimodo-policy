@@ -1,0 +1,55 @@
+{
+  "alias": "dp",
+  "launcher": "python",
+  "priority": 20,
+  "args": {
+    "dataset.image_transforms.enable": true,
+    "policy.type": "diffusion",
+    "policy.vision_backbone": "resnet18",
+    "policy.pretrained_backbone_weights": "ResNet18_Weights.IMAGENET1K_V1",
+    "policy.use_group_norm": false,
+    "policy.device": "cuda",
+    "policy.n_obs_steps": 1,
+    "policy.horizon": 24,
+    "policy.n_action_steps": 20,
+    "policy.optimizer_lr": 0.0001,
+    "policy.push_to_hub": false,
+    "wandb.enable": true,
+    "wandb.mode": "online",
+    "seed": 42,
+    "batch_size": 64,
+    "steps": 100000,
+    "dataset.image_transforms.max_num_transforms": 2,
+    "dataset.image_transforms.random_order": false,
+    "dataset.image_transforms.tfs": {
+      "resize": {
+        "weight": 1.0,
+        "type": "Resize",
+        "kwargs": {
+          "size": [
+            168,
+            224
+          ]
+        }
+      },
+      "pad": {
+        "weight": 1.0,
+        "type": "Pad",
+        "kwargs": {
+          "padding": [
+            0,
+            28,
+            0,
+            28
+          ],
+          "fill": 0
+        }
+      }
+    },
+    "policy.resize_shape": [
+      224,
+      224
+    ],
+    "policy.crop_shape": null
+  }
+}

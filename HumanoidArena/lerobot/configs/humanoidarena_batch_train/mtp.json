@@ -1,0 +1,55 @@
+{
+  "alias": "mtp",
+  "launcher": "python",
+  "priority": 30,
+  "args": {
+    "dataset.image_transforms.enable": true,
+    "policy.type": "multi_task_dit",
+    "policy.objective": "flow_matching",
+    "policy.vision_encoder_name": "/ai/Yichi/taowen/ckpts/checkpoints/clip-vit-base-patch16",
+    "policy.text_encoder_name": "/ai/Yichi/taowen/ckpts/checkpoints/clip-vit-base-patch16",
+    "policy.device": "cuda",
+    "policy.n_obs_steps": 1,
+    "policy.horizon": 40,
+    "policy.n_action_steps": 20,
+    "policy.image_resize_shape": null,
+    "policy.image_crop_shape": null,
+    "policy.optimizer_lr": 2e-05,
+    "policy.push_to_hub": false,
+    "rename_map": {
+      "observation.images.front": "observation.images.image"
+    },
+    "wandb.enable": true,
+    "wandb.mode": "online",
+    "seed": 42,
+    "batch_size": 64,
+    "steps": 100000,
+    "dataset.image_transforms.max_num_transforms": 2,
+    "dataset.image_transforms.random_order": false,
+    "dataset.image_transforms.tfs": {
+      "resize": {
+        "weight": 1.0,
+        "type": "Resize",
+        "kwargs": {
+          "size": [
+            168,
+            224
+          ]
+        }
+      },
+      "pad": {
+        "weight": 1.0,
+        "type": "Pad",
+        "kwargs": {
+          "padding": [
+            0,
+            28,
+            0,
+            28
+          ],
+          "fill": 0
+        }
+      }
+    }
+  }
+}

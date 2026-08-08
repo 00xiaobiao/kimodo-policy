@@ -1,0 +1,17 @@
+name: football_single_twist2_vla
+description: VLA evaluation env config for Isaac-Move-Football-Single-G129-Dex3-Wholebody.
+task_name: Isaac-Move-Football-Single-G129-Dex3-Wholebody
+backend: twist2_vla
+
+overrides:
+  sim:
+    dt: 0.001
+  decimation: 20
+  object_reset_seed_source: env_seed
+  deterministic_object_resets:
+    - record_name: football
+      scene_keys: [object, football]
+      pose_range:
+        x: [-1.2, 1.2]
+        y: [-1.2, 1.2]
+      zero_velocity_on_reset: true

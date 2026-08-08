@@ -1,0 +1,27 @@
+name: pickplace_box_sonic
+description: SONIC env config for Isaac-Move-PickPlace-Box-G129-Dex3-Wholedoby.
+task_name: Isaac-Move-PickPlace-Box-G129-Dex3-Wholedoby
+backend: sonic
+
+overrides:
+  sim:
+    dt: 0.005
+  decimation: 4
+  object_reset_seed_source: time
+  deterministic_object_resets:
+    - record_name: box
+      scene_keys: [box, Box]
+      pose_range:
+        x: [-0.58, -0.40]
+        y: [-5.63, -3.92]
+        z: [0.75, 0.75]
+        yaw: [-0.785398, 0.785398]
+      zero_velocity_on_reset: true
+    - record_name: shelf
+      prim_paths: ["/World/envs/env_{env_idx}/Shelf"]
+      pose_range:
+        x: [-0.2, 1.2]
+        y: [-3.3, -2.2]
+        z: [0.0, 0.0]
+        yaw: [-0.261799, 0.261799]
+      zero_velocity_on_reset: true

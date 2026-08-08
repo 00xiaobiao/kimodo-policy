@@ -1,0 +1,90 @@
+name: vision_navi_twist2_test
+description: Test-only TWIST2 eval config for Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody.
+task_name: Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody
+backend: twist2
+
+test_defaults:
+  seeds: [0, 1, 2]
+  repeats_per_seed: 20
+  persistent_sim: true
+  episode_seed_formula: sha256(task_name|group_seed|repeat_idx)_positive_int32
+
+  vision_randomization:
+    enabled: true
+    prim_path: "/World/light"
+    rotation:
+      yaw_deg: [0, 0]
+      pitch_deg: [-20, 20]
+      roll_deg: [-20, 20]
+    intensity_range: [3000, 7000]
+    color_range:
+      r: [0.65, 0.85]
+      g: [0.65, 0.85]
+      b: [0.65, 0.85]
+
+overrides:
+  scene.room_walls.spawn.usd_path: "${PROJECT_ROOT}/assets/objects/small_warehouse/small_warehouse_vision_navigation/small_warehouse_digital_twin_vision_validation.usd"
+  wait_for_textures: false
+  sim:
+    dt: 0.001
+  decimation: 20
+  object_reset_seed_source: env_seed
+  target_sign_startup_randomization_enabled: true
+  target_sign_reset_randomization_enabled: true
+  target_sign_static_collision_patch_enabled: true
+  target_sign_debug_pose_logging: true
+  obstacle_01_a_layout_x_range: [-0.5, -0.4]
+  obstacle_01_b_layout_x_range: [-2.2, -1.7]
+  obstacle_01_c_layout_x_range: [-4.6, -4.5]
+  obstacle_02_a_layout_x_range: [-1.8, -0.7]
+  obstacle_02_b_layout_x_range: [-5.2, -4.0]
+  obstacle_02_c_layout_x_range: [-3.1, -2.0]
+  obstacle_layout_y_range: [-2.5, -1.2]
+  obstacle_layout_yaw_range: [-0.785398, 0.785398]
+  obstacle_01_a_layout_z: 0.16
+  obstacle_01_b_layout_z: 0.56
+  obstacle_01_c_layout_z: 1.06
+  obstacle_02_a_layout_z: 1.56
+  obstacle_02_b_layout_z: 1.3
+  obstacle_02_c_layout_z: 1.8
+  deterministic_object_resets:
+    - record_name: target_sign
+      prim_paths: ["/World/envs/env_{env_idx}/TargetSign"]
+      allow_prroot_fallback: false
+      prim_pose_write_mode: components
+      pose_range:
+        x: [-3.0, -1.5]
+        y: [-0.12, 0.8]
+        z: [0.0, 0.0]
+        yaw: [-0.3, 0.3]
+      zero_velocity_on_reset: true
+    - record_name: obstacle_01_a
+      prim_paths: ["/World/envs/env_{env_idx}/Obstacle01_A"]
+      allow_prroot_fallback: false
+      prim_pose_write_mode: local_matrix
+      zero_velocity_on_reset: true
+    - record_name: obstacle_01_b
+      prim_paths: ["/World/envs/env_{env_idx}/Obstacle01_B"]
+      allow_prroot_fallback: false
+      prim_pose_write_mode: local_matrix
+      zero_velocity_on_reset: true
+    - record_name: obstacle_01_c
+      prim_paths: ["/World/envs/env_{env_idx}/Obstacle01_C"]
+      allow_prroot_fallback: false
+      prim_pose_write_mode: local_matrix
+      zero_velocity_on_reset: true
+    - record_name: obstacle_02_a
+      prim_paths: ["/World/envs/env_{env_idx}/Obstacle02_A"]
+      allow_prroot_fallback: false
+      prim_pose_write_mode: local_matrix
+      zero_velocity_on_reset: true
+    - record_name: obstacle_02_b
+      prim_paths: ["/World/envs/env_{env_idx}/Obstacle02_B"]
+      allow_prroot_fallback: false
+      prim_pose_write_mode: local_matrix
+      zero_velocity_on_reset: true
+    - record_name: obstacle_02_c
+      prim_paths: ["/World/envs/env_{env_idx}/Obstacle02_C"]
+      allow_prroot_fallback: false
+      prim_pose_write_mode: local_matrix
+      zero_velocity_on_reset: true

@@ -1,0 +1,19 @@
+name: opendoor_sonic
+description: SONIC env config for Isaac-Move-Open-Door-G129-Dex3-Wholebody.
+task_name: Isaac-Move-Open-Door-G129-Dex3-Wholebody
+backend: sonic
+
+overrides:
+  sim:
+    dt: 0.005
+  decimation: 4
+  object_reset_seed_source: time
+  deterministic_object_resets:
+    - record_name: door
+      prim_paths: ["/World/envs/env_{env_idx}/Door"]
+      prim_pose_write_mode: local_matrix
+      pose_range:
+        x: [-0.754, 0.55]
+        y: [-0.8, 0.1]
+        z: [0, 0]
+      zero_velocity_on_reset: true

@@ -1,0 +1,13 @@
+  python sim_main.py \
+    --device cpu \
+    --enable_cameras \
+    --task Isaac-Move-Cylinder-G129-Dex1-Wholebody \
+    --robot_type g129 \
+    --enable_dex1_dds \
+    --image_transport xrobot \
+    --image_xrobot_host 172.20.10.2 \
+    --image_xrobot_port 12345 \
+    --image_xrobot_width 2160 \
+    --image_xrobot_height 810 \
+    --image_xrobot_bitrate 20971520 \
+    --image_fps 60

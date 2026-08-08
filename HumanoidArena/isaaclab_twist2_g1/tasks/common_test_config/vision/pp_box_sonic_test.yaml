@@ -1,0 +1,48 @@
+name: pp_box_sonic_test
+description: Test-only SONIC eval config for Isaac-Move-PickPlace-Box-G129-Dex3-Wholedoby.
+task_name: Isaac-Move-PickPlace-Box-G129-Dex3-Wholedoby
+backend: sonic
+
+test_defaults:
+  seeds: [0, 1, 2]
+  repeats_per_seed: 20
+  persistent_sim: true
+  episode_seed_formula: sha256(task_name|group_seed|repeat_idx)_positive_int32
+
+  vision_randomization:
+    enabled: true
+    prim_path: "/World/light"
+    rotation:
+      yaw_deg: [0, 0]
+      pitch_deg: [-20, 20]
+      roll_deg: [-20, 20]
+    intensity_range: [3000, 7000]
+    color_range:
+      r: [0.65, 0.85]
+      g: [0.65, 0.85]
+      b: [0.65, 0.85]
+
+overrides:
+  scene.room_walls.spawn.usd_path: "${PROJECT_ROOT}/assets/objects/small_warehouse/small_warehouse_box/small_warehouse_box_vision.usd"
+  wait_for_textures: false
+  sim:
+    dt: 0.005
+  decimation: 4
+  object_reset_seed_source: env_seed
+  deterministic_object_resets:
+    - record_name: box
+      scene_keys: [box, Box]
+      pose_range:
+        x: [-0.58, -0.40]
+        y: [-5.63, -3.92]
+        z: [0.75, 0.75]
+        yaw: [-0.785398, 0.785398]
+      zero_velocity_on_reset: true
+    - record_name: shelf
+      prim_paths: ["/World/envs/env_{env_idx}/Shelf"]
+      pose_range:
+        x: [-0.2, 1.2]
+        y: [-3.3, -2.2]
+        z: [0.0, 0.0]
+        yaw: [-0.261799, 0.261799]
+      zero_velocity_on_reset: true

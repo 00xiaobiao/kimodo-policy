@@ -1,0 +1,17 @@
+name: football_single_sonic
+description: SONIC env config for Isaac-Move-Football-Single-G129-Dex3-Wholebody.
+task_name: Isaac-Move-Football-Single-G129-Dex3-Wholebody
+backend: sonic
+
+overrides:
+  sim:
+    dt: 0.005
+  decimation: 4
+  object_reset_seed_source: time
+  deterministic_object_resets:
+    - record_name: football
+      scene_keys: [object, football]
+      pose_range:
+        x: [-1.2, 1.2]
+        y: [-1.2, 1.2]
+      zero_velocity_on_reset: true
