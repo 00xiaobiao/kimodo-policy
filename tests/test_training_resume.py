@@ -1,6 +1,8 @@
 import tempfile
 import unittest
 import random
+import json
+import math
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -11,13 +13,17 @@ from torch import nn
 from torch.utils.data import BatchSampler
 from torch.optim.lr_scheduler import LambdaLR
 from accelerate.data_loader import BatchSamplerShard
+from omegaconf import OmegaConf
 
 from train import (
     ResumableOrdinalSampler,
     _capture_rng_state,
+    _gradient_clip_statistics,
     _load_text_embedding_cache,
     _load_rank_rng_state,
+    _load_model_initialization_checkpoint,
     _load_training_checkpoint,
+    _parse_args,
     _process_seed,
     _restore_rng_state,
     _rng_state_path,
@@ -25,6 +31,7 @@ from train import (
     _save_rank_rng_state,
     _save_task_text_embedding,
     _task_text_embedding_cache_path,
+    _validate_init_checkpoint_config,
     _worker_seed,
     build_dataloader,
 )
@@ -86,6 +93,28 @@ class TrainingResumeTest(unittest.TestCase):
                 torch.rand(4, device="cuda"), expected_cuda, rtol=0, atol=0
             )
 
+    def test_gradient_clip_statistics_reports_preclip_norm_and_scale(self):
+        self.assertEqual(
+            _gradient_clip_statistics(torch.tensor(0.25), 0.5),
+            (0.25, 0.0, 1.0),
+        )
+        norm, was_clipped, scale = _gradient_clip_statistics(
+            torch.tensor(1.0), 0.5
+        )
+        self.assertEqual(norm, 1.0)
+        self.assertEqual(was_clipped, 1.0)
+        self.assertAlmostEqual(scale, 0.5)
+
+    def test_gradient_clip_statistics_handles_nonfinite_norm(self):
+        norm, was_clipped, scale = _gradient_clip_statistics(float("inf"), 0.5)
+        self.assertTrue(math.isinf(norm))
+        self.assertEqual(was_clipped, 1.0)
+        self.assertEqual(scale, 0.0)
+
+    def test_gradient_clip_statistics_rejects_invalid_threshold(self):
+        with self.assertRaisesRegex(ValueError, "finite and positive"):
+            _gradient_clip_statistics(0.2, 0.0)
+
     def test_per_rank_rng_file_round_trip_and_validation(self):
         with tempfile.TemporaryDirectory() as directory:
             _save_rank_rng_state(directory, rank=2, world_size=4)
@@ -136,6 +165,112 @@ class TrainingResumeTest(unittest.TestCase):
                     str(checkpoint_path),
                     expected_world_size=2,
                 )
+
+    def test_init_checkpoint_loads_only_model_weights_and_returns_lineage(self):
+        torch.manual_seed(7)
+        source_model = _TinyTrainableModel()
+        with torch.no_grad():
+            source_model.trainable.weight.fill_(1.25)
+            source_model.trainable.bias.fill_(-0.75)
+
+        torch.manual_seed(19)
+        target_model = _TinyTrainableModel()
+        target_frozen_state = {
+            name: parameter.detach().clone()
+            for name, parameter in target_model.frozen.named_parameters()
+        }
+        optimizer = torch.optim.AdamW(target_model.trainable.parameters(), lr=0.123)
+        scheduler = LambdaLR(optimizer, lambda step: 0.9 ** step)
+        optimizer_before = optimizer.state_dict()
+        scheduler_before = scheduler.state_dict()
+
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint_path = Path(directory) / "checkpoint_123"
+            checkpoint_path.mkdir()
+            torch.save(
+                {
+                    "global_step": 123,
+                    "model": {
+                        f"_orig_mod.{name}": parameter.detach().clone()
+                        for name, parameter in source_model.named_parameters()
+                        if parameter.requires_grad
+                    },
+                    "optimizer": {"must_not": "be loaded"},
+                    "scheduler": {"must_not": "be loaded"},
+                    "world_size": 4,
+                },
+                checkpoint_path / "training_state.pt",
+            )
+            (checkpoint_path / "config.json").write_text(
+                json.dumps(
+                    {
+                        "initialization": {
+                            "mode": "init_checkpoint",
+                            "source_checkpoint": "/earlier/checkpoint_10",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            metadata = _load_model_initialization_checkpoint(
+                target_model, str(checkpoint_path)
+            )
+
+        for name, parameter in target_model.trainable.named_parameters():
+            torch.testing.assert_close(
+                parameter, dict(source_model.trainable.named_parameters())[name]
+            )
+        for name, parameter in target_model.frozen.named_parameters():
+            torch.testing.assert_close(parameter, target_frozen_state[name])
+        self.assertEqual(optimizer.state_dict(), optimizer_before)
+        self.assertEqual(scheduler.state_dict(), scheduler_before)
+        self.assertEqual(metadata["source_global_step"], 123)
+        self.assertEqual(metadata["source_world_size"], 4)
+        self.assertEqual(
+            metadata["source_initialization"]["source_checkpoint"],
+            "/earlier/checkpoint_10",
+        )
+
+    def test_init_checkpoint_config_allows_new_data_and_optimizer(self):
+        project_root = Path(__file__).resolve().parents[1]
+        source_config = OmegaConf.load(project_root / "train.yaml")
+        current_config = OmegaConf.create(
+            OmegaConf.to_container(source_config, resolve=True)
+        )
+        source_config.main.dataset_selection = {
+            "UnifoLM_WBT_Dataset": {"tasks": ["*"]}
+        }
+        current_config.main.dataset_selection = {
+            "HumanoidArena": {"merged": "all_16_refpose_v3_1"}
+        }
+        source_config.main.max_steps = 100000
+        current_config.main.max_steps = 200000
+        source_config.training.optimizer.control_backbone_lr = 3.0e-5
+        current_config.training.optimizer.control_backbone_lr = 1.0e-5
+
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint_path = Path(directory)
+            (checkpoint_path / "config.json").write_text(
+                json.dumps(OmegaConf.to_container(source_config, resolve=True)),
+                encoding="utf-8",
+            )
+
+            _validate_init_checkpoint_config(current_config, str(checkpoint_path))
+            current_config.model.controlnet_num_layers += 1
+            with self.assertRaisesRegex(ValueError, "controlnet_num_layers"):
+                _validate_init_checkpoint_config(current_config, str(checkpoint_path))
+
+    def test_resume_and_init_checkpoint_cli_are_mutually_exclusive(self):
+        with self.assertRaises(SystemExit):
+            _parse_args(
+                [
+                    "--resume",
+                    "/tmp/resume",
+                    "--init-checkpoint",
+                    "/tmp/init",
+                ]
+            )
 
     def test_checkpoint_rejects_inconsistent_sample_ordinal(self):
         model = _TinyTrainableModel()

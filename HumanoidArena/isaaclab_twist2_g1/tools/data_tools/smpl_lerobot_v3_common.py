@@ -438,9 +438,9 @@ def build_sonic_rotlocal_v3_actions(
             target_world_delta = rotate_world_vector_wxyz(source_heading_anchor_inv, source_world_delta)
             root_ref_base_local_xy_delta = rotate_world_delta_to_target_base_local_xy(target_quat, target_world_delta)
         actions[i] = build_vla_rotlocal_v3_action(
-            root_ref_base_local_xy_delta=root_ref_base_local_xy_delta,
+            root_target_heading_local_xy_delta=root_ref_base_local_xy_delta,
             root_z=body_pos[i, 2],
-            root_ref_rot6d=quat_to_rot6d_wxyz(target_quat).reshape(6),
+            root_current_local_target_rot6d=quat_to_rot6d_wxyz(target_quat).reshape(6),
             joint_pos_canonical_29=joint_targets[i],
             hand_binary=np.array([left_binary[i], right_binary[i]], dtype=np.float32),
         )
@@ -477,9 +477,9 @@ def build_twist2_rotlocal_v3_actions(
             else xy_vel_local.astype(np.float32, copy=False) * float(control_dt)
         )
         actions[i] = build_vla_rotlocal_v3_action(
-            root_ref_base_local_xy_delta=root_ref_base_local_xy_delta,
+            root_target_heading_local_xy_delta=root_ref_base_local_xy_delta,
             root_z=root_z,
-            root_ref_rot6d=quat_to_rot6d_wxyz(target_quat).reshape(6),
+            root_current_local_target_rot6d=quat_to_rot6d_wxyz(target_quat).reshape(6),
             joint_pos_canonical_29=reorder_twist2_to_canonical_29(mimic[i, 6:35]),
             hand_binary=np.array([left_binary[i], right_binary[i]], dtype=np.float32),
         )

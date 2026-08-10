@@ -5,6 +5,7 @@ from collections import OrderedDict
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
@@ -21,8 +22,13 @@ from data.multisource_dataset import (
     SOURCE_HUMANOID_EVERYDAY,
     SOURCE_UNIFOLM,
     _canonicalize_kimodo_window_translation,
+    _episode_local_root_from_odometry,
+    _hiw_hand_from_events,
+    _hiw_joint_discontinuity,
+    _hiw_root_from_wbc,
     _humanoid_everyday_instruction,
     _stereo_crop,
+    _unifolm_motion_discontinuity,
     _unifolm_root_discontinuity,
     _validate_named_feature,
 )
@@ -68,6 +74,92 @@ def _episode(
 
 
 class MultiSourceDatasetTest(unittest.TestCase):
+    def test_hiw_root_integrates_base_twist_not_torso_rpy(self):
+        wbc = np.zeros((4, 23), dtype=np.float32)
+        wbc[:, 6] = 0.74
+        wbc[:, 3:6] = np.asarray([1.2, 0.8, -0.4], dtype=np.float32)
+        wbc[0, 0] = 1.0
+        wbc[1, 2] = np.pi / 2
+        wbc[2, 0] = 1.0
+
+        positions, rotations = _hiw_root_from_wbc(wbc, fps=1.0)
+
+        np.testing.assert_allclose(
+            positions,
+            np.asarray(
+                [
+                    [0.0, 0.0, 0.74],
+                    [1.0, 0.0, 0.74],
+                    [1.0, 0.0, 0.74],
+                    [1.0, 1.0, 0.74],
+                ],
+                dtype=np.float32,
+            ),
+            atol=1e-6,
+        )
+        torch.testing.assert_close(rotations[0], torch.eye(3))
+        torch.testing.assert_close(
+            rotations[-1],
+            torch.tensor(
+                [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
+            ),
+            rtol=1e-6,
+            atol=1e-6,
+        )
+
+    def test_hiw_root_uses_exact_constant_twist_integration(self):
+        wbc = np.zeros((2, 23), dtype=np.float32)
+        wbc[:, 6] = 0.7
+        wbc[0, 0] = 1.0
+        wbc[0, 2] = np.pi / 2
+
+        positions, _ = _hiw_root_from_wbc(wbc, fps=1.0)
+
+        expected = 2.0 / np.pi
+        np.testing.assert_allclose(
+            positions[1], np.asarray([expected, expected, 0.7]), atol=1e-6
+        )
+
+    def test_hiw_hand_events_are_latched_closed_states(self):
+        wbc = np.zeros((7, 23), dtype=np.float32)
+        wbc[:, [19, 21]] = 10.0
+        wbc[2, 19] = 0.0
+        wbc[3, 19] = 10.0
+        wbc[4, 20] = 1.0
+        wbc[5, 20] = 0.0
+        wbc[1, 21] = 0.0
+        wbc[2, 21] = 10.0
+        wbc[5, 22] = 1.0
+
+        hand = _hiw_hand_from_events(wbc)
+
+        np.testing.assert_array_equal(
+            hand[:, 0], np.asarray([0, 0, 1, 1, 0, 0, 0], dtype=np.float32)
+        )
+        np.testing.assert_array_equal(
+            hand[:, 1], np.asarray([0, 1, 1, 1, 1, 0, 0], dtype=np.float32)
+        )
+
+    def test_hiw_initial_joint_reset_is_logically_trimmed(self):
+        joint_q = np.zeros((6, 29), dtype=np.float32)
+        joint_q[0, 4] = 0.8
+
+        frame_offset, issue = _hiw_joint_discontinuity(joint_q)
+
+        self.assertEqual(frame_offset, 1)
+        self.assertIsNone(issue)
+
+    def test_hiw_internal_joint_jump_is_rejected(self):
+        joint_q = np.zeros((6, 29), dtype=np.float32)
+        joint_q[3:, 4] = 0.8
+
+        frame_offset, issue = _hiw_joint_discontinuity(joint_q)
+
+        self.assertEqual(frame_offset, 0)
+        self.assertIsNotNone(issue)
+        self.assertEqual(issue["transition_frame"], 2)
+        self.assertAlmostEqual(issue["joint_jump"], 0.8)
+
     def test_hiw_named_schema_accepts_released_joint_name_typo(self):
         names = list(HIW_G1_JOINT_FEATURE_NAMES_29)
         names[21] = "kLeftWristyaw.q"
@@ -127,6 +219,46 @@ class MultiSourceDatasetTest(unittest.TestCase):
         self.assertAlmostEqual(internal_max, 1.0)
         self.assertEqual(internal_frame, 2)
 
+    def test_unifolm_initial_joint_reset_is_logically_trimmed(self):
+        current = np.zeros((6, 36), dtype=np.float32)
+        desired = np.zeros((6, 36), dtype=np.float32)
+        current[:, 3] = 1.0
+        desired[:, 3] = 1.0
+        current[0, 7] = 1.2
+
+        frame_offset, issue = _unifolm_motion_discontinuity(current, desired)
+
+        self.assertEqual(frame_offset, 1)
+        self.assertIsNone(issue)
+
+    def test_unifolm_initial_rotation_reset_is_logically_trimmed(self):
+        current = np.zeros((6, 36), dtype=np.float32)
+        desired = np.zeros((6, 36), dtype=np.float32)
+        current[:, 3] = 1.0
+        desired[:, 3] = 1.0
+        current[0, 3:7] = np.asarray(
+            [np.sqrt(0.5), 0.0, 0.0, np.sqrt(0.5)], dtype=np.float32
+        )
+
+        frame_offset, issue = _unifolm_motion_discontinuity(current, desired)
+
+        self.assertEqual(frame_offset, 1)
+        self.assertIsNone(issue)
+
+    def test_unifolm_internal_joint_jump_is_rejected(self):
+        current = np.zeros((6, 36), dtype=np.float32)
+        desired = np.zeros((6, 36), dtype=np.float32)
+        current[:, 3] = 1.0
+        desired[:, 3] = 1.0
+        desired[3:, 8] = 0.8
+
+        frame_offset, issue = _unifolm_motion_discontinuity(current, desired)
+
+        self.assertEqual(frame_offset, 0)
+        self.assertIsNotNone(issue)
+        self.assertEqual(issue["transition_frame"], 2)
+        self.assertAlmostEqual(issue["joint_jump"], 0.8)
+
     def test_arena_selection_has_exactly_one_task_or_merged_dataset(self):
         self.assertEqual(
             HumanoidArenaAdapter._parse_selection(
@@ -177,6 +309,20 @@ class MultiSourceDatasetTest(unittest.TestCase):
             ],
         )
 
+    def test_arena_merged_training_excludes_grap_cup_only(self):
+        self.assertTrue(
+            HumanoidArenaAdapter._skip_merged_training_task("HOI_grap_cup")
+        )
+        self.assertFalse(
+            HumanoidArenaAdapter._skip_merged_training_task("HOI_football")
+        )
+        self.assertEqual(
+            HumanoidArenaAdapter._parse_selection(
+                {"task": "HOI_grap_cup", "backend": "sonic"}
+            ),
+            {"mode": "task", "task": "HOI_grap_cup", "backend": "sonic"},
+        )
+
     def test_everyday_task_catalog_description_overrides_stale_episode_text(self):
         instruction = _humanoid_everyday_instruction(
             {
@@ -187,6 +333,40 @@ class MultiSourceDatasetTest(unittest.TestCase):
         )
 
         self.assertEqual(instruction, "Tilt the phone stand upward.")
+
+    def test_everyday_odometry_is_rebased_to_initial_heading(self):
+        half_angle = np.pi / 4.0
+        root_quaternion = np.asarray(
+            [
+                [np.cos(half_angle), 0.0, 0.0, np.sin(half_angle)],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            dtype=np.float32,
+        )
+        root_position = np.asarray(
+            [[10.0, 20.0, 0.75], [10.0, 21.0, 0.80]], dtype=np.float32
+        )
+
+        local_position, local_rotation = _episode_local_root_from_odometry(
+            root_position, root_quaternion
+        )
+
+        np.testing.assert_allclose(
+            local_position,
+            np.asarray([[0.0, 0.0, 0.75], [1.0, 0.0, 0.80]], dtype=np.float32),
+            atol=1e-6,
+        )
+        torch.testing.assert_close(
+            local_rotation[0], torch.eye(3), atol=1e-6, rtol=1e-6
+        )
+        torch.testing.assert_close(
+            local_rotation[1],
+            torch.tensor(
+                [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
+            ),
+            atol=1e-6,
+            rtol=1e-6,
+        )
 
     def test_horizontally_packed_stereo_video_is_cropped_to_one_eye(self):
         feature = {"shape": [480, 1280, 3]}
@@ -655,6 +835,38 @@ class MultiSourceDatasetTest(unittest.TestCase):
 
         choice.assert_called_once_with(dataset._all_episode_records)
         self.assertEqual(selected.source, SOURCE_HIW500)
+        self.assertEqual(cut, 0)
+
+    def test_source_task_balanced_sampler_selects_source_then_task(self):
+        dataset = MultiSourceG1Dataset.__new__(MultiSourceG1Dataset)
+        dataset.sampling_mode = "source_task_balanced"
+        dataset._source_names = [SOURCE_UNIFOLM, SOURCE_HIW500]
+        dataset._source_weights = [3.0, 1.0]
+        first = (
+            MagicMock(),
+            _episode(source=SOURCE_UNIFOLM, task_id="task-a", episode_id="a"),
+        )
+        second = (
+            MagicMock(),
+            _episode(source=SOURCE_UNIFOLM, task_id="task-b", episode_id="b"),
+        )
+        dataset._episodes_by_source_task = {
+            SOURCE_UNIFOLM: {"task-a": [first], "task-b": [second]},
+            SOURCE_HIW500: {},
+        }
+        dataset.sample_stride = 1
+        rng = MagicMock()
+        rng.choices.return_value = [SOURCE_UNIFOLM]
+        rng.choice.side_effect = ["task-b", second]
+        rng.randrange.return_value = 0
+
+        _, selected, cut = dataset._sample_record(rng)
+
+        rng.choices.assert_called_once_with(
+            dataset._source_names, weights=dataset._source_weights, k=1
+        )
+        self.assertEqual(rng.choice.call_args_list[0].args[0], ["task-a", "task-b"])
+        self.assertIs(selected, second[1])
         self.assertEqual(cut, 0)
 
     def test_window_proportional_sampler_weights_each_episode_by_start_points(self):

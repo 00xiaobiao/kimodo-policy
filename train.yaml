@@ -24,12 +24,16 @@ main:
     #   tasks: ["*"]
     #   camera: "observation.images.head"
     #   stereo_view: "left"         # 1280x480 双目拼接裁为左目 640x480
+    #   hand_trigger_threshold: 5.0  # trigger 向下脉冲触发闭合
+    #   hand_squeeze_threshold: 0.5  # squeeze 向上脉冲触发张开
     # UnifoLM_WBT_Dataset:
     #   tasks: ["*"]
     #   camera: "observation.images.head_stereo_left"  # MainCamOnly 自动回退 cam_0
+    #   joint_jump_threshold_radians: 0.5
+    #   root_rotation_jump_threshold_degrees: 30.0
   sampling:
     mode: "episode_uniform"
-  episode_cache_size: 1600           # Merge16 共 1600 episodes；内存充足，保留全量 LRU，避免反复 FK/417D 转换
+  episode_cache_size: 1400           # Merge16 名称保留；loader 排除 GrapCup 后实际使用 1400 episodes
   cpu_workers_num: 32                # 实测约 1.60-1.62 s/step；4 ranks 共 128 workers，以 I/O/视频解码并行换取最高吞吐
   precompute_text_embeddings: true
   wandb: "offline"
@@ -45,7 +49,7 @@ model:
   dinov3_model_name: "dinov3-vitl16-pretrain-lvd1689m"
   dinov3_checkpoint: null           # 本地目录或 Hugging Face model id
   text_feature_dim: 4096
-  controlnet_num_layers: 8         # 每个 root/body ControlNet 各 8 层，隔层注入 16 层 Kimodo
+  controlnet_num_layers: 16        # 每个 root/body ControlNet 各 16 层，逐层对齐 16 层 Kimodo
   enable_hand_head: true
   hand_hidden_dim: 256
   hand_num_layers: 4

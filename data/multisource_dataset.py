@@ -1,3 +1,5 @@
+"""Unified G1 training dataset for Arena, UnifoLM, Everyday and HIW."""
+
 from __future__ import annotations
 
 import fnmatch
@@ -27,6 +29,7 @@ from motion.g1_reference import (
 )
 from motion.representation.kimodo_motionrep import KimodoMotionRep
 from skeleton.definitions import G1Skeleton34
+from utils.geometry import quaternion_to_matrix
 
 
 logger = logging.getLogger(__name__)
@@ -69,6 +72,10 @@ ARENA_MERGED_DATASETS = frozenset(
         "twist2_8_refpose_v3_1",
     }
 )
+# Keep the published merged dataset names for compatibility, but exclude tasks
+# that are not part of the official evaluation protocol from merged training.
+# Direct single-task selection remains available for inspection and ablations.
+ARENA_EXCLUDED_MERGED_TRAIN_TASKS = frozenset({"HOI_grap_cup"})
 
 HIW_G1_JOINT_FEATURE_NAMES_29 = (
     "kLeftHipPitch.q",
@@ -126,12 +133,16 @@ HIW_WBC_FEATURE_NAMES_23 = (
     "right_trigger",
     "right_squeeze",
 )
+HIW_TRIGGER_CLOSE_THRESHOLD = 5.0
+HIW_SQUEEZE_OPEN_THRESHOLD = 0.5
 
 VIDEO_READ_MAX_ATTEMPTS = 4
 VIDEO_READ_RETRY_DELAY_SECONDS = 0.05
 UNIFOLM_FIRST_ROOT_JUMP_THRESHOLD_METERS = 0.5
 UNIFOLM_INTERNAL_ROOT_JUMP_THRESHOLD_METERS = 0.5
 UNIFOLM_MAX_INITIAL_TRIM_FRAMES = 3
+UNIFOLM_JOINT_JUMP_THRESHOLD_RADIANS = 0.5
+UNIFOLM_ROOT_ROTATION_JUMP_THRESHOLD_DEGREES = 30.0
 MAX_SAMPLE_ATTEMPTS = 32
 _UINT64_MASK = (1 << 64) - 1
 KIMODO_MOTION_DIM = 417
@@ -371,9 +382,13 @@ def _patterns_from_selection(selection: Mapping | None) -> list[str]:
             "stereo_view",
             "hand_close_threshold",
             "hand_open_threshold",
+            "hand_trigger_threshold",
+            "hand_squeeze_threshold",
             "first_root_jump_threshold",
             "internal_root_jump_threshold",
             "max_initial_trim_frames",
+            "joint_jump_threshold_radians",
+            "root_rotation_jump_threshold_degrees",
         }
         tasks = [
             str(key)
@@ -615,26 +630,179 @@ def _root_rotation_from_rpy(rpy: np.ndarray) -> torch.Tensor:
     return rotation_z @ rotation_y @ rotation_x
 
 
+def _episode_local_root_from_odometry(
+    root_position: np.ndarray,
+    root_quaternion: np.ndarray,
+) -> tuple[np.ndarray, torch.Tensor]:
+    """Express z-up odometry in the episode's initial-heading frame.
+
+    HumanoidEveryday stores map/odometry-frame positions and ``(w, x, y, z)``
+    quaternions.  Kimodo clips should not inherit that arbitrary map heading.
+    Remove the first frame's planar translation and yaw while preserving the
+    measured root height and roll/pitch.  This is an SE(2), rather than a full
+    SE(3), rebase so gravity remains aligned with the vertical axis.
+    """
+    root_position = _as_matrix(root_position, 3, "odometry root position")
+    root_quaternion = _as_matrix(root_quaternion, 4, "odometry root quaternion")
+    if root_position.shape[0] != root_quaternion.shape[0]:
+        raise ValueError(
+            "Odometry position/quaternion lengths differ: "
+            f"{root_position.shape[0]} and {root_quaternion.shape[0]}"
+        )
+
+    quaternions = torch.from_numpy(root_quaternion)
+    quaternion_norm = quaternions.norm(dim=-1, keepdim=True)
+    if (quaternion_norm < 1e-6).any():
+        raise ValueError("Odometry root quaternion has near-zero norm")
+    root_rotations = quaternion_to_matrix(quaternions / quaternion_norm)
+    first_yaw = torch.atan2(root_rotations[0, 1, 0], root_rotations[0, 0, 0])
+    inverse_heading = _root_rotation_from_rpy(
+        np.asarray([[0.0, 0.0, -float(first_yaw)]], dtype=np.float32)
+    )[0]
+
+    local_position = torch.from_numpy(root_position.copy())
+    planar_delta = local_position[:, :2] - local_position[0, :2]
+    local_position[:, :2] = torch.einsum(
+        "ij,tj->ti", inverse_heading[:2, :2], planar_delta
+    )
+    local_rotations = torch.einsum(
+        "ij,tjk->tik", inverse_heading, root_rotations
+    )
+    return local_position.numpy(), local_rotations
+
+
 def _hiw_root_from_wbc(wbc: np.ndarray, fps: float) -> tuple[np.ndarray, torch.Tensor]:
+    """Construct the best episode-local root proxy available in HIW LeRobot.
+
+    HIW's first seven WBC values are commands, not an odometry pose:
+    ``(base_vx, base_vy, base_vyaw, torso_roll, torso_pitch, torso_yaw,
+    base_height)``.  In particular, the torso RPY command must not be decoded
+    as the pelvis orientation.  The LeRobot export does not contain the raw
+    MCAP odometry/IMU fields, so integrate the commanded body-frame SE(2)
+    twist from an identity episode heading and retain the commanded height.
+
+    This is a physically consistent command-trajectory proxy, not measured
+    root-pose ground truth.  Accumulation is done in float64 to limit drift on
+    long episodes and returned in the Unitree/MuJoCo xyz convention.
+    """
     wbc = _as_matrix(wbc, 23, "HIW WBC state")
-    positions = np.zeros((wbc.shape[0], 3), dtype=np.float32)
+    fps = float(fps)
+    if not np.isfinite(fps) or fps <= 0:
+        raise ValueError(f"HIW fps must be positive and finite, got {fps}")
+
+    positions = np.zeros((wbc.shape[0], 3), dtype=np.float64)
+    headings = np.zeros(wbc.shape[0], dtype=np.float64)
     positions[:, 2] = wbc[:, 6]
-    yaw = wbc[:, 5]
+    dt = 1.0 / fps
     for frame_index in range(1, wbc.shape[0]):
-        velocity = wbc[frame_index - 1, :2]
-        cosine = np.cos(yaw[frame_index - 1])
-        sine = np.sin(yaw[frame_index - 1])
-        world_velocity = np.asarray(
-            (
-                cosine * velocity[0] - sine * velocity[1],
-                sine * velocity[0] + cosine * velocity[1],
-            ),
-            dtype=np.float32,
+        vx, vy, yaw_rate = map(float, wbc[frame_index - 1, :3])
+        previous_heading = headings[frame_index - 1]
+        delta_heading = yaw_rate * dt
+
+        # Exact SE(2) integration for a piecewise-constant body twist.  The
+        # small-rate branch avoids cancellation in (1 - cos(delta)) / omega.
+        if abs(yaw_rate) < 1e-8:
+            local_dx = vx * dt
+            local_dy = vy * dt
+        else:
+            sin_scale = np.sin(delta_heading) / yaw_rate
+            cos_scale = (1.0 - np.cos(delta_heading)) / yaw_rate
+            local_dx = sin_scale * vx - cos_scale * vy
+            local_dy = cos_scale * vx + sin_scale * vy
+
+        cosine = np.cos(previous_heading)
+        sine = np.sin(previous_heading)
+        positions[frame_index, 0] = (
+            positions[frame_index - 1, 0]
+            + cosine * local_dx
+            - sine * local_dy
         )
-        positions[frame_index, :2] = (
-            positions[frame_index - 1, :2] + world_velocity / float(fps)
+        positions[frame_index, 1] = (
+            positions[frame_index - 1, 1]
+            + sine * local_dx
+            + cosine * local_dy
         )
-    return positions, _root_rotation_from_rpy(wbc[:, 3:6])
+        headings[frame_index] = previous_heading + delta_heading
+
+    root_rpy = np.zeros((wbc.shape[0], 3), dtype=np.float32)
+    wrapped_headings = (headings + np.pi) % (2.0 * np.pi) - np.pi
+    root_rpy[:, 2] = wrapped_headings.astype(np.float32)
+    return positions.astype(np.float32), _root_rotation_from_rpy(root_rpy)
+
+
+def _hiw_hand_from_events(
+    wbc: np.ndarray,
+    *,
+    trigger_threshold: float = HIW_TRIGGER_CLOSE_THRESHOLD,
+    squeeze_threshold: float = HIW_SQUEEZE_OPEN_THRESHOLD,
+) -> np.ndarray:
+    """Decode HIW's stateful trigger/squeeze events into closed=1 states.
+
+    Each hand starts open.  A trigger falling pulse closes it, a squeeze rising
+    pulse opens it, and the state is held between events.  HIW's WBC state
+    echoes these commands rather than reporting an independent finger pose.
+    """
+    wbc = _as_matrix(wbc, 23, "HIW WBC state")
+    trigger_threshold = float(trigger_threshold)
+    squeeze_threshold = float(squeeze_threshold)
+    if not np.isfinite(trigger_threshold) or not np.isfinite(squeeze_threshold):
+        raise ValueError("HIW hand thresholds must be finite")
+
+    output = np.zeros((wbc.shape[0], 2), dtype=np.float32)
+    for side, (trigger_index, squeeze_index) in enumerate(((19, 20), (21, 22))):
+        trigger_active = wbc[:, trigger_index] < trigger_threshold
+        squeeze_active = wbc[:, squeeze_index] > squeeze_threshold
+        closed = False
+        for frame_index in range(1, wbc.shape[0]):
+            close_event = (
+                trigger_active[frame_index]
+                and not trigger_active[frame_index - 1]
+            )
+            open_event = (
+                squeeze_active[frame_index]
+                and not squeeze_active[frame_index - 1]
+            )
+            if close_event:
+                closed = True
+            if open_event:
+                closed = False
+            output[frame_index, side] = float(closed)
+    return output
+
+
+def _hiw_joint_discontinuity(
+    joint_q: np.ndarray,
+    *,
+    joint_jump_threshold: float = UNIFOLM_JOINT_JUMP_THRESHOLD_RADIANS,
+    max_initial_trim_frames: int = UNIFOLM_MAX_INITIAL_TRIM_FRAMES,
+) -> tuple[int, dict[str, float | int] | None]:
+    """Trim recorder startup jumps and reject internal HIW joint resets."""
+    joint_q = _as_matrix(joint_q, 29, "HIW joint state")
+    joint_jump_threshold = float(joint_jump_threshold)
+    max_initial_trim_frames = int(max_initial_trim_frames)
+    if joint_jump_threshold <= 0 or not np.isfinite(joint_jump_threshold):
+        raise ValueError("HIW joint jump threshold must be positive and finite")
+    if max_initial_trim_frames < 0:
+        raise ValueError("max_initial_trim_frames must be non-negative")
+    if joint_q.shape[0] <= 1:
+        return 0, None
+
+    joint_jumps = np.abs(np.diff(joint_q, axis=0)).max(axis=1)
+    bad_transition = joint_jumps > joint_jump_threshold
+    frame_offset = 0
+    while (
+        frame_offset < min(max_initial_trim_frames, bad_transition.shape[0])
+        and bad_transition[frame_offset]
+    ):
+        frame_offset += 1
+    remaining = np.flatnonzero(bad_transition[frame_offset:])
+    if remaining.size == 0:
+        return frame_offset, None
+    transition_frame = frame_offset + int(remaining[0])
+    return frame_offset, {
+        "transition_frame": transition_frame,
+        "joint_jump": float(joint_jumps[transition_frame]),
+    }
 
 
 def _unifolm_root_discontinuity(
@@ -681,6 +849,117 @@ def _unifolm_root_discontinuity(
         return frame_offset, internal_max, None
     # Return the original source-frame index at the start of the bad transition.
     return frame_offset, internal_max, frame_offset + internal_index
+
+
+def _unifolm_motion_discontinuity(
+    current: np.ndarray,
+    desired: np.ndarray,
+    *,
+    first_root_jump_threshold: float = UNIFOLM_FIRST_ROOT_JUMP_THRESHOLD_METERS,
+    root_jump_threshold: float = UNIFOLM_INTERNAL_ROOT_JUMP_THRESHOLD_METERS,
+    joint_jump_threshold: float = UNIFOLM_JOINT_JUMP_THRESHOLD_RADIANS,
+    root_rotation_jump_threshold_degrees: float = (
+        UNIFOLM_ROOT_ROTATION_JUMP_THRESHOLD_DEGREES
+    ),
+    max_initial_trim_frames: int = UNIFOLM_MAX_INITIAL_TRIM_FRAMES,
+) -> tuple[int, dict[str, float | int] | None]:
+    """Detect reset-like discontinuities across every UnifoLM pose component.
+
+    Consecutive bad transitions at the start are treated as recorder reset
+    frames and logically trimmed.  A bad transition after that point makes the
+    episode unsafe for fixed-window supervision and is returned as an issue.
+    """
+    current = _as_matrix(current, 36, "UnifoLM current q")
+    desired = _as_matrix(desired, 36, "UnifoLM desired q")
+    if current.shape[0] != desired.shape[0]:
+        raise ValueError(
+            f"UnifoLM current/desired lengths differ: {current.shape[0]} and "
+            f"{desired.shape[0]}"
+        )
+    first_root_jump_threshold = float(first_root_jump_threshold)
+    root_jump_threshold = float(root_jump_threshold)
+    joint_jump_threshold = float(joint_jump_threshold)
+    root_rotation_jump_threshold_degrees = float(
+        root_rotation_jump_threshold_degrees
+    )
+    max_initial_trim_frames = int(max_initial_trim_frames)
+    if min(
+        root_jump_threshold,
+        first_root_jump_threshold,
+        joint_jump_threshold,
+        root_rotation_jump_threshold_degrees,
+    ) <= 0:
+        raise ValueError("UnifoLM motion jump thresholds must be positive")
+    if max_initial_trim_frames < 0:
+        raise ValueError("max_initial_trim_frames must be non-negative")
+    if current.shape[0] <= 1:
+        return 0, None
+
+    root_jumps = np.maximum(
+        np.linalg.norm(np.diff(current[:, :3], axis=0), axis=1),
+        np.linalg.norm(np.diff(desired[:, :3], axis=0), axis=1),
+    )
+    joint_jumps = np.maximum(
+        np.abs(np.diff(current[:, 7:], axis=0)).max(axis=1),
+        np.abs(np.diff(desired[:, 7:], axis=0)).max(axis=1),
+    )
+
+    quaternion_norms = np.stack(
+        (
+            np.linalg.norm(current[:, 3:7], axis=1),
+            np.linalg.norm(desired[:, 3:7], axis=1),
+        ),
+        axis=0,
+    )
+    if (quaternion_norms < 1e-6).any():
+        bad_frame = int(np.argwhere(quaternion_norms < 1e-6)[0, 1])
+        return 0, {
+            "transition_frame": max(0, bad_frame - 1),
+            "root_jump": 0.0,
+            "joint_jump": 0.0,
+            "root_rotation_jump_degrees": float("inf"),
+        }
+
+    rotation_jumps = []
+    for sequence in (current[:, 3:7], desired[:, 3:7]):
+        normalized = sequence / np.linalg.norm(sequence, axis=1, keepdims=True)
+        dot = np.abs(np.sum(normalized[1:] * normalized[:-1], axis=1))
+        rotation_jumps.append(
+            np.degrees(2.0 * np.arccos(np.clip(dot, 0.0, 1.0)))
+        )
+    root_rotation_jumps = np.maximum(*rotation_jumps)
+    non_root_bad_transition = (
+        (joint_jumps > joint_jump_threshold)
+        | (root_rotation_jumps > root_rotation_jump_threshold_degrees)
+    )
+    bad_transition = (
+        (root_jumps > root_jump_threshold)
+        | non_root_bad_transition
+    )
+    initial_bad_transition = (
+        (root_jumps > first_root_jump_threshold)
+        | non_root_bad_transition
+    )
+
+    frame_offset = 0
+    while (
+        frame_offset < min(max_initial_trim_frames, bad_transition.shape[0])
+        and initial_bad_transition[frame_offset]
+    ):
+        frame_offset += 1
+
+    remaining = np.flatnonzero(bad_transition[frame_offset:])
+    if remaining.size == 0:
+        return frame_offset, None
+    transition_frame = frame_offset + int(remaining[0])
+    return frame_offset, {
+        "transition_frame": transition_frame,
+        "root_jump": float(root_jumps[transition_frame]),
+        "joint_jump": float(joint_jumps[transition_frame]),
+        "root_rotation_jump_degrees": float(
+            root_rotation_jumps[transition_frame]
+        ),
+    }
 
 
 class BaseSourceAdapter:
@@ -900,6 +1179,10 @@ class HumanoidArenaAdapter(BaseSourceAdapter):
             raise ValueError(f"Unsupported HumanoidArena backend: {backend}")
         return backend
 
+    @staticmethod
+    def _skip_merged_training_task(task_name: str) -> bool:
+        return task_name in ARENA_EXCLUDED_MERGED_TRAIN_TASKS
+
     @classmethod
     def _parse_selection(cls, selection: Mapping) -> dict[str, str]:
         selection = dict(selection or {})
@@ -1037,6 +1320,7 @@ class HumanoidArenaAdapter(BaseSourceAdapter):
             for index, text in zip(tasks_table["task_index"], tasks_table["task"])
         }
         seen_episode_indices: set[int] = set()
+        excluded_merged_episodes: dict[str, int] = defaultdict(int)
         for meta_path in sorted((task_root / "meta/episodes").rglob("*.parquet")):
             metadata = pq.read_table(meta_path).to_pydict()
             for row in range(len(metadata.get("episode_index", []))):
@@ -1082,6 +1366,11 @@ class HumanoidArenaAdapter(BaseSourceAdapter):
                             f"Cannot map HumanoidArena task {raw_task_id!r} in {task_root}"
                         )
                     instruction = task_text_by_index[task_index]
+
+                if is_merged and self._skip_merged_training_task(episode_task_name):
+                    excluded_merged_episodes[episode_task_name] += 1
+                    continue
+
                 data_chunk = int(metadata["data/chunk_index"][row])
                 data_file = int(metadata["data/file_index"][row])
                 video_chunk = int(metadata[f"videos/{video_key}/chunk_index"][row])
@@ -1109,6 +1398,12 @@ class HumanoidArenaAdapter(BaseSourceAdapter):
             raise ValueError(
                 f"HumanoidArena metadata below {task_root} contains "
                 f"{len(seen_episode_indices)} episodes, expected {expected_episodes}"
+            )
+        if excluded_merged_episodes:
+            logger.info(
+                "Excluded HumanoidArena merged training tasks from %s: %s",
+                task_root.name,
+                dict(sorted(excluded_merged_episodes.items())),
             )
 
     def load_episode(self, episode: EpisodeRecord) -> dict[str, torch.Tensor]:
@@ -1253,38 +1548,47 @@ class UnifoLMAdapter(BaseSourceAdapter):
         target_hand_raw = _as_matrix(
             table["action.hand_cmd"], hand_width, "UnifoLM hand command"
         )
-        frame_offset, internal_root_jump, internal_jump_frame = (
-            _unifolm_root_discontinuity(
-                current,
-                desired,
-                first_jump_threshold=self.selection.get(
-                    "first_root_jump_threshold",
-                    UNIFOLM_FIRST_ROOT_JUMP_THRESHOLD_METERS,
-                ),
-                internal_jump_threshold=self.selection.get(
-                    "internal_root_jump_threshold",
-                    UNIFOLM_INTERNAL_ROOT_JUMP_THRESHOLD_METERS,
-                ),
-                max_initial_trim_frames=self.selection.get(
-                    "max_initial_trim_frames", UNIFOLM_MAX_INITIAL_TRIM_FRAMES
-                ),
-            )
+        frame_offset, motion_issue = _unifolm_motion_discontinuity(
+            current,
+            desired,
+            first_root_jump_threshold=self.selection.get(
+                "first_root_jump_threshold",
+                UNIFOLM_FIRST_ROOT_JUMP_THRESHOLD_METERS,
+            ),
+            root_jump_threshold=self.selection.get(
+                "internal_root_jump_threshold",
+                UNIFOLM_INTERNAL_ROOT_JUMP_THRESHOLD_METERS,
+            ),
+            joint_jump_threshold=self.selection.get(
+                "joint_jump_threshold_radians",
+                UNIFOLM_JOINT_JUMP_THRESHOLD_RADIANS,
+            ),
+            root_rotation_jump_threshold_degrees=self.selection.get(
+                "root_rotation_jump_threshold_degrees",
+                UNIFOLM_ROOT_ROTATION_JUMP_THRESHOLD_DEGREES,
+            ),
+            max_initial_trim_frames=self.selection.get(
+                "max_initial_trim_frames", UNIFOLM_MAX_INITIAL_TRIM_FRAMES
+            ),
         )
-        if internal_jump_frame is not None:
+        if motion_issue is not None:
+            transition_frame = int(motion_issue["transition_frame"])
+            quality_issue = (
+                "motion discontinuity at frames "
+                f"{transition_frame}->{transition_frame + 1}: "
+                f"root={motion_issue['root_jump']:.3f} m, "
+                f"joint={motion_issue['joint_jump']:.3f} rad, "
+                "root_rotation="
+                f"{motion_issue['root_rotation_jump_degrees']:.1f} deg"
+            )
             logger.warning(
-                "Excluding UnifoLM episode %s: internal root jump %.3f m at "
-                "source frames %d->%d",
+                "Excluding UnifoLM episode %s: %s",
                 episode.episode_id,
-                internal_root_jump,
-                internal_jump_frame,
-                internal_jump_frame + 1,
+                quality_issue,
             )
             return {
                 "skip_episode": True,
-                "quality_issue": (
-                    f"internal root jump {internal_root_jump:.3f} m at "
-                    f"frames {internal_jump_frame}->{internal_jump_frame + 1}"
-                ),
+                "quality_issue": quality_issue,
             }
         if frame_offset:
             logger.debug(
@@ -1440,29 +1744,102 @@ class HumanoidEverydayAdapter(BaseSourceAdapter):
             table["observation.odometry.quat"], 4, "HumanoidEveryday odometry quaternion"
         )
 
+        # The released G1 LeRobot converter stores action as Dex3 hands first
+        # (left7 + right7), followed by the 14 arm IK targets.  It contains no
+        # leg or root target, so complete those features with measured state.
         observed_q = np.concatenate((leg, arm), axis=1)
         target_q = np.concatenate((leg, action[:, 14:28]), axis=1)
+        current_configuration = np.concatenate(
+            (root_position, root_quaternion, observed_q), axis=1
+        )
+        target_configuration = np.concatenate(
+            (root_position, root_quaternion, target_q), axis=1
+        )
+        frame_offset, motion_issue = _unifolm_motion_discontinuity(
+            current_configuration,
+            target_configuration,
+            first_root_jump_threshold=self.selection.get(
+                "first_root_jump_threshold",
+                UNIFOLM_FIRST_ROOT_JUMP_THRESHOLD_METERS,
+            ),
+            root_jump_threshold=self.selection.get(
+                "internal_root_jump_threshold",
+                UNIFOLM_INTERNAL_ROOT_JUMP_THRESHOLD_METERS,
+            ),
+            joint_jump_threshold=self.selection.get(
+                "joint_jump_threshold_radians",
+                UNIFOLM_JOINT_JUMP_THRESHOLD_RADIANS,
+            ),
+            root_rotation_jump_threshold_degrees=self.selection.get(
+                "root_rotation_jump_threshold_degrees",
+                UNIFOLM_ROOT_ROTATION_JUMP_THRESHOLD_DEGREES,
+            ),
+            max_initial_trim_frames=self.selection.get(
+                "max_initial_trim_frames", UNIFOLM_MAX_INITIAL_TRIM_FRAMES
+            ),
+        )
+        if motion_issue is not None:
+            transition_frame = int(motion_issue["transition_frame"])
+            quality_issue = (
+                "motion discontinuity at frames "
+                f"{transition_frame}->{transition_frame + 1}: "
+                f"root={motion_issue['root_jump']:.3f} m, "
+                f"joint={motion_issue['joint_jump']:.3f} rad, "
+                "root_rotation="
+                f"{motion_issue['root_rotation_jump_degrees']:.1f} deg"
+            )
+            logger.warning(
+                "Excluding HumanoidEveryday episode %s: %s",
+                episode.episode_id,
+                quality_issue,
+            )
+            return {
+                "skip_episode": True,
+                "quality_issue": quality_issue,
+            }
+        if frame_offset:
+            logger.debug(
+                "Logically trimming %d reset frame(s) from HumanoidEveryday episode %s",
+                frame_offset,
+                episode.episode_id,
+            )
+            observed_hand_raw = observed_hand_raw[frame_offset:]
+            action = action[frame_offset:]
+            root_position = root_position[frame_offset:]
+            root_quaternion = root_quaternion[frame_offset:]
+            observed_q = observed_q[frame_offset:]
+            target_q = target_q[frame_offset:]
+            episode_for_motion = replace(
+                episode, source_length=episode.source_length - frame_offset
+            )
+        else:
+            episode_for_motion = episode
+        if episode_for_motion.target_length < self.action_chunk:
+            return {
+                "skip_episode": True,
+                "quality_issue": "episode is too short after initial reset trimming",
+            }
         observed_hand, target_hand, observed_valid, target_valid = _dex3_pair_to_binary(
             observed_hand_raw, action[:, :14]
         )
         decoder = self._decoder(episode.source_fps)
-        planar_origin = root_position[0, :2].copy()
+        local_root_position, local_root_rotations = (
+            _episode_local_root_from_odometry(root_position, root_quaternion)
+        )
         observed = decoder.decode_joint_configuration(
             observed_q,
-            root_position,
-            root_quaternions=root_quaternion,
+            local_root_position,
+            root_rotation_matrices=local_root_rotations,
             joint_names=UNITREE_G1_JOINT_NAMES_29,
-            planar_origin=planar_origin,
         )
         target = decoder.decode_joint_configuration(
             target_q,
-            root_position,
-            root_quaternions=root_quaternion,
+            local_root_position,
+            root_rotation_matrices=local_root_rotations,
             joint_names=UNITREE_G1_JOINT_NAMES_29,
-            planar_origin=planar_origin,
         )
-        return self._finalize_motion(
-            episode,
+        motion = self._finalize_motion(
+            episode_for_motion,
             observed["local_rot_mats"],
             observed["root_positions"],
             target["local_rot_mats"],
@@ -1473,6 +1850,11 @@ class HumanoidEverydayAdapter(BaseSourceAdapter):
             target_valid,
             target_motion_source="action_with_state_root_and_legs",
         )
+        motion["frame_offset"] = int(
+            round(frame_offset * episode.target_fps / episode.source_fps)
+        )
+        motion["source_frame_offset"] = frame_offset
+        return motion
 
 
 class HIW500Adapter(BaseSourceAdapter):
@@ -1583,27 +1965,77 @@ class HIW500Adapter(BaseSourceAdapter):
         joint_q = _as_matrix(table["observation.state"], 29, "HIW joint state")
         wbc_state = _as_matrix(table["observation.state.wbc"], 23, "HIW WBC state")
         action = _as_matrix(table["action"], 23, "HIW action")
-        # HIW stores root velocity/orientation/height rather than an absolute
-        # root trajectory. Integrating planar velocity is the closest motion
-        # target available; it is episode-local and intentionally not global.
+        frame_offset, joint_issue = _hiw_joint_discontinuity(
+            joint_q,
+            joint_jump_threshold=self.selection.get(
+                "joint_jump_threshold_radians",
+                UNIFOLM_JOINT_JUMP_THRESHOLD_RADIANS,
+            ),
+            max_initial_trim_frames=self.selection.get(
+                "max_initial_trim_frames", UNIFOLM_MAX_INITIAL_TRIM_FRAMES
+            ),
+        )
+        if joint_issue is not None:
+            transition_frame = int(joint_issue["transition_frame"])
+            quality_issue = (
+                "joint discontinuity at frames "
+                f"{transition_frame}->{transition_frame + 1}: "
+                f"joint={joint_issue['joint_jump']:.3f} rad"
+            )
+            logger.warning(
+                "Excluding HIW episode %s: %s",
+                episode.episode_id,
+                quality_issue,
+            )
+            return {
+                "skip_episode": True,
+                "quality_issue": quality_issue,
+            }
+        if frame_offset:
+            joint_q = joint_q[frame_offset:]
+            wbc_state = wbc_state[frame_offset:]
+            action = action[frame_offset:]
+            episode_for_motion = replace(
+                episode, source_length=episode.source_length - frame_offset
+            )
+        else:
+            episode_for_motion = episode
+        if episode_for_motion.target_length < self.action_chunk:
+            return {
+                "skip_episode": True,
+                "quality_issue": "episode is too short after initial reset trimming",
+            }
+        # HIW LeRobot stores a commanded base twist and height, but no measured
+        # odometry pose.  Build an episode-local command trajectory; torso RPY
+        # is deliberately excluded because it is not the pelvis orientation.
         observed_root_position, observed_root_rotation = _hiw_root_from_wbc(
             wbc_state, episode.source_fps
         )
         target_root_position, target_root_rotation = _hiw_root_from_wbc(
             action, episode.source_fps
         )
-        observed_hand_score = np.stack((wbc_state[:, 20], wbc_state[:, 22]), axis=1)
-        target_hand_score = np.stack((action[:, 20], action[:, 22]), axis=1)
-        close_threshold = float(self.selection.get("hand_close_threshold", 0.5))
-        open_threshold = float(self.selection.get("hand_open_threshold", 0.25))
-        observed_hand = _binary_hysteresis(
-            observed_hand_score, close_threshold, open_threshold
+        trigger_threshold = float(
+            self.selection.get(
+                "hand_trigger_threshold", HIW_TRIGGER_CLOSE_THRESHOLD
+            )
         )
-        target_hand = _binary_hysteresis(
-            target_hand_score, close_threshold, open_threshold
+        squeeze_threshold = float(
+            self.selection.get(
+                "hand_squeeze_threshold", HIW_SQUEEZE_OPEN_THRESHOLD
+            )
         )
-        observed_valid = np.isfinite(observed_hand_score)
-        target_valid = np.isfinite(target_hand_score)
+        observed_hand = _hiw_hand_from_events(
+            wbc_state,
+            trigger_threshold=trigger_threshold,
+            squeeze_threshold=squeeze_threshold,
+        )
+        target_hand = _hiw_hand_from_events(
+            action,
+            trigger_threshold=trigger_threshold,
+            squeeze_threshold=squeeze_threshold,
+        )
+        observed_valid = np.ones_like(observed_hand, dtype=bool)
+        target_valid = np.ones_like(target_hand, dtype=bool)
         decoder = self._decoder(episode.source_fps)
         observed = decoder.decode_joint_configuration(
             joint_q,
@@ -1617,8 +2049,8 @@ class HIW500Adapter(BaseSourceAdapter):
             root_rotation_matrices=target_root_rotation,
             joint_names=UNITREE_G1_JOINT_NAMES_29,
         )
-        return self._finalize_motion(
-            episode,
+        motion = self._finalize_motion(
+            episode_for_motion,
             observed["local_rot_mats"],
             observed["root_positions"],
             target["local_rot_mats"],
@@ -1627,8 +2059,16 @@ class HIW500Adapter(BaseSourceAdapter):
             target_hand,
             observed_valid,
             target_valid,
-            target_motion_source="action_root_and_hands_with_executed_joint_completion",
+            target_motion_source=(
+                "integrated_commanded_base_twist_and_hand_events_"
+                "with_executed_joint_completion"
+            ),
         )
+        motion["frame_offset"] = int(
+            round(frame_offset * episode.target_fps / episode.source_fps)
+        )
+        motion["source_frame_offset"] = frame_offset
+        return motion
 
 
 ADAPTER_BY_SOURCE = {
@@ -1668,6 +2108,9 @@ class MultiSourceG1Dataset(data.Dataset):
         selections = self._normalize_selection(dataset_selection, roots)
         self.adapters: dict[str, BaseSourceAdapter] = {}
         self._episodes_by_source: dict[str, list[tuple[BaseSourceAdapter, EpisodeRecord]]] = {}
+        self._episodes_by_source_task: dict[
+            str, dict[str, list[tuple[BaseSourceAdapter, EpisodeRecord]]]
+        ] = {}
         self._task_instructions: dict[str, str] = {}
         self._task_cache_names: dict[str, str] = {}
         total_windows = 0
@@ -1708,6 +2151,12 @@ class MultiSourceG1Dataset(data.Dataset):
             self._episodes_by_source[source_name] = [
                 (adapter, episode) for episode in adapter.episodes
             ]
+            records_by_task: dict[
+                str, list[tuple[BaseSourceAdapter, EpisodeRecord]]
+            ] = defaultdict(list)
+            for record in self._episodes_by_source[source_name]:
+                records_by_task[record[1].task_id].append(record)
+            self._episodes_by_source_task[source_name] = dict(records_by_task)
 
         self._length = total_windows
         self._episode_cache: OrderedDict[
@@ -1719,11 +2168,12 @@ class MultiSourceG1Dataset(data.Dataset):
         if mode not in {
             "episode_uniform",
             "source_balanced",
+            "source_task_balanced",
             "window_proportional",
         }:
             raise ValueError(
                 "sampling.mode must be 'episode_uniform', 'source_balanced', "
-                "or 'window_proportional'"
+                "'source_task_balanced', or 'window_proportional'"
             )
         self.sampling_mode = mode
         self._source_names = list(self._episodes_by_source)
@@ -1735,7 +2185,7 @@ class MultiSourceG1Dataset(data.Dataset):
         self._source_weights: list[float] | None = None
         self._episode_weights: list[int] | None = None
         sampling_detail = "all episodes have equal probability"
-        if mode == "source_balanced":
+        if mode in {"source_balanced", "source_task_balanced"}:
             configured_weights = dict(sampling.get("source_weights", {}))
             self._source_weights = [
                 float(configured_weights.get(source, 1.0))
@@ -1743,7 +2193,11 @@ class MultiSourceG1Dataset(data.Dataset):
             ]
             if any(weight <= 0 for weight in self._source_weights):
                 raise ValueError("All selected source sampling weights must be positive")
-            sampling_detail = f"source_weights={dict(zip(self._source_names, self._source_weights))}"
+            sampling_detail = (
+                f"source_weights={dict(zip(self._source_names, self._source_weights))}"
+            )
+            if mode == "source_task_balanced":
+                sampling_detail += "; tasks are uniform within each source"
         elif mode == "window_proportional":
             self._episode_weights = [
                 episode.sample_count for _, episode in self._all_episode_records
@@ -1881,11 +2335,16 @@ class MultiSourceG1Dataset(data.Dataset):
         self, rng=None
     ) -> tuple[BaseSourceAdapter, EpisodeRecord, int]:
         rng = random if rng is None else rng
-        if self.sampling_mode == "source_balanced":
+        if self.sampling_mode in {"source_balanced", "source_task_balanced"}:
             source = rng.choices(
                 self._source_names, weights=self._source_weights, k=1
             )[0]
-            adapter, episode = rng.choice(self._episodes_by_source[source])
+            if self.sampling_mode == "source_task_balanced":
+                records_by_task = self._episodes_by_source_task[source]
+                task_id = rng.choice(list(records_by_task))
+                adapter, episode = rng.choice(records_by_task[task_id])
+            else:
+                adapter, episode = rng.choice(self._episodes_by_source[source])
         elif self.sampling_mode == "window_proportional":
             adapter, episode = rng.choices(
                 self._all_episode_records,

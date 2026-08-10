@@ -1662,6 +1662,9 @@ class TWIST2ActionProvider(ActionProvider):
     def _should_refresh_lerobot_visuals_next_step(self) -> bool:
         return (not self._use_lerobot_vla) or (len(self._lerobot_action_chunk_queue) == 0)
 
+    def _should_render_lerobot_step(self) -> bool:
+        return bool(getattr(self, "_force_render_every_control_step", False)) or self._should_refresh_lerobot_visuals_next_step()
+
     def _infer_lerobot_high_level_command(self) -> torch.Tensor:
         proprio = self._record_lerobot_observation_state()
         action_np = self._pop_lerobot_action(proprio)
@@ -2875,7 +2878,7 @@ class TWIST2ActionProvider(ActionProvider):
 
                 # Physics step with optional rendering
                 is_last_step = (i == self._twist2_decimation - 1)
-                should_render = is_last_step and (self._should_refresh_lerobot_visuals_next_step() if self._use_lerobot_vla else (self._render_counter % self._render_interval == 0))
+                should_render = is_last_step and (self._should_render_lerobot_step() if self._use_lerobot_vla else (self._render_counter % self._render_interval == 0))
 
                 if should_render:
                     render_start = time.perf_counter()

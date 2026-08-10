@@ -594,6 +594,7 @@ def _run_episode_once(simulation_app, env, env_cfg, action_provider, controller,
     success_video_dir = Path(spec["success_video_dir"]).expanduser().resolve()
     failure_video_dir = Path(spec["failure_video_dir"]).expanduser().resolve()
     record_video = _should_record_video(args_cli, spec)
+    setattr(action_provider, "_force_render_every_control_step", bool(record_video))
     if record_video:
         success_video_dir.mkdir(parents=True, exist_ok=True)
         failure_video_dir.mkdir(parents=True, exist_ok=True)
@@ -780,6 +781,7 @@ def _run_episode_once(simulation_app, env, env_cfg, action_provider, controller,
         _write_result(result_path, payload)
         return payload
     finally:
+        setattr(action_provider, "_force_render_every_control_step", False)
         try:
             controller.stop()
         except Exception as exc:
@@ -817,6 +819,7 @@ def main() -> int:
     import tasks
     from action_provider.create_action_provider import create_action_provider
     from isaaclab_tasks.utils.parse_cfg import parse_env_cfg
+    from twist2_runtime_alignment import align_twist2_env_cfg
     from layeredcontrol.robot_control_system import ControlConfig, RobotController
     from tasks.common_env_config import apply_env_config_yaml
     from tasks.common_runtime import apply_optional_runtime_augments, setup_vision_test_light
@@ -834,6 +837,7 @@ def main() -> int:
     try:
         first_spec = episode_specs[0]
         env_cfg = parse_env_cfg(args_cli.task, device=args_cli.device, num_envs=1)
+        align_twist2_env_cfg(env_cfg)
         env_cfg.env_name = args_cli.task
         apply_env_config_yaml(
             env_cfg,

@@ -22,6 +22,7 @@ if [[ "${AUTO_ACTIVATE_CONDA}" == "1" && -n "${CONDA_BASE}" && -f "${CONDA_BASE}
 fi
 
 EVAL_PYTHON="${EVAL_PYTHON:-python}"
+CONFIG_PYTHON="${CONFIG_PYTHON:-python}"
 
 resolve_config_path() {
   local config_path="$1"
@@ -32,8 +33,10 @@ resolve_config_path() {
   fi
 }
 
-# export ROBOT_USD_OVERRIDE="${ISAACLAB_ROOT}/assets/robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0_m2.usd"
-export ROBOT_USD_OVERRIDE="${ISAACLAB_ROOT}/assets/robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0_m2_thumd.usd"
+# Keep the task-specific default, while allowing the unified evaluator to select
+# the non-thumb model used by football and double-desk.
+export ROBOT_USD_OVERRIDE="${ROBOT_USD_OVERRIDE:-${ISAACLAB_ROOT}/assets/robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0_m2_thumd.usd}"
+export TWIST2_ALIGN_DYNAMICS="${TWIST2_ALIGN_DYNAMICS:-1}"
 ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_test_config/base_test/football_single_twist2_test.yaml}"
 ENV_CONFIG_YAML="$(resolve_config_path "${ENV_CONFIG_YAML}")"
 ISAAC_DEVICE="${ISAAC_DEVICE:-cuda}"
@@ -93,7 +96,7 @@ resolve_results_dir() {
 }
 
 load_task_name_from_yaml() {
-  "${EVAL_PYTHON}" - "${ISAACLAB_ROOT}/tasks/common_env_config/loader.py" "${1}" <<'PY2'
+  "${CONFIG_PYTHON}" - "${ISAACLAB_ROOT}/tasks/common_env_config/loader.py" "${1}" <<'PY2'
 import importlib.util
 import pathlib
 import sys
@@ -115,7 +118,7 @@ PY2
 }
 
 load_vision_randomization_from_yaml() {
-  "${EVAL_PYTHON}" - "${1}" <<'PY3'
+  "${CONFIG_PYTHON}" - "${1}" <<'PY3'
 import json
 import pathlib
 import sys
@@ -132,7 +135,7 @@ PY3
 }
 
 load_test_default_from_yaml() {
-  "${EVAL_PYTHON}" - "${1}" "${2}" "${3}" <<'PY2'
+  "${CONFIG_PYTHON}" - "${1}" "${2}" "${3}" <<'PY2'
 import pathlib
 import sys
 import yaml

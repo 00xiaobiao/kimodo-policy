@@ -3,6 +3,7 @@
 /log/
 /data/cache/
 /scripts/logs/
+/real-world/
 
 # Local caches and generated artifacts
 __pycache__/

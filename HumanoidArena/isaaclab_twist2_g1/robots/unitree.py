@@ -1242,7 +1242,7 @@
 """Configuration for Unitree robots."""
 
 import isaaclab.sim as sim_utils
-from isaaclab.actuators import ActuatorNetMLPCfg, DCMotorCfg, ImplicitActuatorCfg
+from isaaclab.actuators import ActuatorNetMLPCfg, DCMotorCfg, IdealPDActuatorCfg, ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg
 from isaaclab.utils.assets import ISAACLAB_NUCLEUS_DIR
 import os
@@ -2309,6 +2309,90 @@ G129_CFG_WITH_DEX3_WHOLEBODY = ArticulationCfg(
             },
         ),
     },
+)
+
+# TWIST2 trains and deploys the student policy with explicit, torque-clipped
+# PD control.  Keep this as a separate preset because SONIC uses the legacy
+# Isaac implicit-drive tuning above.
+G129_CFG_WITH_DEX3_WHOLEBODY_TWIST2 = G129_CFG_WITH_DEX3_WHOLEBODY.replace(
+    actuators={
+        "body": IdealPDActuatorCfg(
+            joint_names_expr=[
+                ".*_hip_pitch_joint",
+                ".*_hip_roll_joint",
+                ".*_hip_yaw_joint",
+                ".*_knee_joint",
+                ".*_ankle_pitch_joint",
+                ".*_ankle_roll_joint",
+                "waist_yaw_joint",
+                "waist_roll_joint",
+                "waist_pitch_joint",
+                ".*_shoulder_pitch_joint",
+                ".*_shoulder_roll_joint",
+                ".*_shoulder_yaw_joint",
+                ".*_elbow_joint",
+                ".*_wrist_roll_joint",
+                ".*_wrist_pitch_joint",
+                ".*_wrist_yaw_joint",
+            ],
+            effort_limit={
+                ".*_hip_pitch_joint": 100.0,
+                ".*_hip_roll_joint": 100.0,
+                ".*_hip_yaw_joint": 100.0,
+                ".*_knee_joint": 150.0,
+                ".*_ankle_pitch_joint": 40.0,
+                ".*_ankle_roll_joint": 40.0,
+                "waist_yaw_joint": 150.0,
+                "waist_roll_joint": 150.0,
+                "waist_pitch_joint": 150.0,
+                ".*_shoulder_pitch_joint": 40.0,
+                ".*_shoulder_roll_joint": 40.0,
+                ".*_shoulder_yaw_joint": 40.0,
+                ".*_elbow_joint": 40.0,
+                ".*_wrist_roll_joint": 4.0,
+                ".*_wrist_pitch_joint": 4.0,
+                ".*_wrist_yaw_joint": 4.0,
+            },
+            stiffness={
+                ".*_hip_pitch_joint": 100.0,
+                ".*_hip_roll_joint": 100.0,
+                ".*_hip_yaw_joint": 100.0,
+                ".*_knee_joint": 150.0,
+                ".*_ankle_pitch_joint": 40.0,
+                ".*_ankle_roll_joint": 40.0,
+                "waist_yaw_joint": 150.0,
+                "waist_roll_joint": 150.0,
+                "waist_pitch_joint": 150.0,
+                ".*_shoulder_pitch_joint": 40.0,
+                ".*_shoulder_roll_joint": 40.0,
+                ".*_shoulder_yaw_joint": 40.0,
+                ".*_elbow_joint": 40.0,
+                ".*_wrist_roll_joint": 4.0,
+                ".*_wrist_pitch_joint": 4.0,
+                ".*_wrist_yaw_joint": 4.0,
+            },
+            damping={
+                ".*_hip_pitch_joint": 2.0,
+                ".*_hip_roll_joint": 2.0,
+                ".*_hip_yaw_joint": 2.0,
+                ".*_knee_joint": 4.0,
+                ".*_ankle_pitch_joint": 2.0,
+                ".*_ankle_roll_joint": 2.0,
+                "waist_yaw_joint": 4.0,
+                "waist_roll_joint": 4.0,
+                "waist_pitch_joint": 4.0,
+                ".*_shoulder_pitch_joint": 5.0,
+                ".*_shoulder_roll_joint": 5.0,
+                ".*_shoulder_yaw_joint": 5.0,
+                ".*_elbow_joint": 5.0,
+                ".*_wrist_roll_joint": 0.2,
+                ".*_wrist_pitch_joint": 0.2,
+                ".*_wrist_yaw_joint": 0.2,
+            },
+            armature=0.0,
+        ),
+        "hands": G129_CFG_WITH_DEX3_WHOLEBODY.actuators["hands"],
+    }
 )
 
 G129_CFG_WITH_INSPIRE_WHOLEBODY = ArticulationCfg(

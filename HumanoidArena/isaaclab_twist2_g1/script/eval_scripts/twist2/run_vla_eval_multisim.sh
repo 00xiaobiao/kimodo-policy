@@ -32,6 +32,7 @@ resolve_config_path() {
 }
 
 export ROBOT_USD_OVERRIDE="${ISAACLAB_ROOT}/assets/robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0_m2.usd"
+export TWIST2_ALIGN_DYNAMICS="${TWIST2_ALIGN_DYNAMICS:-1}"
 ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_test_config/base_test/football_single_twist2_test.yaml}"
 ENV_CONFIG_YAML="$(resolve_config_path "${ENV_CONFIG_YAML}")"
 ISAAC_DEVICE="${ISAAC_DEVICE:-cuda}"

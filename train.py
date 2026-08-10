@@ -21,7 +21,7 @@ from datetime import datetime
 from accelerate.utils import InitProcessGroupKwargs
 from accelerate.utils import set_seed
 from datetime import timedelta
-from data.datasetloader import Dataset_Random
+from data.multisource_dataset import MultiSourceG1Dataset
 from model.kimodo_policy import KimodoPolicy, KimodoPolicyConfig
 from torch.optim.lr_scheduler import LambdaLR
 
@@ -138,7 +138,7 @@ def build_dataset(config):
     sampling = config.main.get("sampling", None)
     if sampling is not None:
         sampling = OmegaConf.to_container(sampling, resolve=True)
-    return Dataset_Random(
+    return MultiSourceG1Dataset(
         dataset_root=config.main.get("data_root", None),
         dataset_roots=dataset_roots,
         action_history=config.main.action_history,
@@ -177,6 +177,21 @@ def _config_get(config, key, default=None):
     if callable(getter):
         return getter(key, default)
     return getattr(config, key, default)
+
+
+def _gradient_clip_statistics(total_norm, max_norm):
+    """Return the pre-clip norm, clipping indicator, and applied scale."""
+    max_norm = float(max_norm)
+    if not math.isfinite(max_norm) or max_norm <= 0:
+        raise ValueError(f"Gradient clip max_norm must be finite and positive, got {max_norm}")
+    if torch.is_tensor(total_norm):
+        total_norm = total_norm.detach().float().item()
+    total_norm = float(total_norm)
+    if not math.isfinite(total_norm):
+        return total_norm, 1.0, 0.0
+    was_clipped = float(total_norm > max_norm)
+    clip_scale = min(1.0, max_norm / (total_norm + 1e-12))
+    return total_norm, was_clipped, clip_scale
 
 
 def _samples_per_optimizer_step(config, world_size: int) -> int:
@@ -488,6 +503,22 @@ _RESUME_CONFIG_FIELDS = (
     "training.optimizer",
     "training.scheduler",
 )
+_INIT_CHECKPOINT_CONFIG_FIELDS = (
+    "main.action_chunk",
+    "main.action_history",
+    "model.fps",
+    "model.motion_mask_mode",
+    "model.dinov3_model_name",
+    "model.dinov3_checkpoint",
+    "model.text_feature_dim",
+    "model.controlnet_num_layers",
+    "model.enable_hand_head",
+    "model.hand_hidden_dim",
+    "model.hand_num_layers",
+    "model.hand_num_heads",
+    "model.hand_ffn_dim",
+    "model.hand_init_seed",
+)
 _MISSING_CONFIG_VALUE = object()
 _RNG_STATE_VERSION = 1
 
@@ -512,6 +543,21 @@ def _normalize_resume_checkpoint(checkpoint_path):
     return checkpoint_path
 
 
+def _normalize_init_checkpoint(checkpoint_path):
+    checkpoint_path = os.path.abspath(os.path.expanduser(checkpoint_path))
+    if not os.path.isdir(checkpoint_path):
+        raise FileNotFoundError(
+            f"Initialization checkpoint directory does not exist: {checkpoint_path}"
+        )
+    for filename in ("training_state.pt", "config.json"):
+        file_path = os.path.join(checkpoint_path, filename)
+        if not os.path.isfile(file_path):
+            raise FileNotFoundError(
+                f"Initialization checkpoint is missing {filename}: {file_path}"
+            )
+    return checkpoint_path
+
+
 def _validate_resume_config(config, checkpoint_path):
     with open(os.path.join(checkpoint_path, "config.json"), "r", encoding="utf-8") as file:
         checkpoint_config = json.load(file)
@@ -530,6 +576,95 @@ def _validate_resume_config(config, checkpoint_path):
             "Resume config is incompatible with the checkpoint:\n"
             f"  - {details}"
         )
+
+
+def _validate_init_checkpoint_config(config, checkpoint_path):
+    """Require model compatibility while allowing a new dataset/training schedule."""
+    with open(os.path.join(checkpoint_path, "config.json"), "r", encoding="utf-8") as file:
+        checkpoint_config = json.load(file)
+    current_config = OmegaConf.to_container(config, resolve=True)
+    mismatches = []
+    for path in _INIT_CHECKPOINT_CONFIG_FIELDS:
+        current_value = _config_value(current_config, path)
+        checkpoint_value = _config_value(checkpoint_config, path)
+        if current_value != checkpoint_value:
+            mismatches.append(
+                f"{path}: current={current_value!r}, checkpoint={checkpoint_value!r}"
+            )
+    if mismatches:
+        details = "\n  - ".join(mismatches)
+        raise ValueError(
+            "Initialization checkpoint model config is incompatible:\n"
+            f"  - {details}"
+        )
+
+
+def _checkpoint_model_state(payload, checkpoint_path):
+    if not isinstance(payload, dict) or "model" not in payload:
+        raise RuntimeError(
+            f"Checkpoint has no model state: {checkpoint_path}"
+        )
+    model_state = payload["model"]
+    if not isinstance(model_state, dict):
+        raise RuntimeError(
+            f"Checkpoint model state is invalid: {checkpoint_path}"
+        )
+    return {
+        name.removeprefix("_orig_mod."): value
+        for name, value in model_state.items()
+    }
+
+
+def _validate_trainable_model_state(target_model, checkpoint_model, checkpoint_path):
+    trainable_parameters = {
+        name: parameter
+        for name, parameter in target_model.named_parameters()
+        if parameter.requires_grad
+    }
+    trainable_keys = set(trainable_parameters)
+    checkpoint_keys = set(checkpoint_model)
+    missing_trainable_keys = sorted(trainable_keys - checkpoint_keys)
+    unexpected_model_keys = sorted(checkpoint_keys - trainable_keys)
+    shape_mismatches = sorted(
+        (
+            name,
+            tuple(checkpoint_model[name].shape),
+            tuple(trainable_parameters[name].shape),
+        )
+        for name in trainable_keys & checkpoint_keys
+        if tuple(checkpoint_model[name].shape)
+        != tuple(trainable_parameters[name].shape)
+    )
+    if missing_trainable_keys or unexpected_model_keys or shape_mismatches:
+        raise RuntimeError(
+            f"Checkpoint trainable model state is incompatible ({checkpoint_path}): "
+            f"missing={missing_trainable_keys}, unexpected={unexpected_model_keys}, "
+            f"shape_mismatches={shape_mismatches}"
+        )
+
+
+def _load_model_initialization_checkpoint(model, checkpoint_path):
+    """Load trainable weights only; deliberately leave optimizer/scheduler untouched."""
+    state_path = os.path.join(checkpoint_path, "training_state.pt")
+    payload = torch.load(state_path, map_location="cpu", weights_only=True)
+    checkpoint_model = _checkpoint_model_state(payload, checkpoint_path)
+    target_model = getattr(model, "_orig_mod", model)
+    _validate_trainable_model_state(target_model, checkpoint_model, checkpoint_path)
+    target_model.load_state_dict(checkpoint_model, strict=False)
+
+    source_config = {}
+    with open(os.path.join(checkpoint_path, "config.json"), "r", encoding="utf-8") as file:
+        source_config = json.load(file)
+    metadata = {
+        "mode": "init_checkpoint",
+        "source_checkpoint": os.path.abspath(checkpoint_path),
+        "source_global_step": int(payload.get("global_step", -1)),
+    }
+    if payload.get("world_size") is not None:
+        metadata["source_world_size"] = int(payload["world_size"])
+    if source_config.get("initialization") is not None:
+        metadata["source_initialization"] = source_config["initialization"]
+    return metadata
 
 
 def _load_training_checkpoint(
@@ -638,21 +773,8 @@ def _load_training_checkpoint(
             )
 
     target_model = getattr(model, "_orig_mod", model)
-    checkpoint_model = {
-        name.removeprefix("_orig_mod."): value
-        for name, value in payload["model"].items()
-    }
-    trainable_keys = {
-        name for name, parameter in target_model.named_parameters() if parameter.requires_grad
-    }
-    checkpoint_keys = set(checkpoint_model)
-    missing_trainable_keys = sorted(trainable_keys - checkpoint_keys)
-    unexpected_model_keys = sorted(checkpoint_keys - trainable_keys)
-    if missing_trainable_keys or unexpected_model_keys:
-        raise RuntimeError(
-            "Checkpoint trainable model state is incompatible: "
-            f"missing={missing_trainable_keys}, unexpected={unexpected_model_keys}"
-        )
+    checkpoint_model = _checkpoint_model_state(payload, checkpoint_path)
+    _validate_trainable_model_state(target_model, checkpoint_model, checkpoint_path)
     target_model.load_state_dict(checkpoint_model, strict=False)
     optimizer.load_state_dict(payload["optimizer"])
     scheduler.load_state_dict(payload["scheduler"])
@@ -770,16 +892,25 @@ def _load_rank_rng_state(
     return payload
 
 
-def learning(config_path=None, resume=None):
+def learning(config_path=None, resume=None, init_checkpoint=None):
     # 1. 加载配置参数 & 加载保存根目录
     config_path = config_path or os.path.join(os.path.dirname(__file__), "train.yaml")
     config = OmegaConf.load(config_path)
     if not os.path.isabs(config.main.save_root):
         config.main.save_root = os.path.join(os.path.dirname(__file__), config.main.save_root)
     os.makedirs(config.main.save_root, exist_ok=True)
+    if resume is not None and init_checkpoint is not None:
+        raise ValueError("--resume and --init-checkpoint are mutually exclusive")
     resume = _normalize_resume_checkpoint(resume) if resume is not None else None
+    init_checkpoint = (
+        _normalize_init_checkpoint(init_checkpoint)
+        if init_checkpoint is not None
+        else None
+    )
     if resume:
         _validate_resume_config(config, resume)
+    if init_checkpoint:
+        _validate_init_checkpoint_config(config, init_checkpoint)
     # 2. 配置分布式
     accelerator = Accelerator(
         gradient_accumulation_steps = config.main.gradient.grad_accumulation_steps,
@@ -816,6 +947,23 @@ def learning(config_path=None, resume=None):
     # 4. 加载模型和优化器
     set_seed(config.main.seed, device_specific=False)
     model, optimizer, scheduler, max_training_steps = build_model_and_optimizer(config)
+    initialization_metadata = None
+    if init_checkpoint:
+        initialization_metadata = _load_model_initialization_checkpoint(
+            model, init_checkpoint
+        )
+        if rank == 0:
+            logging.info(
+                "Initialized trainable model weights from %s at source step %d; "
+                "optimizer, scheduler, global step, data order, and RNG start fresh",
+                initialization_metadata["source_checkpoint"],
+                initialization_metadata["source_global_step"],
+            )
+    elif resume:
+        with open(os.path.join(resume, "config.json"), "r", encoding="utf-8") as file:
+            initialization_metadata = json.load(file).get("initialization")
+    if initialization_metadata is not None:
+        config.initialization = initialization_metadata
     set_seed(config.main.seed, device_specific=True)
     global_step = 0
     resume_rng_state = None
@@ -929,6 +1077,8 @@ def learning(config_path=None, resume=None):
         text_length = batch.get("text_length")
         ## 8.3 前向传播 + 反向传播
         compute_start_time = time.perf_counter()
+        control_grad_statistics = None
+        hand_grad_statistics = None
         with accelerator.accumulate(model):
             loss_dict = model(
                 instruction,
@@ -972,13 +1122,25 @@ def learning(config_path=None, resume=None):
                     if "hand_head." not in name
                 ]
                 if control_parameters:
-                    accelerator.clip_grad_norm_(
-                        control_parameters, config.main.gradient.grad_clip_norm
+                    control_clip_norm = float(
+                        config.main.gradient.grad_clip_norm
+                    )
+                    control_total_norm = accelerator.clip_grad_norm_(
+                        control_parameters, control_clip_norm
+                    )
+                    control_grad_statistics = _gradient_clip_statistics(
+                        control_total_norm, control_clip_norm
                     )
                 if hand_parameters:
-                    accelerator.clip_grad_norm_(
+                    hand_clip_norm = float(
+                        config.main.gradient.get("hand_grad_clip_norm", 1.0)
+                    )
+                    hand_total_norm = accelerator.clip_grad_norm_(
                         hand_parameters,
-                        config.main.gradient.get("hand_grad_clip_norm", 1.0),
+                        hand_clip_norm,
+                    )
+                    hand_grad_statistics = _gradient_clip_statistics(
+                        hand_total_norm, hand_clip_norm
                     )
             optimizer.step()
             optimizer.zero_grad()
@@ -1008,11 +1170,23 @@ def learning(config_path=None, resume=None):
                 hand_log = (
                     f"Hand: {avg_hand_loss.item():.4f} | " if has_hand_head else ""
                 )
+                control_grad_log = (
+                    f"Grad-Control: {control_grad_statistics[0]:.3f} | "
+                    if control_grad_statistics is not None
+                    else ""
+                )
+                hand_grad_log = (
+                    f"Grad-Hand: {hand_grad_statistics[0]:.3f} | "
+                    if hand_grad_statistics is not None
+                    else ""
+                )
                 logging.info(
                     f"Step: {global_step}/{max_training_steps} | "
                     f"Loss: {avg_loss.item():.4f} | Root: {avg_root_loss.item():.4f} | "
                     f"Body: {avg_body_loss.item():.4f} | "
                     f"{hand_log}"
+                    f"{control_grad_log}"
+                    f"{hand_grad_log}"
                     f"Data: {data_time:.2f}s | Compute: {compute_time:.2f}s | "
                     f"LR-Backbone: {scheduler.get_last_lr()[0]:.2e} | "
                     f"LR-Adapter: {scheduler.get_last_lr()[2]:.2e} | "
@@ -1028,6 +1202,14 @@ def learning(config_path=None, resume=None):
                     "train/lr_control_backbone": scheduler.get_last_lr()[0],
                     "train/lr_control_adapter": scheduler.get_last_lr()[2],
                 }
+                if control_grad_statistics is not None:
+                    metrics.update(
+                        {
+                            "train/control_grad_norm": control_grad_statistics[0],
+                            "train/control_was_clipped": control_grad_statistics[1],
+                            "train/control_clip_scale": control_grad_statistics[2],
+                        }
+                    )
                 if has_hand_head:
                     metrics.update(
                         {
@@ -1035,6 +1217,14 @@ def learning(config_path=None, resume=None):
                             "train/hand_state_loss": avg_hand_state_loss.item(),
                             "train/hand_transition_loss": avg_hand_transition_loss.item(),
                             "train/lr_hand": scheduler.get_last_lr()[4],
+                        }
+                    )
+                if hand_grad_statistics is not None:
+                    metrics.update(
+                        {
+                            "train/hand_grad_norm": hand_grad_statistics[0],
+                            "train/hand_was_clipped": hand_grad_statistics[1],
+                            "train/hand_clip_scale": hand_grad_statistics[2],
                         }
                     )
                 wandb.log(metrics, step=global_step)
@@ -1065,36 +1255,41 @@ def learning(config_path=None, resume=None):
                 }
                 state_path = os.path.join(checkpoint_dir, "training_state.pt")
                 temporary_state_path = f"{state_path}.tmp"
-                accelerator.save(
-                    {
-                        "global_step": global_step,
-                        "model": trainable_state,
-                        "optimizer": optimizer.state_dict(),
-                        "scheduler": scheduler.state_dict(),
+                checkpoint_payload = {
+                    "global_step": global_step,
+                    "model": trainable_state,
+                    "optimizer": optimizer.state_dict(),
+                    "scheduler": scheduler.state_dict(),
+                    "world_size": world_size,
+                    "rng_state_version": _RNG_STATE_VERSION,
+                    "data_state": {
+                        "sampling_version": 1,
+                        "next_sample_ordinal": global_step
+                        * _samples_per_optimizer_step(config, world_size),
+                        "batch_size": int(config.main.batch_size),
+                        "gradient_accumulation_steps": int(
+                            config.main.gradient.grad_accumulation_steps
+                        ),
                         "world_size": world_size,
-                        "rng_state_version": _RNG_STATE_VERSION,
-                        "data_state": {
-                            "sampling_version": 1,
-                            "next_sample_ordinal": global_step
-                            * _samples_per_optimizer_step(config, world_size),
-                            "batch_size": int(config.main.batch_size),
-                            "gradient_accumulation_steps": int(
-                                config.main.gradient.grad_accumulation_steps
-                            ),
-                            "world_size": world_size,
-                        },
-                        "seed_metadata": {
-                            "base_seed": int(config.main.seed),
-                            "global_step": global_step,
-                            "workers_per_process": int(config.main.cpu_workers_num),
-                        },
                     },
+                    "seed_metadata": {
+                        "base_seed": int(config.main.seed),
+                        "global_step": global_step,
+                        "workers_per_process": int(config.main.cpu_workers_num),
+                    },
+                }
+                if initialization_metadata is not None:
+                    checkpoint_payload["initialization"] = initialization_metadata
+                accelerator.save(
+                    checkpoint_payload,
                     temporary_state_path,
                 )
                 os.replace(temporary_state_path, state_path)
                 config_path = os.path.join(checkpoint_dir, "config.json")
                 temporary_config_path = f"{config_path}.tmp"
                 cfg = OmegaConf.to_container(config, resolve=True)
+                if initialization_metadata is not None:
+                    cfg["initialization"] = initialization_metadata
                 with open(temporary_config_path, "w", encoding="utf-8") as f:
                     json.dump(cfg, f, indent=2)
                 os.replace(temporary_config_path, config_path)
@@ -1107,9 +1302,23 @@ def learning(config_path=None, resume=None):
 
 
 
-if __name__ == "__main__":
+def _parse_args(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=None, help="Path to a training YAML file")
-    parser.add_argument("--resume", default=None, help="Checkpoint directory to resume")
-    args = parser.parse_args()
-    learning(args.config, args.resume)
+    checkpoint_group = parser.add_mutually_exclusive_group()
+    checkpoint_group.add_argument(
+        "--resume",
+        default=None,
+        help="Resume the exact same run, including optimizer/scheduler/RNG/data state",
+    )
+    checkpoint_group.add_argument(
+        "--init-checkpoint",
+        default=None,
+        help="Initialize model weights only for a fresh fine-tuning run",
+    )
+    return parser.parse_args(argv)
+
+
+if __name__ == "__main__":
+    args = _parse_args()
+    learning(args.config, args.resume, args.init_checkpoint)

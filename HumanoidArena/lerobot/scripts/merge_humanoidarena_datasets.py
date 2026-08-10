@@ -31,6 +31,9 @@ DEFAULT_OUTPUT_BASE = Path(
     "/ai/Yichi/taowen/dataset_v3/HumanoidArena_merged_datasets_v3"
 )
 DEFAULT_REPO_PREFIX = "local"
+# Standard training merges follow the official evaluated task set. CSV mode is
+# intentionally left explicit so the excluded task can still be inspected.
+EXCLUDED_STANDARD_TRAIN_TASKS = frozenset({"HOI_grap_cup"})
 
 
 @dataclass(frozen=True)
@@ -155,6 +158,8 @@ def discover_datasets(args: argparse.Namespace) -> list[Path]:
 
     paths: list[Path] = []
     for task_dir in sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")):
+        if args.mode != "csv" and task_dir.name in EXCLUDED_STANDARD_TRAIN_TASKS:
+            continue
         for dataset_dir in sorted(p for p in task_dir.iterdir() if p.is_dir() and not p.name.startswith(".")):
             if not (dataset_dir / "meta" / "info.json").exists():
                 continue

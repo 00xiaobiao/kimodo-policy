@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ISAACLAB_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 source "${ISAACLAB_ROOT}/script/common/runtime_paths.sh"
 export ROBOT_USD_OVERRIDE="${ISAACLAB_ROOT}/assets/robots/g1-29dof_wholebody_dex3/g1_29dof_with_dex3_rev_1_0_m2.usd"
+export TWIST2_ALIGN_DYNAMICS="${TWIST2_ALIGN_DYNAMICS:-1}"
 ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/football_single_twist2_vla.yaml}"
 ISAAC_DEVICE="cpu"
 HEADLESS=1

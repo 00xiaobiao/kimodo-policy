@@ -1,3 +1,8 @@
+"""Legacy standalone HumanoidArena loader.
+
+New mixed-source training uses :mod:`data.multisource_dataset` directly.
+"""
+
 from __future__ import annotations
 
 import json
@@ -537,9 +542,3 @@ class HumanoidArenaDataset(data.Dataset):
                     delay,
                 )
                 time.sleep(delay)
-
-
-from data.multisource_dataset import MultiSourceG1Dataset
-
-
-Dataset_Random = MultiSourceG1Dataset
