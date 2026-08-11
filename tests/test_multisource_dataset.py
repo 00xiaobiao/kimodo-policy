@@ -5,6 +5,7 @@ from collections import OrderedDict
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import av
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -21,6 +22,7 @@ from data.multisource_dataset import (
     SOURCE_HUMANOID_ARENA,
     SOURCE_HUMANOID_EVERYDAY,
     SOURCE_UNIFOLM,
+    VideoFrameDecodeError,
     _canonicalize_kimodo_window_translation,
     _episode_local_root_from_odometry,
     _hiw_hand_from_events,
@@ -700,6 +702,7 @@ class MultiSourceDatasetTest(unittest.TestCase):
         dataset = MultiSourceG1Dataset.__new__(MultiSourceG1Dataset)
         dataset.action_history = 2
         dataset.action_chunk = 2
+        dataset._episode_cache = OrderedDict()
         invalid_episode = _episode(
             source=SOURCE_UNIFOLM, episode_id="invalid", source_length=6
         )
@@ -716,6 +719,7 @@ class MultiSourceDatasetTest(unittest.TestCase):
         }
         dataset._sample_record = MagicMock(
             side_effect=[
+                (MagicMock(), invalid_episode, 2),
                 (MagicMock(), invalid_episode, 2),
                 (MagicMock(), valid_episode, 2),
             ]
@@ -737,8 +741,69 @@ class MultiSourceDatasetTest(unittest.TestCase):
         sample = dataset[0]
 
         self.assertEqual(sample["episode_id"], "valid")
-        self.assertEqual(dataset._sample_record.call_count, 2)
+        self.assertEqual(dataset._sample_record.call_count, 3)
+        self.assertEqual(dataset._episode_motion.call_count, 2)
+        self.assertIn(
+            invalid_episode.cache_key,
+            dataset._runtime_invalid_episodes,
+        )
         self.assertTrue(sample["gt_mask"].all())
+
+    def test_video_decode_failure_blacklists_episode_and_resamples(self):
+        dataset = MultiSourceG1Dataset.__new__(MultiSourceG1Dataset)
+        dataset.action_history = 2
+        dataset.action_chunk = 2
+        dataset._episode_cache = OrderedDict()
+        invalid_episode = _episode(episode_id="invalid-video", source_length=6)
+        valid_episode = _episode(episode_id="valid-video", source_length=6)
+        motion = {
+            "observed_motion": torch.zeros(6, 417),
+            "target_motion": torch.ones(6, 417),
+            "observed_hand": torch.zeros(6, 2),
+            "target_hand": torch.ones(6, 2),
+            "observed_hand_valid": torch.ones(6, 2, dtype=torch.bool),
+            "target_hand_valid": torch.ones(6, 2, dtype=torch.bool),
+        }
+        dataset._sample_record = MagicMock(
+            side_effect=[
+                (MagicMock(), invalid_episode, 2),
+                (MagicMock(), invalid_episode, 2),
+                (MagicMock(), valid_episode, 2),
+            ]
+        )
+        dataset._episode_motion = MagicMock(side_effect=[motion, motion])
+        dataset._read_video_frame = MagicMock(
+            side_effect=[
+                VideoFrameDecodeError("invalid packet"),
+                torch.zeros(3, 4, 5, dtype=torch.uint8),
+            ]
+        )
+        dataset._text_embeddings = {}
+
+        sample = dataset[0]
+
+        self.assertEqual(sample["episode_id"], "valid-video")
+        self.assertEqual(dataset._sample_record.call_count, 3)
+        self.assertEqual(dataset._episode_motion.call_count, 2)
+        self.assertEqual(dataset._read_video_frame.call_count, 2)
+        self.assertIn(
+            invalid_episode.cache_key,
+            dataset._runtime_invalid_episodes,
+        )
+
+    def test_invalid_video_packet_is_wrapped_with_path_context(self):
+        error = av.error.InvalidDataError(
+            1094995529, "Invalid data found when processing input"
+        )
+        with patch(
+            "data.multisource_dataset.av.open", side_effect=error
+        ), self.assertRaises(VideoFrameDecodeError) as raised:
+            MultiSourceG1Dataset._read_video_frame(
+                Path("broken.mp4"), timestamp=1.25
+            )
+
+        self.assertIn("broken.mp4", str(raised.exception))
+        self.assertIn("1.250s", str(raised.exception))
 
     def test_cache_key_separates_same_episode_id_across_tasks_and_files(self):
         dataset = MultiSourceG1Dataset.__new__(MultiSourceG1Dataset)

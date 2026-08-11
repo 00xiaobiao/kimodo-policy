@@ -149,6 +149,10 @@ KIMODO_MOTION_DIM = 417
 KIMODO_PLANAR_ROOT_FEATURE_INDICES = (0, 2)
 
 
+class VideoFrameDecodeError(RuntimeError):
+    """A video frame could not be decoded after the supported retries."""
+
+
 def _canonicalize_kimodo_window_translation(
     gt_motion: torch.Tensor,
     condition_motion: torch.Tensor,
@@ -2162,6 +2166,9 @@ class MultiSourceG1Dataset(data.Dataset):
         self._episode_cache: OrderedDict[
             tuple[str, str, str, str, int, int], dict[str, torch.Tensor]
         ] = OrderedDict()
+        self._runtime_invalid_episodes: set[
+            tuple[str, str, str, str, int, int]
+        ] = set()
         self._text_embeddings: dict[str, torch.Tensor] = {}
         sampling = dict(sampling or {})
         mode = str(sampling.get("mode", "episode_uniform"))
@@ -2374,12 +2381,25 @@ class MultiSourceG1Dataset(data.Dataset):
     def __getitem__(self, index: int) -> dict:
         rng = self._rng_for_index(index)
         skipped_reasons = []
+        invalid_episodes = getattr(self, "_runtime_invalid_episodes", None)
+        if invalid_episodes is None:
+            invalid_episodes = set()
+            self._runtime_invalid_episodes = invalid_episodes
         for _ in range(MAX_SAMPLE_ATTEMPTS):
             adapter, episode, original_cut = self._sample_record(rng)
+            if episode.cache_key in invalid_episodes:
+                skipped_reasons.append(
+                    f"{episode.source}/{episode.episode_id}: "
+                    "previously marked invalid"
+                )
+                continue
             episode_motion = self._episode_motion(adapter, episode)
             if episode_motion.get("skip_episode", False):
+                invalid_episodes.add(episode.cache_key)
+                self._episode_cache.pop(episode.cache_key, None)
                 skipped_reasons.append(
-                    f"{episode.episode_id}: {episode_motion.get('quality_issue', 'invalid episode')}"
+                    f"{episode.source}/{episode.episode_id}: "
+                    f"{episode_motion.get('quality_issue', 'invalid episode')}"
                 )
                 continue
             frame_offset = int(episode_motion.get("frame_offset", 0))
@@ -2391,8 +2411,30 @@ class MultiSourceG1Dataset(data.Dataset):
             history_length = cut - history_start
             future_end = min(available_length, cut + self.action_chunk)
             future_length = future_end - cut
-            if future_length == self.action_chunk:
-                break
+            if future_length != self.action_chunk:
+                continue
+            video_timestamp = (
+                episode.video_from_timestamp
+                + original_cut / episode.target_fps
+            )
+            try:
+                egoview = self._read_video_frame(
+                    episode.video_path,
+                    video_timestamp,
+                    crop=episode.metadata.get("video_crop"),
+                )
+            except VideoFrameDecodeError as error:
+                invalid_episodes.add(episode.cache_key)
+                self._episode_cache.pop(episode.cache_key, None)
+                reason = (
+                    f"{episode.source}/{episode.episode_id}: video decoding "
+                    f"failed for {episode.video_path} at "
+                    f"{video_timestamp:.3f}s"
+                )
+                skipped_reasons.append(reason)
+                logger.warning("Excluding %s: %s", reason, error)
+                continue
+            break
         else:
             details = "; ".join(skipped_reasons[-5:]) or "no valid sampled window"
             raise RuntimeError(
@@ -2444,12 +2486,6 @@ class MultiSourceG1Dataset(data.Dataset):
             condition_motion_mask,
             gt_mask,
         )
-
-        egoview = self._read_video_frame(
-            episode.video_path,
-            episode.video_from_timestamp + original_cut / episode.target_fps,
-            crop=episode.metadata.get("video_crop"),
-        )
         sample = {
             "instruction": episode.instruction,
             "egoview": egoview,
@@ -2487,6 +2523,10 @@ class MultiSourceG1Dataset(data.Dataset):
         for attempt in range(VIDEO_READ_MAX_ATTEMPTS):
             try:
                 with av.open(str(video_path)) as container:
+                    if not container.streams.video:
+                        raise VideoFrameDecodeError(
+                            f"No video stream in {video_path}"
+                        )
                     stream = container.streams.video[0]
                     stream.codec_context.thread_count = 1
                     container.seek(max(0, int(timestamp * av.time_base)))
@@ -2501,7 +2541,7 @@ class MultiSourceG1Dataset(data.Dataset):
                         if frame_time + 1e-6 >= timestamp:
                             break
                     if selected is None:
-                        raise RuntimeError(
+                        raise VideoFrameDecodeError(
                             f"Could not decode frame at {timestamp:.3f}s from {video_path}"
                         )
                     image = selected.to_ndarray(format="rgb24")
@@ -2519,9 +2559,17 @@ class MultiSourceG1Dataset(data.Dataset):
                     )
             except av.error.BlockingIOError as error:
                 if attempt == VIDEO_READ_MAX_ATTEMPTS - 1:
-                    raise RuntimeError(
+                    raise VideoFrameDecodeError(
                         f"PyAV repeatedly failed at {timestamp:.3f}s in {video_path}"
                     ) from error
                 delay = VIDEO_READ_RETRY_DELAY_SECONDS * (2**attempt)
                 time.sleep(delay)
-        raise RuntimeError(f"Could not read {video_path}")
+            except av.error.FFmpegError as error:
+                raise VideoFrameDecodeError(
+                    f"PyAV failed at {timestamp:.3f}s in {video_path}: {error}"
+                ) from error
+            except OSError as error:
+                raise VideoFrameDecodeError(
+                    f"Video I/O failed at {timestamp:.3f}s in {video_path}: {error}"
+                ) from error
+        raise VideoFrameDecodeError(f"Could not read {video_path}")
