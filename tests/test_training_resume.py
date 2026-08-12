@@ -10,7 +10,7 @@ from unittest.mock import patch
 import numpy as np
 import torch
 from torch import nn
-from torch.utils.data import BatchSampler
+from torch.utils.data import BatchSampler, get_worker_info
 from torch.optim.lr_scheduler import LambdaLR
 from accelerate.data_loader import BatchSamplerShard
 from omegaconf import OmegaConf
@@ -32,6 +32,7 @@ from train import (
     _save_task_text_embedding,
     _task_text_embedding_cache_path,
     _validate_init_checkpoint_config,
+    _validate_resume_config,
     _worker_seed,
     build_dataloader,
 )
@@ -51,6 +52,17 @@ class _TinyDataset:
 
     def __getitem__(self, index):
         return index
+
+
+class _WorkerIdentityDataset:
+    windows_per_episode = 4
+
+    def __len__(self):
+        return 64
+
+    def __getitem__(self, index):
+        worker = get_worker_info()
+        return index, -1 if worker is None else worker.id
 
 
 class TrainingResumeTest(unittest.TestCase):
@@ -455,6 +467,57 @@ class TrainingResumeTest(unittest.TestCase):
 
         self.assertEqual(reconstructed, list(range(start, stop)))
 
+    def test_eight_rank_sharding_keeps_four_window_groups_inside_each_batch(self):
+        batch_size = 128
+        world_size = 8
+        group_size = 4
+        start = 1024
+        stop = start + batch_size * world_size * 2
+        rank_batches = []
+        for rank in range(world_size):
+            batch_sampler = BatchSampler(
+                ResumableOrdinalSampler(start, stop),
+                batch_size=batch_size,
+                drop_last=True,
+            )
+            shard = BatchSamplerShard(
+                batch_sampler,
+                num_processes=world_size,
+                process_index=rank,
+                split_batches=False,
+            )
+            rank_batches.append(list(shard))
+
+        for batches in rank_batches:
+            for batch in batches:
+                self.assertEqual(len(batch), batch_size)
+                self.assertEqual(batch[0] % group_size, 0)
+                for offset in range(0, batch_size, group_size):
+                    group = batch[offset : offset + group_size]
+                    self.assertEqual(group, list(range(group[0], group[0] + group_size)))
+
+    def test_dataloader_assigns_each_group_to_one_worker(self):
+        config = SimpleNamespace(
+            main=SimpleNamespace(
+                cpu_workers_num=2,
+                batch_size=8,
+                seed=42,
+                max_steps=1,
+                gradient=SimpleNamespace(grad_accumulation_steps=1),
+            )
+        )
+        data_loader = build_dataloader(
+            config, train_dataset=_WorkerIdentityDataset()
+        )
+
+        indices, worker_ids = next(iter(data_loader))
+
+        self.assertEqual(indices.tolist(), list(range(8)))
+        for offset in range(0, 8, 4):
+            self.assertEqual(
+                len(set(worker_ids[offset : offset + 4].tolist())), 1
+            )
+
     def test_text_cache_without_instruction_metadata_is_rejected(self):
         task_id = "HumanoidArena::task-id"
         task_instructions = {task_id: "Open the door."}
@@ -650,6 +713,73 @@ class TrainingResumeTest(unittest.TestCase):
         self.assertTrue(kwargs["persistent_workers"])
         self.assertIsInstance(kwargs["sampler"], ResumableOrdinalSampler)
         self.assertEqual(kwargs["sampler"].start, 60000 * 16 * 4 * 2)
+
+    def test_dataloader_rejects_episode_groups_that_cross_batch_boundaries(self):
+        config = SimpleNamespace(
+            main=SimpleNamespace(
+                cpu_workers_num=0,
+                batch_size=8,
+                seed=42,
+            )
+        )
+        dataset = _TinyDataset()
+        dataset.windows_per_episode = 3
+
+        with self.assertRaisesRegex(
+            ValueError, "batch_size=8.*windows_per_episode=3"
+        ):
+            build_dataloader(config, train_dataset=dataset)
+
+    def test_only_pretrain_config_enables_grouped_episode_sampling(self):
+        project_root = Path(__file__).resolve().parents[1]
+        script_root = project_root / "scripts"
+        pretrain = OmegaConf.load(
+            script_root / "pt_UnifoLM_HumanoidEveryday_HIW_gbs1024_20w.yaml"
+        )
+        arena_only = OmegaConf.load(
+            script_root / "only_HumanoidArena_sonic_8_refpose_v3_1.yaml"
+        )
+        arena_ft = OmegaConf.load(
+            script_root / "ft_HumanoidArena_sonic_8_refpose_v3_1.yaml"
+        )
+
+        self.assertEqual(pretrain.main.sampling.windows_per_episode, 4)
+        self.assertEqual(arena_only.main.sampling.get("windows_per_episode", 1), 1)
+        self.assertEqual(arena_ft.main.sampling.get("windows_per_episode", 1), 1)
+        self.assertEqual(pretrain.main.batch_size % 4, 0)
+
+    def test_training_launchers_do_not_hardcode_a_local_conda_environment(self):
+        project_root = Path(__file__).resolve().parents[1]
+        for name in (
+            "pt_UnifoLM_HumanoidEveryday_HIW_gbs1024_20w.sh",
+            "only_HumanoidArena_sonic_8_refpose_v3_1.sh",
+            "ft_HumanoidArena_sonic_8_refpose_v3_1.sh",
+        ):
+            script = (project_root / "scripts" / name).read_text(encoding="utf-8")
+            self.assertNotIn("/home/CONNECT/", script)
+            self.assertNotIn("/mnt/workspace/", script)
+            self.assertIn("command -v accelerate", script)
+            self.assertIn("KIMODO_ENV", script)
+        pretrain_script = (
+            project_root
+            / "scripts/pt_UnifoLM_HumanoidEveryday_HIW_gbs1024_20w.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn('NUM_PROCESSES="${#GPU_IDS[@]}"', pretrain_script)
+        self.assertIn('--num_processes "${NUM_PROCESSES}"', pretrain_script)
+
+    def test_resume_rejects_a_changed_episode_group_size(self):
+        project_root = Path(__file__).resolve().parents[1]
+        config = OmegaConf.load(project_root / "train.yaml")
+        checkpoint_config = OmegaConf.to_container(config, resolve=True)
+        checkpoint_config["main"]["sampling"]["windows_per_episode"] = 4
+
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint_path = Path(directory)
+            (checkpoint_path / "config.json").write_text(
+                json.dumps(checkpoint_config), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ValueError, "main.sampling"):
+                _validate_resume_config(config, str(checkpoint_path))
 
     def test_spawn_dataloader_can_fetch_a_batch(self):
         config = SimpleNamespace(

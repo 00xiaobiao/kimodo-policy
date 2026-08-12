@@ -1,7 +1,7 @@
 main:
-  batch_size: 16
-  max_steps: 100000
-  save_steps: 20000
+  batch_size: 32
+  max_steps: 200000
+  save_steps: 50000
   action_chunk: 50
   action_history: 100
   sample_stride: 1
@@ -22,7 +22,7 @@ main:
   # The legacy merged name contains 8 tasks; the loader excludes HOI_grap_cup,
   # leaving 7 tasks and 700 episodes for training.
   episode_cache_size: 700
-  cpu_workers_num: 16
+  cpu_workers_num: 24
   precompute_text_embeddings: true
   wandb: "offline"
   wandb_project: "Kimodo-Policy"

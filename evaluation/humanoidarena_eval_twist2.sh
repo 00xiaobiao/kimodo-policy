@@ -56,7 +56,7 @@ Core options:
   --results-dir PATH           Output directory; generated automatically if omitted
 
 Runtime options:
-  --dtype fp32|bf16|fp16       Kimodo server dtype (default: fp32)
+  --dtype fp32|bf16            Kimodo server dtype (default: fp32)
   --diffusion-steps N          DDIM steps (default: 10)
   --execution-frames N         Execute this many 30 Hz model frames (default: 15; 0 means all)
   --rtc 0|1                    DDIM real-time chunking (default: 0)
@@ -311,7 +311,7 @@ for path in \
   [[ -e "$path" ]] || { echo "Required path is missing: $path" >&2; exit 3; }
 done
 
-case "$DTYPE" in fp32|bf16|fp16) ;; *) echo "Invalid dtype: $DTYPE" >&2; exit 2 ;; esac
+case "$DTYPE" in fp32|bf16) ;; *) echo "Invalid dtype: $DTYPE (expected fp32 or bf16)" >&2; exit 2 ;; esac
 for value in "$REPEATS_PER_SEED" "$DIFFUSION_STEPS" "$EXECUTION_FRAMES" "$RTC_OVERLAP_FRAMES" "$RTC_FROZEN_FRAMES" "$RECORD_VIDEO_EVERY_N" "$PORT_BASE" "$SERVER_READY_TIMEOUT" "$MAX_STEPS"; do
   [[ "$value" =~ ^[0-9]+$ ]] || { echo "Expected non-negative integer, got: $value" >&2; exit 2; }
 done

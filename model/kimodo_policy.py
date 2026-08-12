@@ -15,6 +15,24 @@ from motion.representation.kimodo_motionrep import KimodoMotionRep
 from dataclasses import dataclass
 
 
+def _masked_all_finite(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    mask = torch.broadcast_to(mask, values.shape)
+    return torch.logical_or(torch.isfinite(values), ~mask).all()
+
+
+def _masked_all_binary(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    mask = torch.broadcast_to(mask, values.shape)
+    is_binary = torch.logical_or(values == 0, values == 1)
+    return torch.logical_or(is_binary, ~mask).all()
+
+
+def _masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    mask = torch.broadcast_to(mask, values.shape)
+    masked_values = torch.where(mask, values, torch.zeros_like(values))
+    valid_count = mask.sum().clamp_min(1).to(dtype=values.dtype)
+    return masked_values.sum() / valid_count
+
+
 @dataclass
 class KimodoPolicyConfig:
     fps: int = 30
@@ -354,11 +372,9 @@ class KimodoPolicy(nn.Module):
             condition_motion_mask = (
                 condition_motion_mask & gt_mask.unsqueeze(-1)
             )
-        valid_target = gt_motion.masked_select(gt_mask.unsqueeze(-1))
-        valid_condition = condition_motion.masked_select(condition_motion_mask)
-        if not torch.isfinite(valid_target).all():
+        if not _masked_all_finite(gt_motion, gt_mask.unsqueeze(-1)):
             raise ValueError("gt_motion contains NaN or Inf in valid frames")
-        if not torch.isfinite(valid_condition).all():
+        if not _masked_all_finite(condition_motion, condition_motion_mask):
             raise ValueError("condition_motion contains NaN or Inf in valid features")
         if self.hand_head is not None:
             if gt_hand is None:
@@ -378,10 +394,9 @@ class KimodoPolicy(nn.Module):
                         f"got {tuple(gt_hand_mask.shape)}"
                     )
                 gt_hand_mask = gt_hand_mask & gt_mask.unsqueeze(-1)
-            valid_hand = gt_hand.masked_select(gt_hand_mask)
-            if not torch.isfinite(valid_hand).all():
+            if not _masked_all_finite(gt_hand, gt_hand_mask):
                 raise ValueError("gt_hand contains NaN or Inf")
-            if not torch.logical_or(valid_hand == 0, valid_hand == 1).all():
+            if not _masked_all_binary(gt_hand, gt_hand_mask):
                 raise ValueError("gt_hand must contain only binary 0/1 values")
         # 1. 标准化完整 motion
         x_start_full = self.representation.normalize(gt_motion)  # [B, T, 417]
@@ -460,12 +475,14 @@ class KimodoPolicy(nn.Module):
         body_slice = self.representation.body_slice
         root_valid = chunk_valid.unsqueeze(-1).expand_as(pred_chunk[..., root_slice])
         body_valid = chunk_valid.unsqueeze(-1).expand_as(pred_chunk[..., body_slice])
-        root_loss = nn.functional.mse_loss(
+        root_squared_error = nn.functional.mse_loss(
             pred_chunk[..., root_slice], x_start_chunk[..., root_slice], reduction="none"
-        ).masked_select(root_valid).mean()
-        body_loss = nn.functional.mse_loss(
+        )
+        body_squared_error = nn.functional.mse_loss(
             pred_chunk[..., body_slice], x_start_chunk[..., body_slice], reduction="none"
-        ).masked_select(body_valid).mean()
+        )
+        root_loss = _masked_mean(root_squared_error, root_valid)
+        body_loss = _masked_mean(body_squared_error, body_valid)
         motion_loss = (
             self.config.root_loss_weight * root_loss
             + self.config.body_loss_weight * body_loss

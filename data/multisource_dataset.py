@@ -138,6 +138,8 @@ HIW_SQUEEZE_OPEN_THRESHOLD = 0.5
 
 VIDEO_READ_MAX_ATTEMPTS = 4
 VIDEO_READ_RETRY_DELAY_SECONDS = 0.05
+DEFAULT_VIDEO_CACHE_SIZE = 32
+PARQUET_FILE_CACHE_SIZE = 16
 UNIFOLM_FIRST_ROOT_JUMP_THRESHOLD_METERS = 0.5
 UNIFOLM_INTERNAL_ROOT_JUMP_THRESHOLD_METERS = 0.5
 UNIFOLM_MAX_INITIAL_TRIM_FRAMES = 3
@@ -266,12 +268,39 @@ class ParquetEpisodeReader:
 
     def __init__(self) -> None:
         self._file_start_indices: dict[Path, int] = {}
+        self._parquet_files: OrderedDict[Path, pq.ParquetFile] = OrderedDict()
+
+    def __getstate__(self) -> dict:
+        state = self.__dict__.copy()
+        state["_parquet_files"] = OrderedDict()
+        return state
+
+    @staticmethod
+    def _close_parquet_file(parquet_file: pq.ParquetFile) -> None:
+        close = getattr(parquet_file, "close", None)
+        if close is not None:
+            close()
+
+    def close(self) -> None:
+        while self._parquet_files:
+            _, parquet_file = self._parquet_files.popitem(last=False)
+            self._close_parquet_file(parquet_file)
+
+    def _parquet_file(self, path: Path) -> pq.ParquetFile:
+        parquet_file = self._parquet_files.pop(path, None)
+        if parquet_file is None:
+            parquet_file = pq.ParquetFile(path)
+        self._parquet_files[path] = parquet_file
+        while len(self._parquet_files) > PARQUET_FILE_CACHE_SIZE:
+            _, evicted = self._parquet_files.popitem(last=False)
+            self._close_parquet_file(evicted)
+        return parquet_file
 
     def _file_start_index(self, path: Path) -> int:
         cached = self._file_start_indices.get(path)
         if cached is not None:
             return cached
-        parquet_file = pq.ParquetFile(path)
+        parquet_file = self._parquet_file(path)
         first_group = parquet_file.read_row_group(0, columns=["index"])
         if first_group.num_rows == 0:
             raise ValueError(f"Empty parquet file: {path}")
@@ -279,8 +308,8 @@ class ParquetEpisodeReader:
         self._file_start_indices[path] = start_index
         return start_index
 
-    @staticmethod
     def _read_row_range(
+        self,
         path: Path,
         columns: list[str],
         row_start: int,
@@ -290,7 +319,7 @@ class ParquetEpisodeReader:
             raise ValueError(
                 f"Invalid parquet row range [{row_start}, {row_end}) for {path}"
             )
-        parquet_file = pq.ParquetFile(path)
+        parquet_file = self._parquet_file(path)
         total_rows = parquet_file.metadata.num_rows
         if row_end > total_rows:
             raise ValueError(
@@ -312,7 +341,11 @@ class ParquetEpisodeReader:
                 break
         if not selected_groups or selected_start is None:
             raise RuntimeError(f"Could not resolve parquet row groups for {path}")
-        table = parquet_file.read_row_groups(selected_groups, columns=columns)
+        table = parquet_file.read_row_groups(
+            selected_groups,
+            columns=columns,
+            use_threads=False,
+        )
         table = table.slice(row_start - selected_start, row_end - row_start)
         if table.num_rows != row_end - row_start:
             raise RuntimeError(
@@ -1420,13 +1453,13 @@ class HumanoidArenaAdapter(BaseSourceAdapter):
         observed_root_rotations = rot6d_row_to_matrix(
             torch.from_numpy(state[:, :6])
         )
-        observed = decoder.decode_joint_configuration(
+        observed = decoder.decode_joint_configuration_pose(
             state[:, 6:35],
             np.zeros((state.shape[0], 3), dtype=np.float32),
             root_rotation_matrices=observed_root_rotations,
             joint_names=CANONICAL_G1_JOINT_NAMES_29,
         )
-        target = decoder.decode(actions)
+        target = decoder.decode_action_pose(actions)
         observed_hand = np.zeros((state.shape[0], 2), dtype=np.float32)
         observed_hand_valid = np.zeros_like(observed_hand, dtype=bool)
         target_hand = actions[:, 38:40]
@@ -1623,14 +1656,14 @@ class UnifoLMAdapter(BaseSourceAdapter):
 
         planar_origin = current[0, :2].copy()
         decoder = self._decoder(episode.source_fps)
-        observed = decoder.decode_joint_configuration(
+        observed = decoder.decode_joint_configuration_pose(
             current[:, 7:],
             current[:, :3],
             root_quaternions=current[:, 3:7],
             joint_names=UNITREE_G1_JOINT_NAMES_29,
             planar_origin=planar_origin,
         )
-        target = decoder.decode_joint_configuration(
+        target = decoder.decode_joint_configuration_pose(
             desired[:, 7:],
             desired[:, :3],
             root_quaternions=desired[:, 3:7],
@@ -1830,13 +1863,13 @@ class HumanoidEverydayAdapter(BaseSourceAdapter):
         local_root_position, local_root_rotations = (
             _episode_local_root_from_odometry(root_position, root_quaternion)
         )
-        observed = decoder.decode_joint_configuration(
+        observed = decoder.decode_joint_configuration_pose(
             observed_q,
             local_root_position,
             root_rotation_matrices=local_root_rotations,
             joint_names=UNITREE_G1_JOINT_NAMES_29,
         )
-        target = decoder.decode_joint_configuration(
+        target = decoder.decode_joint_configuration_pose(
             target_q,
             local_root_position,
             root_rotation_matrices=local_root_rotations,
@@ -2041,13 +2074,13 @@ class HIW500Adapter(BaseSourceAdapter):
         observed_valid = np.ones_like(observed_hand, dtype=bool)
         target_valid = np.ones_like(target_hand, dtype=bool)
         decoder = self._decoder(episode.source_fps)
-        observed = decoder.decode_joint_configuration(
+        observed = decoder.decode_joint_configuration_pose(
             joint_q,
             observed_root_position,
             root_rotation_matrices=observed_root_rotation,
             joint_names=UNITREE_G1_JOINT_NAMES_29,
         )
-        target = decoder.decode_joint_configuration(
+        target = decoder.decode_joint_configuration_pose(
             joint_q,
             target_root_position,
             root_rotation_matrices=target_root_rotation,
@@ -2094,6 +2127,7 @@ class MultiSourceG1Dataset(data.Dataset):
         action_chunk: int = 50,
         sample_stride: int = 1,
         episode_cache_size: int = 8,
+        video_cache_size: int = DEFAULT_VIDEO_CACHE_SIZE,
         dataset_selection: Mapping | None = None,
         sampling: Mapping | None = None,
         target_fps: float = 30.0,
@@ -2103,10 +2137,13 @@ class MultiSourceG1Dataset(data.Dataset):
         self.action_chunk = int(action_chunk)
         self.sample_stride = int(sample_stride)
         self.episode_cache_size = int(episode_cache_size)
+        self.video_cache_size = int(video_cache_size)
         self.target_fps = float(target_fps)
         self.sampling_seed = int(sampling_seed)
         if min(self.action_history, self.action_chunk, self.sample_stride) <= 0:
             raise ValueError("action_history, action_chunk and sample_stride must be positive")
+        if self.episode_cache_size < 0 or self.video_cache_size < 0:
+            raise ValueError("episode_cache_size and video_cache_size must be non-negative")
 
         roots = self._normalize_roots(dataset_root, dataset_roots)
         selections = self._normalize_selection(dataset_selection, roots)
@@ -2166,11 +2203,20 @@ class MultiSourceG1Dataset(data.Dataset):
         self._episode_cache: OrderedDict[
             tuple[str, str, str, str, int, int], dict[str, torch.Tensor]
         ] = OrderedDict()
+        self._video_cache: OrderedDict[str, tuple[object, object]] = OrderedDict()
         self._runtime_invalid_episodes: set[
             tuple[str, str, str, str, int, int]
         ] = set()
         self._text_embeddings: dict[str, torch.Tensor] = {}
         sampling = dict(sampling or {})
+        windows_per_episode = sampling.get("windows_per_episode", 1)
+        if (
+            isinstance(windows_per_episode, bool)
+            or not isinstance(windows_per_episode, int)
+            or windows_per_episode <= 0
+        ):
+            raise ValueError("sampling.windows_per_episode must be a positive integer")
+        self.windows_per_episode = windows_per_episode
         mode = str(sampling.get("mode", "episode_uniform"))
         if mode not in {
             "episode_uniform",
@@ -2210,6 +2256,10 @@ class MultiSourceG1Dataset(data.Dataset):
                 episode.sample_count for _, episode in self._all_episode_records
             ]
             sampling_detail = "episode weights are proportional to valid start points"
+        if self.windows_per_episode > 1:
+            sampling_detail += (
+                f"; {self.windows_per_episode} windows are sampled per episode group"
+            )
         logger.info(
             "Loaded mixed G1 dataset: sources=%s episodes=%s windows=%d sampling=%s (%s)",
             self._source_names,
@@ -2218,6 +2268,26 @@ class MultiSourceG1Dataset(data.Dataset):
             self.sampling_mode,
             sampling_detail,
         )
+
+    def __getstate__(self) -> dict:
+        state = self.__dict__.copy()
+        state["_video_cache"] = OrderedDict()
+        return state
+
+    def close(self) -> None:
+        video_cache = getattr(self, "_video_cache", None)
+        if video_cache is not None:
+            while video_cache:
+                _, (container, _) = video_cache.popitem(last=False)
+                container.close()
+        for adapter in getattr(self, "adapters", {}).values():
+            adapter.reader.close()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
 
     @staticmethod
     def _canonical_source_name(name: str) -> str:
@@ -2338,9 +2408,9 @@ class MultiSourceG1Dataset(data.Dataset):
         seed = value ^ (int(getattr(self, "sampling_seed", 0)) & _UINT64_MASK)
         return random.Random(seed)
 
-    def _sample_record(
+    def _sample_episode(
         self, rng=None
-    ) -> tuple[BaseSourceAdapter, EpisodeRecord, int]:
+    ) -> tuple[BaseSourceAdapter, EpisodeRecord]:
         rng = random if rng is None else rng
         if self.sampling_mode in {"source_balanced", "source_task_balanced"}:
             source = rng.choices(
@@ -2360,9 +2430,86 @@ class MultiSourceG1Dataset(data.Dataset):
             )[0]
         else:
             adapter, episode = rng.choice(self._all_episode_records)
+        return adapter, episode
+
+    def _sample_record(
+        self, rng=None
+    ) -> tuple[BaseSourceAdapter, EpisodeRecord, int]:
+        rng = random if rng is None else rng
+        adapter, episode = self._sample_episode(rng)
         local_index = rng.randrange(episode.sample_count)
         cut = episode.first_cut + local_index * self.sample_stride
         return adapter, episode, cut
+
+    def _sampling_state_for_index(
+        self, index: int
+    ) -> tuple[random.Random, int]:
+        windows_per_episode = int(getattr(self, "windows_per_episode", 1))
+        if windows_per_episode == 1:
+            return self._rng_for_index(index), 0
+        group_index, group_slot = divmod(int(index), windows_per_episode)
+        return self._rng_for_index(group_index), group_slot
+
+    def _sample_grouped_record(
+        self, rng: random.Random, group_slot: int
+    ) -> tuple[BaseSourceAdapter, EpisodeRecord, int]:
+        """Choose one episode and a deterministic window for one group slot."""
+        windows_per_episode = int(getattr(self, "windows_per_episode", 1))
+        if windows_per_episode == 1:
+            return self._sample_record(rng)
+        if not 0 <= int(group_slot) < windows_per_episode:
+            raise ValueError(
+                f"group_slot must be in [0, {windows_per_episode}), got {group_slot}"
+            )
+
+        adapter, episode = self._sample_episode(rng)
+        cut_rng = random.Random(rng.getrandbits(64))
+        local_indices = self._sample_group_local_indices(
+            cut_rng,
+            first_local_index=0,
+            valid_sample_count=episode.sample_count,
+        )
+        local_index = local_indices[int(group_slot)]
+        cut = episode.first_cut + local_index * self.sample_stride
+        return adapter, episode, cut
+
+    def _sample_group_local_indices(
+        self,
+        rng: random.Random,
+        *,
+        first_local_index: int,
+        valid_sample_count: int,
+    ) -> list[int]:
+        windows_per_episode = int(getattr(self, "windows_per_episode", 1))
+        first_local_index = int(first_local_index)
+        valid_sample_count = int(valid_sample_count)
+        if first_local_index < 0 or valid_sample_count <= 0:
+            raise ValueError(
+                "Grouped sampling requires a non-negative first index and at "
+                "least one valid sample"
+            )
+
+        first_selected = first_local_index + rng.randrange(valid_sample_count)
+        local_indices = [first_selected]
+        remaining_count = windows_per_episode - 1
+        if valid_sample_count >= windows_per_episode:
+            # Sample the remaining indices without materializing the potentially
+            # large range and remap around the already selected first index.
+            remaining_indices = rng.sample(
+                range(valid_sample_count - 1), remaining_count
+            )
+            first_relative_index = first_selected - first_local_index
+            local_indices.extend(
+                first_local_index
+                + (index if index < first_relative_index else index + 1)
+                for index in remaining_indices
+            )
+        else:
+            local_indices.extend(
+                first_local_index + rng.randrange(valid_sample_count)
+                for _ in range(remaining_count)
+            )
+        return local_indices
 
     def _episode_motion(
         self, adapter: BaseSourceAdapter, episode: EpisodeRecord
@@ -2379,14 +2526,19 @@ class MultiSourceG1Dataset(data.Dataset):
         return motion
 
     def __getitem__(self, index: int) -> dict:
-        rng = self._rng_for_index(index)
+        rng, group_slot = self._sampling_state_for_index(index)
+        windows_per_episode = int(getattr(self, "windows_per_episode", 1))
         skipped_reasons = []
         invalid_episodes = getattr(self, "_runtime_invalid_episodes", None)
         if invalid_episodes is None:
             invalid_episodes = set()
             self._runtime_invalid_episodes = invalid_episodes
         for _ in range(MAX_SAMPLE_ATTEMPTS):
-            adapter, episode, original_cut = self._sample_record(rng)
+            if windows_per_episode == 1:
+                adapter, episode, original_cut = self._sample_record(rng)
+            else:
+                adapter, episode = self._sample_episode(rng)
+                cut_rng = random.Random(rng.getrandbits(64))
             if episode.cache_key in invalid_episodes:
                 skipped_reasons.append(
                     f"{episode.source}/{episode.episode_id}: "
@@ -2403,10 +2555,54 @@ class MultiSourceG1Dataset(data.Dataset):
                 )
                 continue
             frame_offset = int(episode_motion.get("frame_offset", 0))
+            available_length = int(episode_motion["target_motion"].shape[0])
+            if windows_per_episode > 1:
+                first_valid_cut = max(episode.first_cut, frame_offset)
+                first_local_index = max(
+                    0,
+                    (
+                        first_valid_cut
+                        - episode.first_cut
+                        + self.sample_stride
+                        - 1
+                    )
+                    // self.sample_stride,
+                )
+                last_valid_cut = (
+                    frame_offset + available_length - self.action_chunk
+                )
+                last_local_index = min(
+                    episode.sample_count - 1,
+                    (last_valid_cut - episode.first_cut) // self.sample_stride,
+                )
+                valid_sample_count = last_local_index - first_local_index + 1
+                if valid_sample_count <= 0:
+                    skipped_reasons.append(
+                        f"{episode.source}/{episode.episode_id}: no valid window "
+                        "after logical frame trimming"
+                    )
+                    continue
+                if (
+                    valid_sample_count < episode.sample_count
+                    and cut_rng.randrange(episode.sample_count)
+                    >= valid_sample_count
+                ):
+                    # Match the legacy rejection sampler: selecting an episode
+                    # remains proportional to its configured sample_count, while
+                    # logically trimmed windows are rejected before a group is built.
+                    continue
+                local_indices = self._sample_group_local_indices(
+                    cut_rng,
+                    first_local_index=first_local_index,
+                    valid_sample_count=valid_sample_count,
+                )
+                original_cut = (
+                    episode.first_cut
+                    + local_indices[group_slot] * self.sample_stride
+                )
             cut = original_cut - frame_offset
             if cut < 0:
                 continue
-            available_length = int(episode_motion["target_motion"].shape[0])
             history_start = max(0, cut - self.action_history)
             history_length = cut - history_start
             future_end = min(available_length, cut + self.action_chunk)
@@ -2514,62 +2710,109 @@ class MultiSourceG1Dataset(data.Dataset):
             )
         return sample
 
-    @staticmethod
     def _read_video_frame(
+        self,
         video_path: Path,
         timestamp: float,
         crop: tuple[int, int, int, int] | None = None,
     ) -> torch.Tensor:
         for attempt in range(VIDEO_READ_MAX_ATTEMPTS):
+            container = None
+            cached = False
             try:
-                with av.open(str(video_path)) as container:
+                cache = getattr(self, "_video_cache", None)
+                if cache is None:
+                    cache = OrderedDict()
+                    self._video_cache = cache
+                cache_key = str(video_path)
+                entry = cache.pop(cache_key, None)
+                if entry is None:
+                    container = av.open(cache_key)
                     if not container.streams.video:
                         raise VideoFrameDecodeError(
                             f"No video stream in {video_path}"
                         )
                     stream = container.streams.video[0]
                     stream.codec_context.thread_count = 1
-                    container.seek(max(0, int(timestamp * av.time_base)))
-                    selected = None
-                    for frame in container.decode(stream):
-                        selected = frame
-                        frame_time = (
-                            float(frame.pts * stream.time_base)
-                            if frame.pts is not None
-                            else timestamp
-                        )
-                        if frame_time + 1e-6 >= timestamp:
-                            break
-                    if selected is None:
-                        raise VideoFrameDecodeError(
-                            f"Could not decode frame at {timestamp:.3f}s from {video_path}"
-                        )
-                    image = selected.to_ndarray(format="rgb24")
-                    if crop is not None:
-                        x0, y0, x1, y1 = map(int, crop)
-                        if not (0 <= x0 < x1 <= image.shape[1] and 0 <= y0 < y1 <= image.shape[0]):
-                            raise ValueError(
-                                f"Invalid video crop {crop} for frame shape {image.shape}"
-                            )
-                        image = image[y0:y1, x0:x1]
-                    return (
-                        torch.from_numpy(image.copy())
-                        .permute(2, 0, 1)
-                        .contiguous()
+                    if int(getattr(self, "video_cache_size", 0)) > 0:
+                        cache[cache_key] = (container, stream)
+                        cached = True
+                        while len(cache) > int(self.video_cache_size):
+                            _, (evicted, _) = cache.popitem(last=False)
+                            evicted.close()
+                else:
+                    container, stream = entry
+                    cache[cache_key] = entry
+                    cached = True
+
+                time_base = getattr(stream, "time_base", None)
+                if time_base is not None and float(time_base) > 0:
+                    seek_offset = max(0, int(timestamp / float(time_base)))
+                    container.seek(
+                        seek_offset,
+                        backward=True,
+                        any_frame=False,
+                        stream=stream,
                     )
+                else:
+                    container.seek(max(0, int(timestamp * av.time_base)))
+                selected = None
+                for frame in container.decode(stream):
+                    selected = frame
+                    frame_time = (
+                        float(frame.pts * stream.time_base)
+                        if frame.pts is not None
+                        else timestamp
+                    )
+                    if frame_time + 1e-6 >= timestamp:
+                        break
+                if selected is None:
+                    raise VideoFrameDecodeError(
+                        f"Could not decode frame at {timestamp:.3f}s from {video_path}"
+                    )
+                image = selected.to_ndarray(format="rgb24")
+                if crop is not None:
+                    x0, y0, x1, y1 = map(int, crop)
+                    if not (0 <= x0 < x1 <= image.shape[1] and 0 <= y0 < y1 <= image.shape[0]):
+                        raise ValueError(
+                            f"Invalid video crop {crop} for frame shape {image.shape}"
+                        )
+                    image = image[y0:y1, x0:x1]
+                return (
+                    torch.from_numpy(image.copy())
+                    .permute(2, 0, 1)
+                    .contiguous()
+                )
             except av.error.BlockingIOError as error:
+                self._discard_video_cache_entry(video_path)
                 if attempt == VIDEO_READ_MAX_ATTEMPTS - 1:
                     raise VideoFrameDecodeError(
                         f"PyAV repeatedly failed at {timestamp:.3f}s in {video_path}"
                     ) from error
                 delay = VIDEO_READ_RETRY_DELAY_SECONDS * (2**attempt)
                 time.sleep(delay)
+            except VideoFrameDecodeError:
+                self._discard_video_cache_entry(video_path)
+                raise
             except av.error.FFmpegError as error:
+                self._discard_video_cache_entry(video_path)
                 raise VideoFrameDecodeError(
                     f"PyAV failed at {timestamp:.3f}s in {video_path}: {error}"
                 ) from error
             except OSError as error:
+                self._discard_video_cache_entry(video_path)
                 raise VideoFrameDecodeError(
                     f"Video I/O failed at {timestamp:.3f}s in {video_path}: {error}"
                 ) from error
+            finally:
+                if container is not None and not cached:
+                    container.close()
         raise VideoFrameDecodeError(f"Could not read {video_path}")
+
+    def _discard_video_cache_entry(self, video_path: Path) -> None:
+        cache = getattr(self, "_video_cache", None)
+        if cache is None:
+            return
+        entry = cache.pop(str(video_path), None)
+        if entry is not None:
+            entry[0].close()

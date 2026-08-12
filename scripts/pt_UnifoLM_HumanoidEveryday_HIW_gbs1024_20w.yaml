@@ -34,9 +34,10 @@ main:
 
   sampling:
     mode: "window_proportional"
+    windows_per_episode: 4
 
-  episode_cache_size: 8
-  cpu_workers_num: 8
+  episode_cache_size: 16
+  cpu_workers_num: 12
   precompute_text_embeddings: true
   wandb: "offline"
   wandb_project: "Kimodo-Policy"

@@ -145,6 +145,7 @@ def build_dataset(config):
         action_chunk=config.main.action_chunk,
         sample_stride=config.main.get("sample_stride", 1),
         episode_cache_size=config.main.get("episode_cache_size", 2),
+        video_cache_size=config.main.get("video_cache_size", 32),
         dataset_selection=OmegaConf.to_container(
             config.main.get("dataset_selection", {}), resolve=True
         ),
@@ -254,6 +255,11 @@ def _initialize_dataloader_worker(
     np.random.seed(worker_seed % (2 ** 32))
     random.seed(worker_seed)
     torch.manual_seed(worker_seed % (2 ** 63 - 1))
+    torch.set_num_threads(1)
+    try:
+        torch.set_num_interop_threads(1)
+    except RuntimeError:
+        pass
 
 
 def build_dataloader(
@@ -265,6 +271,25 @@ def build_dataloader(
 ):
     train_dataset = train_dataset or build_dataset(config)
     worker_count = int(config.main.cpu_workers_num)
+    batch_size = int(config.main.batch_size)
+    windows_per_episode = int(
+        getattr(train_dataset, "windows_per_episode", 1)
+    )
+    if batch_size % windows_per_episode != 0:
+        raise ValueError(
+            f"main.batch_size={batch_size} must be divisible by "
+            "sampling.windows_per_episode="
+            f"{windows_per_episode} so episode groups stay within one batch"
+        )
+    if int(process_index) == 0:
+        logger.info(
+            "Data pipeline: workers_per_rank=%d total_workers=%d "
+            "video_cache_size=%d windows_per_episode=%d",
+            worker_count,
+            worker_count * max(1, int(world_size)),
+            int(getattr(train_dataset, "video_cache_size", 0)),
+            windows_per_episode,
+        )
     workers_per_process = max(1, worker_count)
     worker_init_fn = partial(
         _initialize_dataloader_worker,
@@ -282,7 +307,7 @@ def build_dataloader(
     )
     train_dataloader = DataLoader(
         train_dataset,
-        batch_size = config.main.batch_size,
+        batch_size = batch_size,
         shuffle = False,
         sampler = sampler,
         num_workers = worker_count,
@@ -1059,22 +1084,26 @@ def learning(config_path=None, resume=None, init_checkpoint=None):
         data_time = time.perf_counter() - data_start_time
         ## 8.2 预处理 batch
         device = accelerator.device
-        egoview   = batch["egoview"].to(device)
-        gt_motion = batch["gt_motion"].to(device)
+        egoview   = batch["egoview"].to(device, non_blocking=True)
+        gt_motion = batch["gt_motion"].to(device, non_blocking=True)
         condition_motion = batch.get("condition_motion")
         if condition_motion is not None:
-            condition_motion = condition_motion.to(device)
+            condition_motion = condition_motion.to(device, non_blocking=True)
         condition_motion_mask = batch.get("condition_motion_mask")
         if condition_motion_mask is not None:
-            condition_motion_mask = condition_motion_mask.to(device)
-        gt_hand   = batch["gt_hand"].to(device)
+            condition_motion_mask = condition_motion_mask.to(device, non_blocking=True)
+        gt_hand   = batch["gt_hand"].to(device, non_blocking=True)
         gt_hand_mask = batch.get("gt_hand_mask")
         if gt_hand_mask is not None:
-            gt_hand_mask = gt_hand_mask.to(device)
-        gt_mask   = batch["gt_mask"].to(device)
+            gt_hand_mask = gt_hand_mask.to(device, non_blocking=True)
+        gt_mask   = batch["gt_mask"].to(device, non_blocking=True)
         instruction = batch["instruction"]
         text_embedding = batch.get("text_embedding")
         text_length = batch.get("text_length")
+        if text_embedding is not None:
+            text_embedding = text_embedding.to(device, non_blocking=True)
+        if text_length is not None:
+            text_length = text_length.to(device, non_blocking=True)
         ## 8.3 前向传播 + 反向传播
         compute_start_time = time.perf_counter()
         control_grad_statistics = None

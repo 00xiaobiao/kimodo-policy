@@ -12,6 +12,7 @@ from evaluation.humanoidarena_server import (
     _partial_arena_state_to_motion,
     _partial_arena_state_history_to_motion,
     _resolve_rtc_parameters,
+    resample_hand_binary_chunk,
 )
 from motion.g1_reference import HumanoidArenaActionDecoder
 from motion.representation.kimodo_motionrep import KimodoMotionRep
@@ -545,6 +546,25 @@ class ServerTransactionTest(unittest.TestCase):
         self.assertEqual(action_chunk.shape, (3, 40))
         self.assertEqual(tuple(runtime.history_motion.shape), (1, 3, 4))
         torch.testing.assert_close(runtime.history_hand, previous_hand_history)
+
+    def test_model_sees_open_hands_but_resampling_uses_executed_hand_state(self):
+        runtime = _runtime(_FakeActionCodec())
+        runtime.history_hand = torch.tensor([[[1.0, 1.0]]])
+
+        with patch(
+            "evaluation.humanoidarena_server.resample_hand_binary_chunk",
+            wraps=resample_hand_binary_chunk,
+        ) as resample_hand:
+            runtime.infer(_payload())
+
+        torch.testing.assert_close(
+            runtime.model.received_hand_history,
+            torch.zeros_like(runtime.model.received_hand_history),
+        )
+        torch.testing.assert_close(
+            resample_hand.call_args.kwargs["previous_hand_binary"],
+            torch.tensor([1.0, 1.0]),
+        )
 
     def test_encoding_failure_does_not_advance_runtime_state(self):
         runtime = _runtime(

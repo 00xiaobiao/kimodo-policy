@@ -722,6 +722,13 @@ class KimodoHumanoidArenaRuntime:
                     "it does not match training history. Update HumanoidArena to send "
                     "observation.state_history at every replanning request."
                 )
+            # Existing checkpoints were trained without valid observed hand state,
+            # so the hand head always saw the default fully-open state.  Preserve
+            # that condition at inference while keeping history_hand_snapshot intact
+            # for continuous hand control across replanning boundaries.
+            model_hand_history_snapshot = torch.zeros_like(
+                model_hand_history_snapshot
+            )
             generator = None
             noise_seed = None
             if self.deterministic_eval:
@@ -829,8 +836,8 @@ class KimodoHumanoidArenaRuntime:
             )
             source_hand_binary = output.get("hand_binary")
             previous_hand_binary = (
-                model_hand_history_snapshot[0, -1].detach().float().cpu().clone()
-                if model_hand_history_snapshot.shape[1] > 0
+                history_hand_snapshot[0, -1].detach().float().cpu().clone()
+                if history_hand_snapshot.shape[1] > 0
                 else torch.zeros(2, dtype=torch.float32)
             )
             if source_hand_binary is not None:

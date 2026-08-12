@@ -1,6 +1,6 @@
 main:
-  batch_size: 16
-  max_steps: 100000
+  batch_size: 32
+  max_steps: 200000
   save_steps: 50000
   action_chunk: 50
   action_history: 100
@@ -22,7 +22,7 @@ main:
   # The legacy merged name contains 8 tasks; the loader excludes HOI_grap_cup,
   # leaving 7 tasks and 700 episodes for training.
   episode_cache_size: 700  # cache all usable episodes per worker; 2 TiB host RAM is sufficient
-  cpu_workers_num: 32      # 4 ranks x 32 workers = 128, matched to this 192-core server
+  cpu_workers_num: 24      # 4 ranks x 24 workers = 96, matched to the 96 physical cores
   precompute_text_embeddings: true
   wandb: "offline"
   wandb_project: "Kimodo-Policy"

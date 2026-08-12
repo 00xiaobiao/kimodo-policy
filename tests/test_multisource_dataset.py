@@ -2,6 +2,7 @@ import tempfile
 import unittest
 import random
 from collections import OrderedDict
+from fractions import Fraction
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -12,6 +13,7 @@ import pyarrow.parquet as pq
 import torch
 
 from data.multisource_dataset import (
+    BaseSourceAdapter,
     EpisodeRecord,
     HIW_G1_JOINT_FEATURE_NAMES_29,
     HIW_WBC_FEATURE_NAMES_23,
@@ -420,6 +422,93 @@ class MultiSourceDatasetTest(unittest.TestCase):
             encoded[:, 9:38], expected_canonical, rtol=1e-5, atol=1e-5
         )
 
+    def test_pose_only_decoder_preserves_final_training_motion_exactly(self):
+        decoder = HumanoidArenaActionDecoder(
+            G1Skeleton34(), XML_PATH, fps=50.0
+        )
+        generator = torch.Generator().manual_seed(9012)
+        frame_count = 24
+        joint_positions = (
+            torch.randn(frame_count, 29, generator=generator) * 0.1
+        )
+        root_positions = (
+            torch.randn(frame_count, 3, generator=generator) * 0.02
+        )
+        root_positions[:, 2] += 0.8
+        root_quaternions = torch.zeros(frame_count, 4)
+        root_quaternions[:, 0] = 1.0
+        observed_pose_only = decoder.decode_joint_configuration_pose(
+            joint_positions,
+            root_positions,
+            root_quaternions=root_quaternions,
+        )
+        observed_full = decoder.decode_joint_configuration(
+            joint_positions,
+            root_positions,
+            root_quaternions=root_quaternions,
+        )
+        actions = torch.zeros(frame_count, 40)
+        actions[:, :2] = torch.randn(
+            frame_count, 2, generator=generator
+        ) * 0.005
+        actions[:, 2] = 0.8
+        yaw = torch.randn(frame_count, generator=generator) * 0.1
+        actions[:, 3:9] = torch.stack(
+            (
+                torch.cos(yaw),
+                -torch.sin(yaw),
+                torch.sin(yaw),
+                torch.cos(yaw),
+                torch.zeros_like(yaw),
+                torch.zeros_like(yaw),
+            ),
+            dim=-1,
+        )
+        actions[:, 9:38] = (
+            torch.randn(frame_count, 29, generator=generator) * 0.1
+        )
+        target_pose_only = decoder.decode_action_pose(actions)
+        target_full = decoder.decode(actions)
+        episode = _episode(source_length=frame_count, source_fps=50.0)
+        hands = torch.zeros(frame_count, 2)
+        valid = torch.ones(frame_count, 2, dtype=torch.bool)
+
+        adapter = BaseSourceAdapter.__new__(BaseSourceAdapter)
+        adapter.target_fps = 30.0
+        adapter._representation = None
+        old_path = adapter._finalize_motion(
+            episode,
+            observed_full["local_rot_mats"],
+            observed_full["root_positions"],
+            target_full["local_rot_mats"],
+            target_full["root_positions"],
+            hands,
+            hands,
+            valid,
+            valid,
+        )
+        new_path = adapter._finalize_motion(
+            episode,
+            observed_pose_only["local_rot_mats"],
+            observed_pose_only["root_positions"],
+            target_pose_only["local_rot_mats"],
+            target_pose_only["root_positions"],
+            hands,
+            hands,
+            valid,
+            valid,
+        )
+
+        self.assertEqual(set(old_path), set(new_path))
+        for key in old_path:
+            if torch.is_tensor(old_path[key]):
+                self.assertTrue(
+                    torch.equal(old_path[key], new_path[key]),
+                    msg=f"Training field changed: {key}",
+                )
+            else:
+                self.assertEqual(old_path[key], new_path[key])
+
     def test_fifty_hz_motion_resamples_to_thirty_hz_with_shared_endpoints(self):
         source_frames = 51
         rotations = torch.eye(3).reshape(1, 1, 3, 3).repeat(
@@ -547,9 +636,18 @@ class MultiSourceDatasetTest(unittest.TestCase):
                 metadata={"dataset_from_index": 13, "dataset_to_index": 17},
             )
 
-            result = ParquetEpisodeReader().read(episode, ["value"])
+            reader = ParquetEpisodeReader()
+            with patch(
+                "data.multisource_dataset.pq.ParquetFile",
+                wraps=pq.ParquetFile,
+            ) as open_parquet:
+                result = reader.read(episode, ["value"])
+                repeated = reader.read(episode, ["value"])
 
             self.assertEqual(result["value"], [3, 4, 5, 6])
+            self.assertEqual(repeated, result)
+            self.assertEqual(open_parquet.call_count, 1)
+            reader.close()
 
     def test_history_conditions_on_state_while_clean_motion_uses_action(self):
         dataset = MultiSourceG1Dataset.__new__(MultiSourceG1Dataset)
@@ -792,18 +890,56 @@ class MultiSourceDatasetTest(unittest.TestCase):
         )
 
     def test_invalid_video_packet_is_wrapped_with_path_context(self):
+        dataset = MultiSourceG1Dataset.__new__(MultiSourceG1Dataset)
+        dataset.video_cache_size = 0
+        dataset._video_cache = OrderedDict()
         error = av.error.InvalidDataError(
             1094995529, "Invalid data found when processing input"
         )
         with patch(
             "data.multisource_dataset.av.open", side_effect=error
         ), self.assertRaises(VideoFrameDecodeError) as raised:
-            MultiSourceG1Dataset._read_video_frame(
-                Path("broken.mp4"), timestamp=1.25
-            )
+            dataset._read_video_frame(Path("broken.mp4"), timestamp=1.25)
 
         self.assertIn("broken.mp4", str(raised.exception))
         self.assertIn("1.250s", str(raised.exception))
+
+    def test_video_container_cache_reuses_open_file_without_changing_pixels(self):
+        dataset = MultiSourceG1Dataset.__new__(MultiSourceG1Dataset)
+        dataset.video_cache_size = 2
+        dataset._video_cache = OrderedDict()
+        dataset.adapters = {}
+
+        first_frame = MagicMock()
+        first_frame.pts = 30
+        first_frame.to_ndarray.return_value = np.full((2, 3, 3), 17, dtype=np.uint8)
+        second_frame = MagicMock()
+        second_frame.pts = 60
+        second_frame.to_ndarray.return_value = np.full((2, 3, 3), 29, dtype=np.uint8)
+        stream = MagicMock()
+        stream.time_base = Fraction(1, 30)
+        stream.codec_context.thread_count = 0
+        container = MagicMock()
+        container.streams.video = [stream]
+        container.decode.side_effect = [[first_frame], [second_frame]]
+
+        with patch("data.multisource_dataset.av.open", return_value=container) as open_video:
+            first = dataset._read_video_frame(Path("sample.mp4"), 1.0)
+            second = dataset._read_video_frame(Path("sample.mp4"), 2.0)
+
+        self.assertEqual(open_video.call_count, 1)
+        self.assertTrue(torch.equal(first, torch.full((3, 2, 3), 17, dtype=torch.uint8)))
+        self.assertTrue(torch.equal(second, torch.full((3, 2, 3), 29, dtype=torch.uint8)))
+        self.assertEqual(container.seek.call_count, 2)
+        container.seek.assert_any_call(
+            30, backward=True, any_frame=False, stream=stream
+        )
+        container.seek.assert_any_call(
+            60, backward=True, any_frame=False, stream=stream
+        )
+
+        dataset.close()
+        container.close.assert_called_once_with()
 
     def test_cache_key_separates_same_episode_id_across_tasks_and_files(self):
         dataset = MultiSourceG1Dataset.__new__(MultiSourceG1Dataset)
@@ -956,6 +1092,292 @@ class MultiSourceDatasetTest(unittest.TestCase):
             k=1,
         )
         self.assertIs(selected, long[1])
+
+    def test_default_group_size_preserves_the_original_sampling_sequence(self):
+        dataset = MultiSourceG1Dataset.__new__(MultiSourceG1Dataset)
+        dataset.sampling_seed = 19
+        dataset.sampling_mode = "window_proportional"
+        dataset.sample_stride = 2
+        records = [
+            (MagicMock(), _episode(source_length=100, episode_id=str(index)))
+            for index in range(5)
+        ]
+        for index, (_, episode) in enumerate(records):
+            episode.first_cut = index
+            episode.sample_count = 20 + index
+        dataset._all_episode_records = records
+        dataset._episode_weights = [episode.sample_count for _, episode in records]
+
+        original = []
+        grouped_default = []
+        for index in range(64):
+            original.append(
+                dataset._sample_record(dataset._rng_for_index(index))[1:]
+            )
+            rng, group_slot = dataset._sampling_state_for_index(index)
+            grouped_default.append(
+                dataset._sample_grouped_record(rng, group_slot)[1:]
+            )
+
+        self.assertEqual(
+            [(episode.episode_id, cut) for episode, cut in grouped_default],
+            [(episode.episode_id, cut) for episode, cut in original],
+        )
+
+    def test_grouped_sampling_reuses_episode_and_avoids_duplicate_windows(self):
+        dataset = MultiSourceG1Dataset.__new__(MultiSourceG1Dataset)
+        dataset.sampling_seed = 23
+        dataset.sampling_mode = "window_proportional"
+        dataset.windows_per_episode = 4
+        dataset.sample_stride = 1
+        records = [
+            (MagicMock(), _episode(source_length=100, episode_id=str(index)))
+            for index in range(8)
+        ]
+        for _, episode in records:
+            episode.sample_count = 80
+        dataset._all_episode_records = records
+        dataset._episode_weights = [episode.sample_count for _, episode in records]
+
+        groups = []
+        for group_index in range(2):
+            group = []
+            for index in range(group_index * 4, group_index * 4 + 4):
+                rng, group_slot = dataset._sampling_state_for_index(index)
+                _, episode, cut = dataset._sample_grouped_record(rng, group_slot)
+                group.append((episode.episode_id, cut))
+            groups.append(group)
+
+        for group in groups:
+            self.assertEqual(len({episode_id for episode_id, _ in group}), 1)
+            self.assertEqual(len({cut for _, cut in group}), 4)
+        first_group_again = []
+        for index in range(4):
+            rng, group_slot = dataset._sampling_state_for_index(index)
+            _, episode, cut = dataset._sample_grouped_record(rng, group_slot)
+            first_group_again.append((episode.episode_id, cut))
+        self.assertEqual(first_group_again, groups[0])
+
+    def test_grouped_sampling_uses_only_windows_after_logical_frame_trim(self):
+        dataset = MultiSourceG1Dataset.__new__(MultiSourceG1Dataset)
+        dataset.action_history = 4
+        dataset.action_chunk = 2
+        dataset.sample_stride = 1
+        dataset.sampling_seed = 37
+        dataset.sampling_mode = "episode_uniform"
+        dataset.windows_per_episode = 4
+        dataset._episode_cache = OrderedDict()
+        dataset._runtime_invalid_episodes = set()
+        dataset._text_embeddings = {}
+        adapter = MagicMock()
+        episode = _episode(source_length=12, episode_id="trimmed")
+        episode.sample_count = 11
+        motion = {
+            "observed_motion": torch.zeros(9, 417),
+            "observed_motion_valid": torch.ones(9, 417, dtype=torch.bool),
+            "target_motion": torch.ones(9, 417),
+            "observed_hand": torch.zeros(9, 2),
+            "target_hand": torch.ones(9, 2),
+            "observed_hand_valid": torch.ones(9, 2, dtype=torch.bool),
+            "target_hand_valid": torch.ones(9, 2, dtype=torch.bool),
+            "frame_offset": 3,
+            "source_frame_offset": 3,
+        }
+        dataset._all_episode_records = [(adapter, episode)]
+        dataset._episode_motion = MagicMock(return_value=motion)
+        dataset._read_video_frame = MagicMock(
+            return_value=torch.zeros(3, 4, 5, dtype=torch.uint8)
+        )
+
+        samples = [dataset[index] for index in range(4)]
+
+        self.assertEqual({sample["episode_id"] for sample in samples}, {"trimmed"})
+        self.assertEqual(len({sample["cut_index"] for sample in samples}), 4)
+        self.assertTrue(all(sample["cut_index"] >= 3 for sample in samples))
+        self.assertTrue(all(sample["motion_cut_index"] >= 0 for sample in samples))
+
+    def test_grouped_trim_rejection_preserves_legacy_episode_probability(self):
+        dataset = MultiSourceG1Dataset.__new__(MultiSourceG1Dataset)
+        dataset.action_history = 4
+        dataset.action_chunk = 2
+        dataset.sample_stride = 1
+        dataset.sampling_seed = 43
+        dataset.sampling_mode = "episode_uniform"
+        dataset.windows_per_episode = 4
+        dataset._episode_cache = OrderedDict()
+        dataset._runtime_invalid_episodes = set()
+        dataset._text_embeddings = {}
+        trimmed_adapter = MagicMock()
+        valid_adapter = MagicMock()
+        trimmed = _episode(source_length=12, episode_id="trimmed")
+        valid = _episode(source_length=12, episode_id="valid")
+        trimmed.sample_count = valid.sample_count = 11
+        trimmed_motion = {
+            "observed_motion": torch.zeros(9, 417),
+            "observed_motion_valid": torch.ones(9, 417, dtype=torch.bool),
+            "target_motion": torch.ones(9, 417),
+            "observed_hand": torch.zeros(9, 2),
+            "target_hand": torch.ones(9, 2),
+            "observed_hand_valid": torch.ones(9, 2, dtype=torch.bool),
+            "target_hand_valid": torch.ones(9, 2, dtype=torch.bool),
+            "frame_offset": 3,
+        }
+        valid_motion = {
+            key: value.clone() if torch.is_tensor(value) else value
+            for key, value in trimmed_motion.items()
+            if key != "frame_offset"
+        }
+        valid_motion = {
+            **valid_motion,
+            "observed_motion": torch.zeros(12, 417),
+            "observed_motion_valid": torch.ones(12, 417, dtype=torch.bool),
+            "target_motion": torch.ones(12, 417),
+            "observed_hand": torch.zeros(12, 2),
+            "target_hand": torch.ones(12, 2),
+            "observed_hand_valid": torch.ones(12, 2, dtype=torch.bool),
+            "target_hand_valid": torch.ones(12, 2, dtype=torch.bool),
+        }
+
+        def load_motion(adapter, _episode_record):
+            return trimmed_motion if adapter is trimmed_adapter else valid_motion
+
+        dataset._episode_motion = MagicMock(side_effect=load_motion)
+        dataset._read_video_frame = MagicMock(
+            return_value=torch.zeros(3, 4, 5, dtype=torch.uint8)
+        )
+
+        def episode_sequence(rng):
+            attempt = getattr(rng, "_test_attempt", 0)
+            rng._test_attempt = attempt + 1
+            return (
+                (trimmed_adapter, trimmed)
+                if attempt == 0
+                else (valid_adapter, valid)
+            )
+
+        with patch.object(dataset, "_sample_episode", side_effect=episode_sequence), patch(
+            "data.multisource_dataset.random.Random.randrange",
+            autospec=True,
+            side_effect=lambda rng, stop: stop - 1,
+        ):
+            samples = [dataset[index] for index in range(4)]
+
+        self.assertEqual({sample["episode_id"] for sample in samples}, {"valid"})
+
+    def test_grouped_retry_stays_synchronized_after_invalid_episode(self):
+        dataset = MultiSourceG1Dataset.__new__(MultiSourceG1Dataset)
+        dataset.action_history = 4
+        dataset.action_chunk = 2
+        dataset.sample_stride = 1
+        dataset.sampling_seed = 41
+        dataset.sampling_mode = "episode_uniform"
+        dataset.windows_per_episode = 4
+        dataset._episode_cache = OrderedDict()
+        dataset._runtime_invalid_episodes = set()
+        dataset._text_embeddings = {}
+        invalid_adapter = MagicMock()
+        valid_adapter = MagicMock()
+        invalid = _episode(source_length=12, episode_id="invalid")
+        valid = _episode(source_length=12, episode_id="valid")
+        invalid.sample_count = valid.sample_count = 11
+        dataset._all_episode_records = [
+            (invalid_adapter, invalid),
+            (valid_adapter, valid),
+        ]
+        valid_motion = {
+            "observed_motion": torch.zeros(12, 417),
+            "observed_motion_valid": torch.ones(12, 417, dtype=torch.bool),
+            "target_motion": torch.ones(12, 417),
+            "observed_hand": torch.zeros(12, 2),
+            "target_hand": torch.ones(12, 2),
+            "observed_hand_valid": torch.ones(12, 2, dtype=torch.bool),
+            "target_hand_valid": torch.ones(12, 2, dtype=torch.bool),
+        }
+
+        def load_motion(adapter, _episode_record):
+            if adapter is invalid_adapter:
+                return {"skip_episode": True, "quality_issue": "invalid"}
+            return valid_motion
+
+        dataset._episode_motion = MagicMock(side_effect=load_motion)
+        dataset._read_video_frame = MagicMock(
+            return_value=torch.zeros(3, 4, 5, dtype=torch.uint8)
+        )
+
+        with patch.object(
+            dataset,
+            "_sample_episode",
+            side_effect=lambda rng: (
+                (invalid_adapter, invalid)
+                if rng.random() < 1.0
+                else (valid_adapter, valid)
+            ),
+        ):
+            # Keep the episode sequence deterministic while forcing the first
+            # attempt invalid and the second valid for every group slot.
+            def deterministic_episode(rng):
+                attempt = getattr(rng, "_test_attempt", 0)
+                rng._test_attempt = attempt + 1
+                return (
+                    (invalid_adapter, invalid)
+                    if attempt == 0
+                    else (valid_adapter, valid)
+                )
+
+            dataset._sample_episode.side_effect = deterministic_episode
+            samples = [dataset[index] for index in range(4)]
+
+        self.assertEqual({sample["episode_id"] for sample in samples}, {"valid"})
+        self.assertEqual(len({sample["cut_index"] for sample in samples}), 4)
+
+    def test_grouped_sampling_resume_uses_the_same_absolute_ordinal_sequence(self):
+        dataset = MultiSourceG1Dataset.__new__(MultiSourceG1Dataset)
+        dataset.sampling_seed = 29
+        dataset.sampling_mode = "episode_uniform"
+        dataset.windows_per_episode = 4
+        dataset.sample_stride = 1
+        records = [
+            (MagicMock(), _episode(source_length=100, episode_id=str(index)))
+            for index in range(6)
+        ]
+        for _, episode in records:
+            episode.sample_count = 80
+        dataset._all_episode_records = records
+
+        def sample(indices):
+            result = []
+            for index in indices:
+                rng, group_slot = dataset._sampling_state_for_index(index)
+                _, episode, cut = dataset._sample_grouped_record(rng, group_slot)
+                result.append((episode.episode_id, cut))
+            return result
+
+        uninterrupted = sample(range(32))
+        resumed = sample(range(16)) + sample(range(16, 32))
+
+        self.assertEqual(resumed, uninterrupted)
+
+    def test_grouped_window_proportional_sampling_keeps_episode_weights(self):
+        dataset = MultiSourceG1Dataset.__new__(MultiSourceG1Dataset)
+        dataset.sampling_seed = 31
+        dataset.sampling_mode = "window_proportional"
+        dataset.windows_per_episode = 4
+        dataset.sample_stride = 1
+        short = (MagicMock(), _episode(episode_id="short", source_length=20))
+        long = (MagicMock(), _episode(episode_id="long", source_length=100))
+        short[1].sample_count = 20
+        long[1].sample_count = 80
+        dataset._all_episode_records = [short, long]
+        dataset._episode_weights = [20, 80]
+
+        selected_long = 0
+        group_count = 10000
+        for group_index in range(group_count):
+            rng, group_slot = dataset._sampling_state_for_index(group_index * 4)
+            _, episode, _ = dataset._sample_grouped_record(rng, group_slot)
+            selected_long += episode.episode_id == "long"
+
+        self.assertAlmostEqual(selected_long / group_count, 0.8, delta=0.02)
 
     def test_sample_ordinal_is_independent_of_process_random_state(self):
         dataset = MultiSourceG1Dataset.__new__(MultiSourceG1Dataset)

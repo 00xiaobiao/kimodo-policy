@@ -6,7 +6,12 @@ from types import SimpleNamespace
 import torch
 from torch import nn
 
-from model.kimodo_policy import KimodoPolicy
+from model.kimodo_policy import (
+    KimodoPolicy,
+    _masked_all_binary,
+    _masked_all_finite,
+    _masked_mean,
+)
 from model.modules.backbone import pad_x_and_mask_to_fixed_size
 from model.modules.diffusion import DDIMSampler, Diffusion
 from model.modules.dinov3_wrapper import DINOv3Encoder
@@ -77,6 +82,51 @@ class _MotionRep:
 
 
 class ModelRobustnessTest(unittest.TestCase):
+    def test_masked_operations_keep_one_compiled_graph_when_mask_counts_change(self):
+        compile_count = 0
+
+        def counting_backend(graph_module, _example_inputs):
+            nonlocal compile_count
+            compile_count += 1
+            return graph_module.forward
+
+        def masked_operations(values, mask):
+            return (
+                _masked_all_finite(values, mask),
+                _masked_all_binary(values, mask),
+                _masked_mean(values, mask),
+            )
+
+        compiled = torch.compile(
+            masked_operations,
+            backend=counting_backend,
+            dynamic=False,
+        )
+        values = torch.tensor([[0.0, 1.0, 1.0], [1.0, 0.0, 1.0]])
+        dense_mask = torch.ones_like(values, dtype=torch.bool)
+        sparse_mask = torch.tensor(
+            [[True, False, False], [False, True, False]],
+            dtype=torch.bool,
+        )
+
+        dense_finite, dense_binary, dense_mean = compiled(values, dense_mask)
+        sparse_finite, sparse_binary, sparse_mean = compiled(values, sparse_mask)
+
+        self.assertEqual(compile_count, 1)
+        self.assertTrue(dense_finite)
+        self.assertTrue(dense_binary)
+        self.assertTrue(sparse_finite)
+        self.assertTrue(sparse_binary)
+        torch.testing.assert_close(dense_mean, values.mean())
+        torch.testing.assert_close(sparse_mean, torch.tensor(0.0))
+
+    def test_masked_validation_ignores_only_unselected_values(self):
+        values = torch.tensor([[0.0, float("nan"), 2.0]])
+        mask = torch.tensor([[True, False, True]])
+
+        self.assertTrue(_masked_all_finite(values, mask))
+        self.assertFalse(_masked_all_binary(values, mask))
+
     def test_strict_controlnet_checkpoint_loading_rejects_missing_parameters(self):
         policy = KimodoPolicy.__new__(KimodoPolicy)
         nn.Module.__init__(policy)

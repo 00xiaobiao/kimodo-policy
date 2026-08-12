@@ -344,7 +344,10 @@ class HumanoidArenaActionDecoder:
             positions[frame_index, :2] = positions[frame_index - 1, :2] + (rotation @ local_delta)[:2]
         return positions
 
-    def decode(self, actions: np.ndarray | torch.Tensor) -> dict[str, torch.Tensor]:
+    def decode_action_pose(
+        self, actions: np.ndarray | torch.Tensor
+    ) -> dict[str, torch.Tensor]:
+        """Decode Arena actions into the pose inputs required by motion reps."""
         actions = torch.as_tensor(actions, dtype=torch.float32)
         if actions.ndim != 2 or actions.shape[-1] != 40:
             raise ValueError(f"Expected HumanoidArena action shape (T, 40), got {tuple(actions.shape)}")
@@ -371,9 +374,21 @@ class HumanoidArenaActionDecoder:
             local_rot_mats[:, skeleton_index] = torch.einsum(
                 "ij,tjk->tik", self.rot_offsets_f2q[skeleton_index].T, rotation_f2q
             )
-        return _complete_motion_dict(local_rot_mats, root_positions, self.skeleton, self.fps)
+        return {
+            "local_rot_mats": local_rot_mats,
+            "root_positions": root_positions,
+        }
 
-    def decode_joint_configuration(
+    def decode(self, actions: np.ndarray | torch.Tensor) -> dict[str, torch.Tensor]:
+        pose = self.decode_action_pose(actions)
+        return _complete_motion_dict(
+            pose["local_rot_mats"],
+            pose["root_positions"],
+            self.skeleton,
+            self.fps,
+        )
+
+    def decode_joint_configuration_pose(
         self,
         joint_positions: np.ndarray | torch.Tensor,
         root_positions: np.ndarray | torch.Tensor,
@@ -382,7 +397,7 @@ class HumanoidArenaActionDecoder:
         joint_names: tuple[str, ...] = UNITREE_G1_JOINT_NAMES_29,
         planar_origin: np.ndarray | torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
-        """Decode an absolute G1 configuration sequence into Kimodo coordinates.
+        """Decode an absolute G1 configuration into Kimodo pose coordinates.
 
         The source coordinate convention is Unitree/MuJoCo: x forward, y left,
         z up, with quaternions in ``(w, x, y, z)`` order. ``planar_origin`` is
@@ -483,8 +498,34 @@ class HumanoidArenaActionDecoder:
                 self.rot_offsets_f2q[skeleton_index].T,
                 rotation_f2q,
             )
+        return {
+            "local_rot_mats": local_rot_mats,
+            "root_positions": root_positions_kimodo,
+        }
+
+    def decode_joint_configuration(
+        self,
+        joint_positions: np.ndarray | torch.Tensor,
+        root_positions: np.ndarray | torch.Tensor,
+        root_quaternions: np.ndarray | torch.Tensor | None = None,
+        root_rotation_matrices: np.ndarray | torch.Tensor | None = None,
+        joint_names: tuple[str, ...] = UNITREE_G1_JOINT_NAMES_29,
+        planar_origin: np.ndarray | torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """Decode an absolute G1 configuration and derive full motion fields."""
+        pose = self.decode_joint_configuration_pose(
+            joint_positions,
+            root_positions,
+            root_quaternions=root_quaternions,
+            root_rotation_matrices=root_rotation_matrices,
+            joint_names=joint_names,
+            planar_origin=planar_origin,
+        )
         return _complete_motion_dict(
-            local_rot_mats, root_positions_kimodo, self.skeleton, self.fps
+            pose["local_rot_mats"],
+            pose["root_positions"],
+            self.skeleton,
+            self.fps,
         )
 
     def encode(

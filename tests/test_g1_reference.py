@@ -121,6 +121,72 @@ class G1ReferenceTest(unittest.TestCase):
             atol=2e-5,
         )
 
+    def test_action_pose_decoder_matches_full_decoder_pose_exactly(self):
+        decoder = HumanoidArenaActionDecoder(
+            G1Skeleton34(), XML_PATH, fps=30.0
+        )
+        generator = torch.Generator().manual_seed(1234)
+        actions = torch.zeros(24, 40)
+        actions[:, :3] = torch.randn(24, 3, generator=generator) * 0.01
+        actions[:, 2] += 0.8
+        root_angles = torch.randn(24, generator=generator) * 0.2
+        actions[:, 3:9] = torch.stack(
+            (
+                torch.cos(root_angles),
+                -torch.sin(root_angles),
+                torch.sin(root_angles),
+                torch.cos(root_angles),
+                torch.zeros_like(root_angles),
+                torch.zeros_like(root_angles),
+            ),
+            dim=-1,
+        )
+        actions[:, 9:38] = torch.randn(24, 29, generator=generator) * 0.1
+
+        pose = decoder.decode_action_pose(actions)
+        full = decoder.decode(actions)
+
+        self.assertEqual(set(pose), {"local_rot_mats", "root_positions"})
+        self.assertTrue(torch.equal(pose["local_rot_mats"], full["local_rot_mats"]))
+        self.assertTrue(torch.equal(pose["root_positions"], full["root_positions"]))
+
+    def test_configuration_pose_decoder_matches_full_decoder_pose_exactly(self):
+        decoder = HumanoidArenaActionDecoder(
+            G1Skeleton34(), XML_PATH, fps=30.0
+        )
+        generator = torch.Generator().manual_seed(5678)
+        joint_positions = torch.randn(32, 29, generator=generator) * 0.1
+        root_positions = torch.randn(32, 3, generator=generator) * 0.05
+        root_positions[:, 2] += 0.8
+        yaw = torch.randn(32, generator=generator) * 0.2
+        root_quaternions = torch.stack(
+            (
+                torch.cos(yaw / 2),
+                torch.zeros_like(yaw),
+                torch.zeros_like(yaw),
+                torch.sin(yaw / 2),
+            ),
+            dim=-1,
+        )
+        planar_origin = torch.tensor([0.03, -0.04])
+
+        pose = decoder.decode_joint_configuration_pose(
+            joint_positions,
+            root_positions,
+            root_quaternions=root_quaternions,
+            planar_origin=planar_origin,
+        )
+        full = decoder.decode_joint_configuration(
+            joint_positions,
+            root_positions,
+            root_quaternions=root_quaternions,
+            planar_origin=planar_origin,
+        )
+
+        self.assertEqual(set(pose), {"local_rot_mats", "root_positions"})
+        self.assertTrue(torch.equal(pose["local_rot_mats"], full["local_rot_mats"]))
+        self.assertTrue(torch.equal(pose["root_positions"], full["root_positions"]))
+
 
 if __name__ == "__main__":
     unittest.main()
