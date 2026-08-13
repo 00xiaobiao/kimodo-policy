@@ -20,8 +20,8 @@ main:
   sampling:
     mode: "episode_uniform"
 
-  episode_cache_size: 100
-  cpu_workers_num: 24
+  episode_cache_size: 700  # cache all usable episodes per worker; 2 TiB host RAM is sufficient
+  cpu_workers_num: 24      # 4 ranks x 24 workers = 96, matched to the 96 physical cores
   precompute_text_embeddings: true
   wandb: "offline"
   wandb_project: "Kimodo-Policy"
