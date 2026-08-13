@@ -722,13 +722,9 @@ class KimodoHumanoidArenaRuntime:
                     "it does not match training history. Update HumanoidArena to send "
                     "observation.state_history at every replanning request."
                 )
-            # Existing checkpoints were trained without valid observed hand state,
-            # so the hand head always saw the default fully-open state.  Preserve
-            # that condition at inference while keeping history_hand_snapshot intact
-            # for continuous hand control across replanning boundaries.
-            model_hand_history_snapshot = torch.zeros_like(
-                model_hand_history_snapshot
-            )
+            # Hand history is the previously predicted action prefix that was
+            # actually returned for execution.  It is right-aligned to the same
+            # 30 Hz history length as the 417D motion condition above.
             generator = None
             noise_seed = None
             if self.deterministic_eval:

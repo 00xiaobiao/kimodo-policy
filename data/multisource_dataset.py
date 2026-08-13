@@ -1460,10 +1460,15 @@ class HumanoidArenaAdapter(BaseSourceAdapter):
             joint_names=CANONICAL_G1_JOINT_NAMES_29,
         )
         target = decoder.decode_action_pose(actions)
-        observed_hand = np.zeros((state.shape[0], 2), dtype=np.float32)
-        observed_hand_valid = np.zeros_like(observed_hand, dtype=bool)
         target_hand = actions[:, 38:40]
         target_hand_valid = np.ones_like(target_hand, dtype=bool)
+        # Arena's 64D observation does not expose the hand state.  Use the
+        # commanded action at the same frame as the recurrent hand state, just
+        # as target_motion supplies the action-aligned clean motion sequence.
+        # MultiSourceG1Dataset then slices [history_start:cut), so these states
+        # are frame-aligned with the 100-frame 417D history window.
+        observed_hand = target_hand.copy()
+        observed_hand_valid = target_hand_valid.copy()
         observed_motion_valid = self._motion_feature_mask(
             "global_root_heading",
             "global_rot_data",

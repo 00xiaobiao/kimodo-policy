@@ -547,7 +547,7 @@ class ServerTransactionTest(unittest.TestCase):
         self.assertEqual(tuple(runtime.history_motion.shape), (1, 3, 4))
         torch.testing.assert_close(runtime.history_hand, previous_hand_history)
 
-    def test_model_sees_open_hands_but_resampling_uses_executed_hand_state(self):
+    def test_model_sees_executed_predicted_hand_history(self):
         runtime = _runtime(_FakeActionCodec())
         runtime.history_hand = torch.tensor([[[1.0, 1.0]]])
 
@@ -559,11 +559,38 @@ class ServerTransactionTest(unittest.TestCase):
 
         torch.testing.assert_close(
             runtime.model.received_hand_history,
-            torch.zeros_like(runtime.model.received_hand_history),
+            runtime.history_hand[:, :1],
         )
         torch.testing.assert_close(
             resample_hand.call_args.kwargs["previous_hand_binary"],
             torch.tensor([1.0, 1.0]),
+        )
+
+    def test_predicted_hand_history_is_right_aligned_with_state_motion_history(self):
+        runtime = _runtime(_FakeActionCodec())
+        runtime.history_hand = torch.tensor(
+            [[[0.0, 1.0], [1.0, 1.0], [1.0, 0.0]]]
+        )
+        payload = _payload()
+        payload["observation"]["state_history"] = np.zeros(
+            (3, 64), dtype=np.float32
+        ).tolist()
+
+        with patch(
+            "evaluation.humanoidarena_server._partial_arena_state_history_to_motion",
+            return_value=(
+                torch.zeros(3, 4),
+                torch.ones(3, 4, dtype=torch.bool),
+                torch.eye(3).reshape(1, 1, 3, 3).repeat(3, 1, 1, 1),
+                torch.zeros(3, 3),
+            ),
+        ):
+            runtime.infer(payload)
+
+        self.assertEqual(tuple(runtime.model.received_history.shape), (1, 2, 4))
+        torch.testing.assert_close(
+            runtime.model.received_hand_history,
+            torch.tensor([[[1.0, 1.0], [1.0, 0.0]]]),
         )
 
     def test_encoding_failure_does_not_advance_runtime_state(self):

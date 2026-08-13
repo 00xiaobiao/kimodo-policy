@@ -78,6 +78,48 @@ def _episode(
 
 
 class MultiSourceDatasetTest(unittest.TestCase):
+    def test_arena_uses_action_hand_as_observed_history_state(self):
+        adapter = HumanoidArenaAdapter.__new__(HumanoidArenaAdapter)
+        state = np.zeros((4, 64), dtype=np.float32)
+        state[:, :6] = np.asarray(
+            [1.0, 0.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float32
+        )
+        actions = np.zeros((4, 40), dtype=np.float32)
+        actions[:, 38:40] = np.asarray(
+            [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]],
+            dtype=np.float32,
+        )
+        adapter.reader = MagicMock()
+        adapter.reader.read.return_value = {
+            "observation.state": state,
+            "action": actions,
+        }
+        decoder = MagicMock()
+        decoded = {
+            "local_rot_mats": torch.eye(3).reshape(1, 1, 3, 3).repeat(4, 1, 1, 1),
+            "root_positions": torch.zeros(4, 3),
+        }
+        decoder.decode_joint_configuration_pose.return_value = decoded
+        decoder.decode_action_pose.return_value = decoded
+        adapter._decoder = MagicMock(return_value=decoder)
+        adapter._motion_feature_mask = MagicMock(
+            return_value=torch.ones(417, dtype=torch.bool)
+        )
+        adapter._finalize_motion = MagicMock(return_value={"loaded": True})
+
+        result = adapter.load_episode(_episode(source_length=4))
+
+        self.assertEqual(result, {"loaded": True})
+        finalize_args = adapter._finalize_motion.call_args.args
+        np.testing.assert_array_equal(finalize_args[5], actions[:, 38:40])
+        np.testing.assert_array_equal(finalize_args[6], actions[:, 38:40])
+        np.testing.assert_array_equal(
+            finalize_args[7], np.ones((4, 2), dtype=bool)
+        )
+        np.testing.assert_array_equal(
+            finalize_args[8], np.ones((4, 2), dtype=bool)
+        )
+
     def test_hiw_root_integrates_base_twist_not_torso_rpy(self):
         wbc = np.zeros((4, 23), dtype=np.float32)
         wbc[:, 6] = 0.74
