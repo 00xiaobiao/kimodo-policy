@@ -34,3 +34,9 @@ cd "${PROJECT_ROOT}"
   --main_process_port "${KIMODO_MASTER_PORT:-29652}" \
   train.py \
   --config "${CONFIG_PATH}"
+
+# conda activate kimodo-env
+# export KIMODO_ENV="$CONDA_PREFIX"
+# KIMODO_GPUS=4,5,6,7 \
+# HUMANOID_ARENA_ROOT=/mnt/workspace/vla/users/xujunzhe/yunhengwang/DataSet/Humanoid/HumanoidArena_dataset_v3_1 \
+# bash scripts/only_HumanoidArena_sonic_8_refpose_v3_1.sh

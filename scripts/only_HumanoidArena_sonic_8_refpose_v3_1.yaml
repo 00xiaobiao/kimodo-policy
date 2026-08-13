@@ -1,7 +1,7 @@
 main:
-  batch_size: 32
-  max_steps: 200000
-  save_steps: 50000
+  batch_size: 16
+  max_steps: 1000000
+  save_steps: 100000
   action_chunk: 50
   action_history: 100
   sample_stride: 1

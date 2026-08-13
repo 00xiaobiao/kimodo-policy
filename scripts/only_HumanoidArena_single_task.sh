@@ -114,6 +114,8 @@ cd "${PROJECT_ROOT}"
   --config "${CONFIG_PATH}"
 
 
+# conda activate kimodo-env
+# export KIMODO_ENV="$CONDA_PREFIX"
 # KIMODO_GPUS=0,1,2,3 \
 # HUMANOID_ARENA_ROOT=/path/to/HumanoidArena_dataset_v3_1 \
 # bash scripts/only_HumanoidArena_single_task.sh doubledesk sonic
