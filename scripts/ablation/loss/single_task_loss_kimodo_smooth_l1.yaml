@@ -37,7 +37,7 @@ model:
   dinov3_model_name: "dinov3-vitl16-pretrain-lvd1689m"
   dinov3_checkpoint: null
   text_feature_dim: 4096
-  controlnet_num_layers: 2
+  controlnet_num_layers: 8
   detach_root_control_for_body: false
   hand_hidden_dim: 256
   hand_num_layers: 4
@@ -49,7 +49,7 @@ model:
 
 training:
   loss:
-    motion_loss_type: mse
+    motion_loss_type: kimodo_smooth_l1
     kimodo_smooth_l1_weights:
       root_position: 10.0
       root_heading: 2.0

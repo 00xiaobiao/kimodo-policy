@@ -50,7 +50,7 @@ model:
   dinov3_checkpoint: null           # 本地目录或 Hugging Face model id
   text_feature_dim: 4096
   controlnet_num_layers: 16        # 每个 root/body ControlNet 各 16 层，逐层对齐 16 层 Kimodo
-  enable_hand_head: true
+  detach_root_control_for_body: false  # false=Body loss同时更新Root ControlNet；true=切断该梯度
   hand_hidden_dim: 256
   hand_num_layers: 4
   hand_num_heads: 4
@@ -62,10 +62,20 @@ model:
 
 training:
   loss:
-    root_weight: 2.0               # root/body 分别求均值后加权
-    body_weight: 1.0
-    hand_weight: 1.0
-    hand_transition_weight: 0.2
+    motion_loss_type: mse # kimodo_smooth_l1          # mse（旧逻辑）或 kimodo_smooth_l1（官方分量加权和）
+    kimodo_smooth_l1_weights:       # 仅 kimodo_smooth_l1 生效；设 fk: 0 可关闭FK计算
+      root_position: 10.0
+      root_heading: 2.0
+      joint_position: 10.0
+      joint_velocity: 3.0
+      joint_rotation: 10.0
+      foot_contact: 4.0
+      fk: 5.0
+    mse_weights:
+      root: 2.0                    # 仅 motion_loss_type=mse 时生效
+      body: 1.0                    # 仅 motion_loss_type=mse 时生效
+      hand: 1.0
+      hand_transition: 0.2
   optimizer:
     control_backbone_lr: 3.0e-5    # 从 Kimodo 复制的 ControlNet Transformer 层
     control_adapter_lr: 1.0e-4     # 新初始化 image/token-MLP/shared-attention/fusion-zero 与 timestep embedder

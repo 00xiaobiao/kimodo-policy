@@ -781,6 +781,43 @@ class TrainingResumeTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "main.sampling"):
                 _validate_resume_config(config, str(checkpoint_path))
 
+    def test_resume_treats_missing_motion_loss_fields_as_legacy_mse(self):
+        project_root = Path(__file__).resolve().parents[1]
+        config = OmegaConf.load(project_root / "train.yaml")
+        checkpoint_config = OmegaConf.to_container(config, resolve=True)
+        checkpoint_config["model"].pop("detach_root_control_for_body")
+        checkpoint_loss = checkpoint_config["training"]["loss"]
+        checkpoint_loss.pop("motion_loss_type")
+        checkpoint_loss.pop("kimodo_smooth_l1_weights")
+        checkpoint_mse_weights = checkpoint_loss.pop("mse_weights")
+        checkpoint_loss.update(
+            {
+                "root_weight": checkpoint_mse_weights["root"],
+                "body_weight": checkpoint_mse_weights["body"],
+                "hand_weight": checkpoint_mse_weights["hand"],
+                "hand_transition_weight": checkpoint_mse_weights[
+                    "hand_transition"
+                ],
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint_path = Path(directory)
+            (checkpoint_path / "config.json").write_text(
+                json.dumps(checkpoint_config), encoding="utf-8"
+            )
+
+            _validate_resume_config(config, str(checkpoint_path))
+            config.model.detach_root_control_for_body = True
+            with self.assertRaisesRegex(
+                ValueError, "model.detach_root_control_for_body"
+            ):
+                _validate_resume_config(config, str(checkpoint_path))
+            config.model.detach_root_control_for_body = False
+            config.training.loss.motion_loss_type = "kimodo_smooth_l1"
+            with self.assertRaisesRegex(ValueError, "training.loss"):
+                _validate_resume_config(config, str(checkpoint_path))
+
     def test_spawn_dataloader_can_fetch_a_batch(self):
         config = SimpleNamespace(
             main=SimpleNamespace(cpu_workers_num=2, batch_size=4, seed=42)

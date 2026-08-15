@@ -39,7 +39,7 @@ model:
   dinov3_checkpoint: null
   text_feature_dim: 4096
   controlnet_num_layers: 16
-  enable_hand_head: true
+  detach_root_control_for_body: false
   hand_hidden_dim: 256
   hand_num_layers: 4
   hand_num_heads: 4
@@ -50,10 +50,20 @@ model:
 
 training:
   loss:
-    root_weight: 4.0
-    body_weight: 1.0
-    hand_weight: 1.0
-    hand_transition_weight: 0.2
+    motion_loss_type: mse
+    kimodo_smooth_l1_weights:
+      root_position: 10.0
+      root_heading: 2.0
+      joint_position: 10.0
+      joint_velocity: 3.0
+      joint_rotation: 10.0
+      foot_contact: 4.0
+      fk: 5.0
+    mse_weights:
+      root: 4.0
+      body: 1.0
+      hand: 1.0
+      hand_transition: 0.2
   optimizer:
     control_backbone_lr: 3.0e-5
     control_adapter_lr: 1.0e-4

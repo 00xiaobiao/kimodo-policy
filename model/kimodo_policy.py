@@ -11,7 +11,9 @@ from .modules.diffusion import DDIMSampler, Diffusion
 from .modules.controlnet import ControlNet
 from .modules.hand_control import HandTokenDiffusionDenoiser
 from skeleton.definitions import G1Skeleton34
+from skeleton.transforms import global_rots_to_local_rots
 from motion.representation.kimodo_motionrep import KimodoMotionRep
+from utils.geometry import cont6d_to_matrix
 from dataclasses import dataclass
 
 
@@ -33,6 +35,24 @@ def _masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     return masked_values.sum() / valid_count
 
 
+def _masked_smooth_l1(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+) -> torch.Tensor:
+    """Compute elementwise Smooth L1 while ignoring every masked component."""
+    mask = torch.broadcast_to(mask, prediction.shape)
+    prediction = prediction.float()
+    target = target.float()
+    # Invalid padded frames are allowed to contain arbitrary values. Replacing
+    # both operands also prevents NaNs in an invalid frame from reaching FK or
+    # SmoothL1 before the masked reduction.
+    prediction = torch.where(mask, prediction, torch.zeros_like(prediction))
+    target = torch.where(mask, target, torch.zeros_like(target))
+    error = nn.functional.smooth_l1_loss(prediction, target, reduction="none")
+    return _masked_mean(error, mask)
+
+
 @dataclass
 class KimodoPolicyConfig:
     fps: int = 30
@@ -43,9 +63,12 @@ class KimodoPolicyConfig:
     action_history: int = 100 # 作为约束的历史帧数
     load_text_encoder: bool = True
     controlnet_num_layers: int = 8
+    detach_root_control_for_body: bool = False
+    motion_loss_type: str = "mse"
+    kimodo_smooth_l1_weights: Optional[dict[str, float]] = None
     root_loss_weight: float = 2.0
     body_loss_weight: float = 1.0
-    enable_hand_head: bool = False
+    enable_hand_head: bool = True
     hand_hidden_dim: int = 256
     hand_num_layers: int = 4
     hand_num_heads: int = 4
@@ -56,6 +79,25 @@ class KimodoPolicyConfig:
 
 
 class KimodoPolicy(nn.Module):
+    KIMODO_SMOOTH_L1_WEIGHTS = {
+        "root_position_loss": 10.0,
+        "root_heading_loss": 2.0,
+        "joint_position_loss": 10.0,
+        "joint_velocity_loss": 3.0,
+        "joint_rotation_loss": 10.0,
+        "foot_contact_loss": 4.0,
+        "fk_loss": 5.0,
+    }
+    KIMODO_SMOOTH_L1_WEIGHT_CONFIG_KEYS = {
+        "root_position": "root_position_loss",
+        "root_heading": "root_heading_loss",
+        "joint_position": "joint_position_loss",
+        "joint_velocity": "joint_velocity_loss",
+        "joint_rotation": "joint_rotation_loss",
+        "foot_contact": "foot_contact_loss",
+        "fk": "fk_loss",
+    }
+
     def __init__(self, config: KimodoPolicyConfig = None):
         super().__init__()
         self.config = config or KimodoPolicyConfig()
@@ -102,6 +144,7 @@ class KimodoPolicy(nn.Module):
             motion_token_count=config.action_history + config.action_chunk,
             num_control_layers=config.controlnet_num_layers,
             future_token_count=config.action_chunk,
+            detach_root_control_for_body=config.detach_root_control_for_body,
         )
         for p in self.controlnet.parameters():
             p.requires_grad = True
@@ -131,6 +174,174 @@ class KimodoPolicy(nn.Module):
             self.text_encoder.eval()
         self.image_encoder.eval()
         return self
+
+    def _kimodo_fk_position_loss(
+        self,
+        pred_chunk: torch.Tensor,
+        target_chunk: torch.Tensor,
+        chunk_valid: torch.Tensor,
+    ) -> torch.Tensor:
+        """FK consistency in the physical joint-position coordinate system."""
+        representation = self.representation
+        rotation_slice = representation.slice_dict["global_rot_data"]
+        position_slice = representation.slice_dict["local_joints_positions"]
+        joint_count = representation.skeleton.nbjoints
+
+        # Component losses use the normalized diffusion representation. FK must
+        # instead operate on physical rotations and positions.
+        pred_physical = representation.unnormalize(pred_chunk.float())
+        target_physical = representation.unnormalize(target_chunk.float())
+        pred_global_rot_data = pred_physical[..., rotation_slice].reshape(
+            *pred_chunk.shape[:2], joint_count, 6
+        )
+        target_joint_positions = target_physical[..., position_slice].reshape(
+            *target_chunk.shape[:2], joint_count, 3
+        )
+
+        frame_valid = chunk_valid[..., None, None]
+        identity_cont6d = pred_global_rot_data.new_tensor(
+            (1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+        )
+        pred_global_rot_data = torch.where(
+            frame_valid,
+            pred_global_rot_data,
+            identity_cont6d,
+        )
+        target_joint_positions = torch.where(
+            frame_valid,
+            target_joint_positions,
+            torch.zeros_like(target_joint_positions),
+        )
+
+        pred_global_rot_mats = cont6d_to_matrix(pred_global_rot_data)
+        pred_local_rot_mats = global_rots_to_local_rots(
+            pred_global_rot_mats,
+            representation.skeleton,
+        )
+        # local_joints_positions stores X/Z relative to smooth_root_pos and Y in
+        # global height. Its pelvis entry is therefore the translation needed
+        # for FK to produce positions in exactly that same coordinate system.
+        root_positions = target_joint_positions[
+            ..., representation.skeleton.root_idx, :
+        ]
+        _, pred_fk_positions, _ = representation.skeleton.fk(
+            pred_local_rot_mats,
+            root_positions,
+        )
+        return _masked_smooth_l1(
+            pred_fk_positions,
+            target_joint_positions,
+            frame_valid,
+        )
+
+    def _resolve_kimodo_smooth_l1_weights(self) -> dict[str, float]:
+        """Merge YAML overrides into the official Kimodo loss weights."""
+        weights = dict(self.KIMODO_SMOOTH_L1_WEIGHTS)
+        configured = getattr(self.config, "kimodo_smooth_l1_weights", None)
+        if configured is None:
+            return weights
+        configured = dict(configured)
+        unknown_keys = sorted(
+            set(configured) - set(self.KIMODO_SMOOTH_L1_WEIGHT_CONFIG_KEYS)
+        )
+        if unknown_keys:
+            raise ValueError(
+                "Unknown kimodo_smooth_l1_weights entries: "
+                f"{unknown_keys}; expected "
+                f"{sorted(self.KIMODO_SMOOTH_L1_WEIGHT_CONFIG_KEYS)}"
+            )
+        for config_key, output_key in self.KIMODO_SMOOTH_L1_WEIGHT_CONFIG_KEYS.items():
+            if config_key not in configured:
+                continue
+            weight = float(configured[config_key])
+            if not math.isfinite(weight) or weight < 0:
+                raise ValueError(
+                    f"kimodo_smooth_l1_weights.{config_key} must be finite and "
+                    f"non-negative, got {weight}"
+                )
+            weights[output_key] = weight
+        return weights
+
+    def _kimodo_smooth_l1_motion_loss(
+        self,
+        pred_chunk: torch.Tensor,
+        target_chunk: torch.Tensor,
+        chunk_valid: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        """Official Kimodo component-wise Smooth L1 weighted sum."""
+        representation = self.representation
+        joint_count = representation.skeleton.nbjoints
+        expected_widths = {
+            "smooth_root_pos": 3,
+            "global_root_heading": 2,
+            "local_joints_positions": 3 * joint_count,
+            "global_rot_data": 6 * joint_count,
+            "velocities": 3 * joint_count,
+            "foot_contacts": 4,
+        }
+        expected_dim = sum(expected_widths.values())
+        if expected_dim != 417 or representation.motion_rep_dim != expected_dim:
+            raise ValueError(
+                "kimodo_smooth_l1 requires the G1 417D Kimodo representation; "
+                f"expected 417 features, got {representation.motion_rep_dim}"
+            )
+        for feature_name, expected_width in expected_widths.items():
+            feature_slice = representation.slice_dict.get(feature_name)
+            actual_width = (
+                None
+                if feature_slice is None
+                else feature_slice.stop - feature_slice.start
+            )
+            if actual_width != expected_width:
+                raise ValueError(
+                    f"Unexpected {feature_name} width: expected {expected_width}, "
+                    f"got {actual_width}"
+                )
+
+        def component_loss(feature_name: str) -> torch.Tensor:
+            feature_slice = representation.slice_dict[feature_name]
+            prediction = pred_chunk[..., feature_slice]
+            target = target_chunk[..., feature_slice]
+            valid = chunk_valid.unsqueeze(-1).expand_as(prediction)
+            return _masked_smooth_l1(prediction, target, valid)
+
+        weights = self._resolve_kimodo_smooth_l1_weights()
+        component_losses = {
+            "root_position_loss": component_loss("smooth_root_pos"),
+            "root_heading_loss": component_loss("global_root_heading"),
+            "joint_position_loss": component_loss("local_joints_positions"),
+            "joint_velocity_loss": component_loss("velocities"),
+            "joint_rotation_loss": component_loss("global_rot_data"),
+            "foot_contact_loss": component_loss("foot_contacts"),
+        }
+        if weights["fk_loss"] > 0:
+            component_losses["fk_loss"] = self._kimodo_fk_position_loss(
+                pred_chunk,
+                target_chunk,
+                chunk_valid,
+            )
+        else:
+            component_losses["fk_loss"] = pred_chunk.new_zeros((), dtype=torch.float32)
+
+        # Keep the official weighted SUM. In particular, do not normalize this
+        # by the six feature weights (39) or by all seven weights with FK (44).
+        root_loss = (
+            weights["root_position_loss"] * component_losses["root_position_loss"]
+            + weights["root_heading_loss"] * component_losses["root_heading_loss"]
+        )
+        body_loss = (
+            weights["joint_position_loss"] * component_losses["joint_position_loss"]
+            + weights["joint_velocity_loss"] * component_losses["joint_velocity_loss"]
+            + weights["joint_rotation_loss"] * component_losses["joint_rotation_loss"]
+            + weights["foot_contact_loss"] * component_losses["foot_contact_loss"]
+        )
+        body_loss = body_loss + weights["fk_loss"] * component_losses["fk_loss"]
+        return {
+            **component_losses,
+            "root_loss": root_loss,
+            "body_loss": body_loss,
+            "motion_loss": root_loss + body_loss,
+        }
 
     @staticmethod
     def _length_mask(lengths, max_length: int, device: torch.device) -> torch.Tensor:
@@ -473,26 +684,47 @@ class KimodoPolicy(nn.Module):
         chunk_valid = gt_mask[:, H:]
         root_slice = self.representation.root_slice
         body_slice = self.representation.body_slice
-        root_valid = chunk_valid.unsqueeze(-1).expand_as(pred_chunk[..., root_slice])
-        body_valid = chunk_valid.unsqueeze(-1).expand_as(pred_chunk[..., body_slice])
-        root_squared_error = nn.functional.mse_loss(
-            pred_chunk[..., root_slice], x_start_chunk[..., root_slice], reduction="none"
-        )
-        body_squared_error = nn.functional.mse_loss(
-            pred_chunk[..., body_slice], x_start_chunk[..., body_slice], reduction="none"
-        )
-        root_loss = _masked_mean(root_squared_error, root_valid)
-        body_loss = _masked_mean(body_squared_error, body_valid)
-        motion_loss = (
-            self.config.root_loss_weight * root_loss
-            + self.config.body_loss_weight * body_loss
-        )
+        motion_loss_type = getattr(self.config, "motion_loss_type", "mse")
+        if motion_loss_type == "mse":
+            # Legacy path: intentionally keep the original Root/Body MSE
+            # implementation and weighting unchanged for old configs/checkpoints.
+            root_valid = chunk_valid.unsqueeze(-1).expand_as(pred_chunk[..., root_slice])
+            body_valid = chunk_valid.unsqueeze(-1).expand_as(pred_chunk[..., body_slice])
+            root_squared_error = nn.functional.mse_loss(
+                pred_chunk[..., root_slice], x_start_chunk[..., root_slice], reduction="none"
+            )
+            body_squared_error = nn.functional.mse_loss(
+                pred_chunk[..., body_slice], x_start_chunk[..., body_slice], reduction="none"
+            )
+            root_loss = _masked_mean(root_squared_error, root_valid)
+            body_loss = _masked_mean(body_squared_error, body_valid)
+            motion_loss = (
+                self.config.root_loss_weight * root_loss
+                + self.config.body_loss_weight * body_loss
+            )
+            motion_output = {
+                "motion_loss": motion_loss,
+                "root_loss": root_loss,
+                "body_loss": body_loss,
+            }
+        elif motion_loss_type == "kimodo_smooth_l1":
+            motion_output = self._kimodo_smooth_l1_motion_loss(
+                pred_chunk,
+                x_start_chunk,
+                chunk_valid,
+            )
+            root_loss = motion_output["root_loss"]
+            body_loss = motion_output["body_loss"]
+            motion_loss = motion_output["motion_loss"]
+        else:
+            raise ValueError(
+                "motion_loss_type must be one of {'mse', 'kimodo_smooth_l1'}, "
+                f"got {motion_loss_type!r}"
+            )
         loss = motion_loss
         output = {
             "loss": loss,
-            "motion_loss": motion_loss,
-            "root_loss": root_loss,
-            "body_loss": body_loss,
+            **motion_output,
         }
         if self.hand_head is not None:
             current_hand, current_hand_valid = self._last_valid_hand_state_and_mask(

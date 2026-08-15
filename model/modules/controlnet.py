@@ -235,6 +235,7 @@ class ControlNet(nn.Module):
         num_control_layers: int = 8,
         future_token_count: int | None = None,
         token_mlp_hidden_dims: tuple[int, ...] = (256, 128),
+        detach_root_control_for_body: bool = False,
     ):
         super().__init__()
         root_model = denoiser.root_model
@@ -254,6 +255,7 @@ class ControlNet(nn.Module):
                 f"[1, {self.motion_token_count}], got {self.future_token_count}"
             )
         self.token_mlp_hidden_dims = tuple(int(dim) for dim in token_mlp_hidden_dims)
+        self.detach_root_control_for_body = bool(detach_root_control_for_body)
         if any(dim <= 0 for dim in self.token_mlp_hidden_dims):
             raise ValueError(
                 "token_mlp_hidden_dims must contain only positive dimensions, got "
@@ -363,8 +365,13 @@ class ControlNet(nn.Module):
             self.root_injection_layers,
             padding_mask,
         )
+        body_xseq = (
+            xseq.detach()
+            if self.training and self.detach_root_control_for_body
+            else xseq
+        )
         _, body_visual_tokens = self._collect_visual_tokens(
-            xseq,
+            body_xseq,
             self.body_layers,
             self.body_injection_layers,
             padding_mask,

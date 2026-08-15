@@ -472,6 +472,8 @@ class KimodoHumanoidArenaRuntime:
         checkpoint_config = json.loads((checkpoint_dir / "config.json").read_text())
         model_config = checkpoint_config["model"]
         main_config = checkpoint_config["main"]
+        loss_config = checkpoint_config["training"]["loss"]
+        mse_weights = loss_config.get("mse_weights", {})
         config = KimodoPolicyConfig(
             fps=int(model_config["fps"]),
             motion_mask_mode=str(model_config["motion_mask_mode"]),
@@ -481,19 +483,27 @@ class KimodoHumanoidArenaRuntime:
             action_history=int(main_config["action_history"]),
             load_text_encoder=False,
             controlnet_num_layers=int(model_config.get("controlnet_num_layers", 8)),
-            root_loss_weight=float(checkpoint_config["training"]["loss"]["root_weight"]),
-            body_loss_weight=float(checkpoint_config["training"]["loss"]["body_weight"]),
-            enable_hand_head=bool(model_config.get("enable_hand_head", False)),
+            detach_root_control_for_body=bool(
+                model_config.get("detach_root_control_for_body", False)
+            ),
+            root_loss_weight=float(
+                mse_weights.get("root", loss_config.get("root_weight", 2.0))
+            ),
+            body_loss_weight=float(
+                mse_weights.get("body", loss_config.get("body_weight", 1.0))
+            ),
+            enable_hand_head=bool(model_config.get("enable_hand_head", True)),
             hand_hidden_dim=int(model_config.get("hand_hidden_dim", 256)),
             hand_num_layers=int(model_config.get("hand_num_layers", 4)),
             hand_num_heads=int(model_config.get("hand_num_heads", 4)),
             hand_ffn_dim=int(model_config.get("hand_ffn_dim", 1024)),
             hand_loss_weight=float(
-                checkpoint_config["training"]["loss"].get("hand_weight", 1.0)
+                mse_weights.get("hand", loss_config.get("hand_weight", 1.0))
             ),
             hand_transition_loss_weight=float(
-                checkpoint_config["training"]["loss"].get(
-                    "hand_transition_weight", 0.2
+                mse_weights.get(
+                    "hand_transition",
+                    loss_config.get("hand_transition_weight", 0.2),
                 )
             ),
             hand_init_seed=int(model_config.get("hand_init_seed", 3407)),

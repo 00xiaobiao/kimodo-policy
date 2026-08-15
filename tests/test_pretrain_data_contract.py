@@ -196,6 +196,159 @@ class PretrainDataContractTest(unittest.TestCase):
         self.assertIsNotNone(policy.controlnet.scale.grad)
         self.assertIsNotNone(policy.hand_head.scale.grad)
 
+    @unittest.skipUnless(
+        STATS_PATH.is_dir(), "Kimodo motion statistics are not installed"
+    )
+    def test_both_motion_loss_modes_forward_and_backward(self):
+        component_keys = (
+            "root_position_loss",
+            "root_heading_loss",
+            "joint_position_loss",
+            "joint_velocity_loss",
+            "joint_rotation_loss",
+            "foot_contact_loss",
+            "fk_loss",
+        )
+        weights = KimodoPolicy.KIMODO_SMOOTH_L1_WEIGHTS
+
+        for motion_loss_type in ("mse", "kimodo_smooth_l1"):
+            with self.subTest(motion_loss_type=motion_loss_type):
+                policy = _build_contract_policy()
+                policy.config.motion_loss_type = motion_loss_type
+                batch = self._batch(batch_size=1)
+
+                output = policy(
+                    batch["instruction"],
+                    batch["egoview"],
+                    batch["gt_motion"],
+                    batch["gt_mask"],
+                    condition_motion=batch["condition_motion"],
+                    condition_motion_mask=batch["condition_motion_mask"],
+                    gt_hand=batch["gt_hand"],
+                    gt_hand_mask=batch["gt_hand_mask"],
+                    text_feat=batch["text_embedding"],
+                    text_length=batch["text_length"],
+                )
+                output["loss"].backward()
+
+                self.assertTrue(torch.isfinite(output["loss"]))
+                self.assertTrue(torch.isfinite(output["motion_loss"]))
+                self.assertTrue(torch.isfinite(policy.controlnet.scale.grad).all())
+                self.assertTrue(torch.isfinite(policy.hand_head.scale.grad).all())
+                if motion_loss_type == "mse":
+                    self.assertTrue(all(key not in output for key in component_keys))
+                    target = policy.representation.normalize(batch["gt_motion"])[
+                        :, policy.config.action_history :
+                    ]
+                    prediction = torch.full_like(
+                        target,
+                        policy.controlnet.scale.detach(),
+                    )
+                    root_slice = policy.representation.root_slice
+                    body_slice = policy.representation.body_slice
+                    expected_root = nn.functional.mse_loss(
+                        prediction[..., root_slice], target[..., root_slice]
+                    )
+                    expected_body = nn.functional.mse_loss(
+                        prediction[..., body_slice], target[..., body_slice]
+                    )
+                    expected_motion_loss = (
+                        policy.config.root_loss_weight * expected_root
+                        + policy.config.body_loss_weight * expected_body
+                    )
+                    torch.testing.assert_close(
+                        output["motion_loss"], expected_motion_loss
+                    )
+                else:
+                    self.assertTrue(all(key in output for key in component_keys))
+                    self.assertGreater(output["fk_loss"].item(), 0.0)
+                    expected_motion_loss = sum(
+                        weights[key] * output[key] for key in component_keys
+                    )
+                    torch.testing.assert_close(
+                        output["motion_loss"], expected_motion_loss
+                    )
+
+    @unittest.skipUnless(
+        STATS_PATH.is_dir(), "Kimodo motion statistics are not installed"
+    )
+    def test_kimodo_smooth_l1_weights_are_configurable(self):
+        policy = _build_contract_policy()
+        policy.config.motion_loss_type = "kimodo_smooth_l1"
+        policy.config.kimodo_smooth_l1_weights = {
+            "root_position": 1.5,
+            "joint_velocity": 0.5,
+            "fk": 0.0,
+        }
+        batch = self._batch(batch_size=1)
+
+        output = policy(
+            batch["instruction"],
+            batch["egoview"],
+            batch["gt_motion"],
+            batch["gt_mask"],
+            condition_motion=batch["condition_motion"],
+            condition_motion_mask=batch["condition_motion_mask"],
+            gt_hand=batch["gt_hand"],
+            gt_hand_mask=batch["gt_hand_mask"],
+            text_feat=batch["text_embedding"],
+            text_length=batch["text_length"],
+        )
+        weights = policy._resolve_kimodo_smooth_l1_weights()
+        expected_motion_loss = sum(
+            weights[key] * output[key]
+            for key in KimodoPolicy.KIMODO_SMOOTH_L1_WEIGHTS
+        )
+
+        self.assertEqual(weights["root_position_loss"], 1.5)
+        self.assertEqual(weights["joint_velocity_loss"], 0.5)
+        self.assertEqual(weights["joint_position_loss"], 10.0)
+        self.assertEqual(weights["fk_loss"], 0.0)
+        self.assertEqual(output["fk_loss"].item(), 0.0)
+        torch.testing.assert_close(output["motion_loss"], expected_motion_loss)
+
+    @unittest.skipUnless(
+        STATS_PATH.is_dir(), "Kimodo motion statistics are not installed"
+    )
+    def test_fk_loss_uses_the_417d_joint_position_coordinate_system(self):
+        policy = _build_contract_policy()
+        representation = policy.representation
+        batch_size, frame_count = 1, 30
+        joint_count = representation.skeleton.nbjoints
+        local_rotations = torch.eye(3).reshape(1, 1, 1, 3, 3).repeat(
+            batch_size, frame_count, joint_count, 1, 1
+        )
+        root_positions = torch.zeros(batch_size, frame_count, 3)
+        root_positions[..., 0] = torch.linspace(0.0, 1.0, frame_count)
+        root_positions[..., 1] = 0.8
+        features = representation(
+            local_rotations,
+            root_positions,
+            to_normalize=True,
+            lengths=torch.tensor([frame_count]),
+        )
+        valid = torch.ones(batch_size, frame_count, dtype=torch.bool)
+
+        exact_fk_loss = policy._kimodo_fk_position_loss(features, features, valid)
+        torch.testing.assert_close(
+            exact_fk_loss,
+            torch.zeros_like(exact_fk_loss),
+            atol=1e-6,
+            rtol=0,
+        )
+
+        prediction = features.detach().clone()
+        rotation_slice = representation.slice_dict["global_rot_data"]
+        prediction[..., rotation_slice.start] += 0.1
+        prediction.requires_grad_(True)
+        fk_loss = policy._kimodo_fk_position_loss(prediction, features, valid)
+        fk_loss.backward()
+
+        self.assertGreater(fk_loss.item(), 0.0)
+        self.assertIsNotNone(prediction.grad)
+        self.assertTrue(torch.isfinite(prediction.grad).all())
+        self.assertGreater(prediction.grad[..., rotation_slice].abs().sum().item(), 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

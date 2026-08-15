@@ -28,6 +28,32 @@ from torch.optim.lr_scheduler import LambdaLR
 logger = logging.getLogger(__name__)
 logging.getLogger("accelerate").setLevel(logging.ERROR)
 
+_MOTION_COMPONENT_LOSS_KEYS = (
+    "root_position_loss",
+    "root_heading_loss",
+    "joint_position_loss",
+    "joint_velocity_loss",
+    "joint_rotation_loss",
+    "foot_contact_loss",
+    "fk_loss",
+)
+_DEFAULT_KIMODO_SMOOTH_L1_WEIGHT_CONFIG = {
+    config_key: KimodoPolicy.KIMODO_SMOOTH_L1_WEIGHTS[output_key]
+    for config_key, output_key in KimodoPolicy.KIMODO_SMOOTH_L1_WEIGHT_CONFIG_KEYS.items()
+}
+_DEFAULT_MSE_WEIGHT_CONFIG = {
+    "root": 2.0,
+    "body": 1.0,
+    "hand": 1.0,
+    "hand_transition": 0.2,
+}
+_LEGACY_MSE_WEIGHT_KEYS = {
+    "root_weight": "root",
+    "body_weight": "body",
+    "hand_weight": "hand",
+    "hand_transition_weight": "hand_transition",
+}
+
 
 def build_controlnet_param_groups(model, config):
     backbone_lr = float(config.training.optimizer.control_backbone_lr)
@@ -81,6 +107,17 @@ def setup_logging(rank, save_path):
 
 def build_model_and_optimizer(config):
     # 1. 创建模型
+    loss_config = config.training.loss
+    mse_weights = loss_config.get("mse_weights", {}) or {}
+    kimodo_smooth_l1_weights = config.training.loss.get(
+        "kimodo_smooth_l1_weights", None
+    )
+    if kimodo_smooth_l1_weights is not None:
+        kimodo_smooth_l1_weights = (
+            OmegaConf.to_container(kimodo_smooth_l1_weights, resolve=True)
+            if OmegaConf.is_config(kimodo_smooth_l1_weights)
+            else dict(kimodo_smooth_l1_weights)
+        )
     model_config = KimodoPolicyConfig(
         fps              = config.model.fps,
         motion_mask_mode = config.model.motion_mask_mode,
@@ -90,16 +127,26 @@ def build_model_and_optimizer(config):
         action_history   = config.main.action_history,
         load_text_encoder = not config.main.get("precompute_text_embeddings", True),
         controlnet_num_layers = config.model.get("controlnet_num_layers", 8),
-        root_loss_weight = config.training.loss.get("root_weight", 2.0),
-        body_loss_weight = config.training.loss.get("body_weight", 1.0),
-        enable_hand_head = config.model.get("enable_hand_head", False),
+        detach_root_control_for_body = config.model.get(
+            "detach_root_control_for_body", False
+        ),
+        motion_loss_type = config.training.loss.get("motion_loss_type", "mse"),
+        kimodo_smooth_l1_weights = kimodo_smooth_l1_weights,
+        root_loss_weight = mse_weights.get(
+            "root", loss_config.get("root_weight", 2.0)
+        ),
+        body_loss_weight = mse_weights.get(
+            "body", loss_config.get("body_weight", 1.0)
+        ),
         hand_hidden_dim = config.model.get("hand_hidden_dim", 256),
         hand_num_layers = config.model.get("hand_num_layers", 4),
         hand_num_heads = config.model.get("hand_num_heads", 4),
         hand_ffn_dim = config.model.get("hand_ffn_dim", 1024),
-        hand_loss_weight = config.training.loss.get("hand_weight", 1.0),
-        hand_transition_loss_weight = config.training.loss.get(
-            "hand_transition_weight", 0.2
+        hand_loss_weight = mse_weights.get(
+            "hand", loss_config.get("hand_weight", 1.0)
+        ),
+        hand_transition_loss_weight = mse_weights.get(
+            "hand_transition", loss_config.get("hand_transition_weight", 0.2)
         ),
         hand_init_seed = config.model.get("hand_init_seed", 3407),
     )
@@ -518,6 +565,7 @@ _RESUME_CONFIG_FIELDS = (
     "model.dinov3_checkpoint",
     "model.text_feature_dim",
     "model.controlnet_num_layers",
+    "model.detach_root_control_for_body",
     "model.enable_hand_head",
     "model.hand_hidden_dim",
     "model.hand_num_layers",
@@ -557,6 +605,40 @@ def _config_value(config, path):
     return value
 
 
+def _normalize_resume_config_value(path, value):
+    """Fill newly introduced no-op defaults when comparing old checkpoints."""
+    if path == "model.enable_hand_head":
+        return True if value is _MISSING_CONFIG_VALUE else value
+    if path == "model.detach_root_control_for_body":
+        return False if value is _MISSING_CONFIG_VALUE else value
+    if (
+        path != "training.loss"
+        or value is _MISSING_CONFIG_VALUE
+        or not isinstance(value, dict)
+    ):
+        return value
+    normalized = dict(value)
+    normalized.setdefault("motion_loss_type", "mse")
+    configured_mse_weights = normalized.get("mse_weights", {})
+    if isinstance(configured_mse_weights, dict):
+        merged_mse_weights = dict(_DEFAULT_MSE_WEIGHT_CONFIG)
+        for legacy_key, config_key in _LEGACY_MSE_WEIGHT_KEYS.items():
+            if legacy_key in normalized and config_key not in configured_mse_weights:
+                merged_mse_weights[config_key] = normalized[legacy_key]
+            normalized.pop(legacy_key, None)
+        merged_mse_weights.update(configured_mse_weights)
+        normalized["mse_weights"] = merged_mse_weights
+    configured_weights = normalized.get("kimodo_smooth_l1_weights", {})
+    if isinstance(configured_weights, dict):
+        merged_weights = dict(_DEFAULT_KIMODO_SMOOTH_L1_WEIGHT_CONFIG)
+        merged_weights.update(configured_weights)
+        legacy_fk_enabled = normalized.pop("kimodo_fk_loss_enabled", None)
+        if legacy_fk_enabled is False and "fk" not in configured_weights:
+            merged_weights["fk"] = 0.0
+        normalized["kimodo_smooth_l1_weights"] = merged_weights
+    return normalized
+
+
 def _normalize_resume_checkpoint(checkpoint_path):
     checkpoint_path = os.path.abspath(os.path.expanduser(checkpoint_path))
     if not os.path.isdir(checkpoint_path):
@@ -589,8 +671,12 @@ def _validate_resume_config(config, checkpoint_path):
     current_config = OmegaConf.to_container(config, resolve=True)
     mismatches = []
     for path in _RESUME_CONFIG_FIELDS:
-        current_value = _config_value(current_config, path)
-        checkpoint_value = _config_value(checkpoint_config, path)
+        current_value = _normalize_resume_config_value(
+            path, _config_value(current_config, path)
+        )
+        checkpoint_value = _normalize_resume_config_value(
+            path, _config_value(checkpoint_config, path)
+        )
         if current_value != checkpoint_value:
             mismatches.append(
                 f"{path}: current={current_value!r}, checkpoint={checkpoint_value!r}"
@@ -610,8 +696,12 @@ def _validate_init_checkpoint_config(config, checkpoint_path):
     current_config = OmegaConf.to_container(config, resolve=True)
     mismatches = []
     for path in _INIT_CHECKPOINT_CONFIG_FIELDS:
-        current_value = _config_value(current_config, path)
-        checkpoint_value = _config_value(checkpoint_config, path)
+        current_value = _normalize_resume_config_value(
+            path, _config_value(current_config, path)
+        )
+        checkpoint_value = _normalize_resume_config_value(
+            path, _config_value(checkpoint_config, path)
+        )
         if current_value != checkpoint_value:
             mismatches.append(
                 f"{path}: current={current_value!r}, checkpoint={checkpoint_value!r}"
@@ -1069,6 +1159,7 @@ def learning(config_path=None, resume=None, init_checkpoint=None):
     accumulated_motion_loss = 0.0
     accumulated_root_loss = 0.0
     accumulated_body_loss = 0.0
+    accumulated_motion_component_losses = {}
     accumulated_hand_loss = 0.0
     accumulated_hand_state_loss = 0.0
     accumulated_hand_transition_loss = 0.0
@@ -1126,6 +1217,12 @@ def learning(config_path=None, resume=None, init_checkpoint=None):
             accumulated_motion_loss += loss_dict["motion_loss"].detach()
             accumulated_root_loss += loss_dict["root_loss"].detach()
             accumulated_body_loss += loss_dict["body_loss"].detach()
+            for component_key in _MOTION_COMPONENT_LOSS_KEYS:
+                if component_key in loss_dict:
+                    accumulated_motion_component_losses[component_key] = (
+                        accumulated_motion_component_losses.get(component_key, 0.0)
+                        + loss_dict[component_key].detach()
+                    )
             if "hand_loss" in loss_dict:
                 accumulated_hand_loss += loss_dict["hand_loss"].detach()
                 accumulated_hand_state_loss += loss_dict["hand_state_loss"].detach()
@@ -1183,7 +1280,11 @@ def learning(config_path=None, resume=None, init_checkpoint=None):
             avg_motion_loss = accumulated_motion_loss / accumulation_count
             avg_root_loss = accumulated_root_loss / accumulation_count
             avg_body_loss = accumulated_body_loss / accumulation_count
-            has_hand_head = bool(config.model.get("enable_hand_head", False))
+            avg_motion_component_losses = {
+                key: value / accumulation_count
+                for key, value in accumulated_motion_component_losses.items()
+            }
+            has_hand_head = "hand_loss" in loss_dict
             avg_hand_loss = accumulated_hand_loss / accumulation_count
             avg_hand_state_loss = accumulated_hand_state_loss / accumulation_count
             avg_hand_transition_loss = (
@@ -1209,10 +1310,16 @@ def learning(config_path=None, resume=None, init_checkpoint=None):
                     if hand_grad_statistics is not None
                     else ""
                 )
+                motion_component_log = "".join(
+                    f"{key.removesuffix('_loss')}: {value.item():.4f} | "
+                    for key, value in avg_motion_component_losses.items()
+                )
                 logging.info(
                     f"Step: {global_step}/{max_training_steps} | "
-                    f"Loss: {avg_loss.item():.4f} | Root: {avg_root_loss.item():.4f} | "
+                    f"Loss: {avg_loss.item():.4f} | Motion: {avg_motion_loss.item():.4f} | "
+                    f"Root: {avg_root_loss.item():.4f} | "
                     f"Body: {avg_body_loss.item():.4f} | "
+                    f"{motion_component_log}"
                     f"{hand_log}"
                     f"{control_grad_log}"
                     f"{hand_grad_log}"
@@ -1231,6 +1338,12 @@ def learning(config_path=None, resume=None, init_checkpoint=None):
                     "train/lr_control_backbone": scheduler.get_last_lr()[0],
                     "train/lr_control_adapter": scheduler.get_last_lr()[2],
                 }
+                metrics.update(
+                    {
+                        f"train/{key}": value.item()
+                        for key, value in avg_motion_component_losses.items()
+                    }
+                )
                 if control_grad_statistics is not None:
                     metrics.update(
                         {
@@ -1261,6 +1374,7 @@ def learning(config_path=None, resume=None, init_checkpoint=None):
             accumulated_motion_loss = 0.0
             accumulated_root_loss = 0.0
             accumulated_body_loss = 0.0
+            accumulated_motion_component_losses = {}
             accumulated_hand_loss = 0.0
             accumulated_hand_state_loss = 0.0
             accumulated_hand_transition_loss = 0.0

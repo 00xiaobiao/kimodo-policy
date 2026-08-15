@@ -47,7 +47,7 @@ class _RecordingFuser(nn.Module):
 
 class ControlNetArchitectureTest(unittest.TestCase):
     @staticmethod
-    def _controlnet():
+    def _controlnet(detach_root_control_for_body: bool = False):
         return ControlNet(
             _Denoiser(),
             image_feat_dim=6,
@@ -56,6 +56,7 @@ class ControlNetArchitectureTest(unittest.TestCase):
             num_control_layers=2,
             future_token_count=2,
             token_mlp_hidden_dims=(6, 4),
+            detach_root_control_for_body=detach_root_control_for_body,
         )
 
     @staticmethod
@@ -95,6 +96,65 @@ class ControlNetArchitectureTest(unittest.TestCase):
         self.assertEqual(tuple(body_tokens), (1, 3))
         for visual_tokens in [*root_tokens.values(), *body_tokens.values()]:
             self.assertEqual(tuple(visual_tokens.shape), (2, 4, 8))
+
+    def test_root_to_body_detach_preserves_values_and_isolates_body_gradients(self):
+        torch.manual_seed(5)
+        shared = self._controlnet(detach_root_control_for_body=False)
+        isolated = copy.deepcopy(shared)
+        isolated.detach_root_control_for_body = True
+        shared.train()
+        isolated.train()
+        timesteps = torch.tensor([3, 7])
+        image_features = torch.randn(2, 4, 6)
+
+        shared_root, shared_body = shared(
+            timesteps=timesteps,
+            image_features=image_features,
+            sequence_length=6,
+            future_start=4,
+        )
+        isolated_root, isolated_body = isolated(
+            timesteps=timesteps,
+            image_features=image_features,
+            sequence_length=6,
+            future_start=4,
+        )
+        for layer_index in shared_root:
+            torch.testing.assert_close(
+                shared_root[layer_index], isolated_root[layer_index]
+            )
+        for layer_index in shared_body:
+            torch.testing.assert_close(
+                shared_body[layer_index], isolated_body[layer_index]
+            )
+
+        sum(value.square().mean() for value in shared_body.values()).backward()
+        sum(value.square().mean() for value in isolated_body.values()).backward()
+
+        shared_root_grad = sum(
+            parameter.grad.abs().sum()
+            for parameter in shared.root_layers.parameters()
+            if parameter.grad is not None
+        )
+        isolated_root_grads = [
+            parameter.grad for parameter in isolated.root_layers.parameters()
+        ]
+        shared_body_grad = sum(
+            parameter.grad.abs().sum()
+            for parameter in shared.body_layers.parameters()
+            if parameter.grad is not None
+        )
+        isolated_body_grad = sum(
+            parameter.grad.abs().sum()
+            for parameter in isolated.body_layers.parameters()
+            if parameter.grad is not None
+        )
+        self.assertGreater(shared_root_grad.item(), 0.0)
+        self.assertTrue(all(gradient is None for gradient in isolated_root_grads))
+        self.assertGreater(shared.image_projection.weight.grad.abs().sum().item(), 0.0)
+        self.assertIsNone(isolated.image_projection.weight.grad)
+        self.assertGreater(shared_body_grad.item(), 0.0)
+        self.assertGreater(isolated_body_grad.item(), 0.0)
 
     def test_dual_path_fusion_is_zero_initialized_without_learnable_queries(self):
         torch.manual_seed(7)
