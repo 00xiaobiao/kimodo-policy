@@ -50,7 +50,7 @@ model:
 
 training:
   loss:
-    root_weight: 2.0
+    root_weight: 4.0
     body_weight: 1.0
     hand_weight: 1.0
     hand_transition_weight: 0.2

@@ -773,7 +773,6 @@ def main() -> int:
     import gymnasium as gym
     import tasks
     from isaaclab_tasks.utils.parse_cfg import parse_env_cfg
-    from twist2_runtime_alignment import align_twist2_env_cfg
     from tasks.common_env_config import apply_env_config_yaml
     from tasks.common_runtime import apply_optional_runtime_augments
 
@@ -787,7 +786,6 @@ def main() -> int:
     try:
         first_spec = episode_specs[0]
         env_cfg = parse_env_cfg(args_cli.task, device=args_cli.device, num_envs=int(args_cli.num_envs))
-        align_twist2_env_cfg(env_cfg)
         env_cfg.env_name = args_cli.task
         apply_env_config_yaml(
             env_cfg,

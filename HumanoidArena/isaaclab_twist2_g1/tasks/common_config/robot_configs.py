@@ -11,12 +11,8 @@ import os
 from isaaclab.assets import ArticulationCfg
 from isaaclab.utils import configclass
 from robots.unitree import G129_CFG_WITH_DEX1_BASE_FIX, G129_CFG_WITH_DEX3_BASE_FIX, G129_CFG_WITH_INSPIRE_HAND, \
-    G129_CFG_WITH_DEX1_WHOLEBODY, G129_CFG_WITH_DEX3_WHOLEBODY, G129_CFG_WITH_DEX3_WHOLEBODY_TWIST2, \
-    G129_CFG_WITH_INSPIRE_WHOLEBODY
+    G129_CFG_WITH_DEX1_WHOLEBODY, G129_CFG_WITH_DEX3_WHOLEBODY, G129_CFG_WITH_INSPIRE_WHOLEBODY
 from typing import Optional, Dict, Tuple, Literal
-
-
-_TWIST2_DYNAMICS_LOGGED = False
 
 
 @configclass
@@ -367,24 +363,12 @@ class G1RobotPresets:
                                 init_rot: Tuple[float, float, float, float] = (
                                 0.7071, 0, 0, 0.7071)) -> ArticulationCfg:
         """pick-place task configuration - inspire hand"""
-        use_twist2_dynamics = os.getenv("TWIST2_ALIGN_DYNAMICS", "0").strip().lower() in {
-            "1", "true", "yes", "on"
-        }
-        base_config = (
-            G129_CFG_WITH_DEX3_WHOLEBODY_TWIST2
-            if use_twist2_dynamics
-            else G129_CFG_WITH_DEX3_WHOLEBODY
-        )
-        global _TWIST2_DYNAMICS_LOGGED
-        if use_twist2_dynamics and not _TWIST2_DYNAMICS_LOGGED:
-            print("[TWIST2 alignment] using explicit torque-clipped PD actuator preset")
-            _TWIST2_DYNAMICS_LOGGED = True
         return G129dofRobotBaseCfg.get_base_config(
             init_pos=init_pos,
             init_rot=init_rot,
             include_waist=True,
             is_have_hand=False,
-            base_config=base_config,
+            base_config=G129_CFG_WITH_DEX3_WHOLEBODY,
             update_default_joint_pos=True,
             use_twist2_defaults=True,
         )

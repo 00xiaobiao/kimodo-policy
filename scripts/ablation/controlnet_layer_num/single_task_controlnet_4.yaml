@@ -1,7 +1,7 @@
 main:
   batch_size: 16
-  max_steps: 100000
-  save_steps: 50000
+  max_steps: 200000
+  save_steps: 100000
   action_chunk: 50
   action_history: 100
   sample_stride: 1
@@ -20,8 +20,8 @@ main:
   sampling:
     mode: "episode_uniform"
 
-  episode_cache_size: 700  # cache all usable episodes per worker; 2 TiB host RAM is sufficient
-  cpu_workers_num: 24      # 4 ranks x 24 workers = 96, matched to the 96 physical cores
+  episode_cache_size: 700
+  cpu_workers_num: 24
   precompute_text_embeddings: true
   wandb: "offline"
   wandb_project: "Kimodo-Policy"
@@ -37,7 +37,7 @@ model:
   dinov3_model_name: "dinov3-vitl16-pretrain-lvd1689m"
   dinov3_checkpoint: null
   text_feature_dim: 4096
-  controlnet_num_layers: 16
+  controlnet_num_layers: 4
   enable_hand_head: true
   hand_hidden_dim: 256
   hand_num_layers: 4
