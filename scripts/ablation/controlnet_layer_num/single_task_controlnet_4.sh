@@ -16,4 +16,4 @@ exec "${SCRIPT_DIR}/../../only_HumanoidArena_single_task.sh" "$@"
 # export KIMODO_ENV="$CONDA_PREFIX"
 # KIMODO_GPUS=0,1,2,3 \
 # HUMANOID_ARENA_ROOT=/path/to/HumanoidArena_dataset_v3_1 \
-# bash scripts/only_HumanoidArena_single_task.sh doubledesk sonic
+# bash scripts/ablation/controlnet_layer_num/single_task_controlnet_4.sh doubledesk sonic
