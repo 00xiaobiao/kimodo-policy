@@ -1,6 +1,6 @@
 main:
-  batch_size: 16
-  max_steps: 1000000
+  batch_size: 32
+  max_steps: 500000
   save_steps: 100000
   action_chunk: 50
   action_history: 100
@@ -28,7 +28,7 @@ main:
   wandb_project: "Kimodo-Policy"
   wandb_run_name: "only_HumanoidArena_sonic_8_refpose_v3_1"
   gradient:
-    grad_clip_norm: 0.5
+    grad_clip_norm: 1.0
     hand_grad_clip_norm: 1.0
     grad_accumulation_steps: 1
 
@@ -38,8 +38,8 @@ model:
   dinov3_model_name: "dinov3-vitl16-pretrain-lvd1689m"
   dinov3_checkpoint: null
   text_feature_dim: 4096
-  controlnet_num_layers: 16
-  detach_root_control_for_body: false
+  controlnet_num_layers: 8
+  detach_root_control_for_body: true
   hand_hidden_dim: 256
   hand_num_layers: 4
   hand_num_heads: 4
