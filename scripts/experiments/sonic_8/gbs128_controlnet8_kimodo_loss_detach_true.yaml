@@ -1,6 +1,6 @@
 main:
   batch_size: 32
-  max_steps: 500000
+  max_steps: 1000000
   save_steps: 100000
   action_chunk: 50
   action_history: 100
