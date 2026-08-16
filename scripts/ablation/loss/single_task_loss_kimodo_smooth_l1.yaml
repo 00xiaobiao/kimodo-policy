@@ -27,7 +27,7 @@ main:
   wandb_project: "Kimodo-Policy"
   wandb_run_name: "${oc.env:KIMODO_SINGLE_TASK_RUN_NAME,only_HumanoidArena_single_task}"
   gradient:
-    grad_clip_norm: 0.5
+    grad_clip_norm: 1.0
     hand_grad_clip_norm: 1.0
     grad_accumulation_steps: 1
 
