@@ -6,7 +6,7 @@ main:
   action_history: 100
   sample_stride: 1
   seed: 42
-  save_root: "log/only_HumanoidArena_sonic_8_refpose_v3_1/"
+  save_root: "log/experiments/sonic_8/gbs128_controlnet8_mse_loss_detach_true/"
   dtype: "bf16"
 
   dataset_roots:
@@ -26,7 +26,7 @@ main:
   precompute_text_embeddings: true
   wandb: "offline"
   wandb_project: "Kimodo-Policy"
-  wandb_run_name: "only_HumanoidArena_sonic_8_refpose_v3_1"
+  wandb_run_name: "gbs128_controlnet8_mse_loss_detach_true"
   gradient:
     grad_clip_norm: 1.0
     hand_grad_clip_norm: 1.0

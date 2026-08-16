@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/../../.." && pwd)"
 if [[ -n "${KIMODO_ENV:-}" ]]; then
   ACCELERATE_BIN="${KIMODO_ENV}/bin/accelerate"
 else
@@ -12,7 +12,7 @@ if [[ -z "${ACCELERATE_BIN}" || ! -x "${ACCELERATE_BIN}" ]]; then
   echo "accelerate was not found; activate kimodo-env or set KIMODO_ENV=/path/to/env" >&2
   exit 1
 fi
-CONFIG_PATH="${KIMODO_CONFIG:-${SCRIPT_DIR}/only_HumanoidArena_sonic_8_refpose_v3_1.yaml}"
+CONFIG_PATH="${KIMODO_CONFIG:-${SCRIPT_DIR}/gbs128_controlnet8_kimodo_loss_detach_true.yaml}"
 GPU_LIST="${KIMODO_GPUS:-0,1,2,3}"
 
 IFS=',' read -r -a GPU_IDS <<< "${GPU_LIST}"
