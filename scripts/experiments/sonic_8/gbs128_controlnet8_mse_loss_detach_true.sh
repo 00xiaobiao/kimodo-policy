@@ -39,4 +39,4 @@ cd "${PROJECT_ROOT}"
 # export KIMODO_ENV="$CONDA_PREFIX"
 # KIMODO_GPUS=4,5,6,7 \
 # HUMANOID_ARENA_ROOT=/mnt/workspace/vla/users/xujunzhe/yunhengwang/DataSet/Humanoid/HumanoidArena_dataset_v3_1 \
-# bash scripts/only_HumanoidArena_sonic_8_refpose_v3_1.sh
+# bash scripts/experiments/sonic_8/gbs128_controlnet8_mse_loss_detach_true.sh
