@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/../../.." && pwd)"
 if [[ -n "${KIMODO_ENV:-}" ]]; then
   ACCELERATE_BIN="${KIMODO_ENV}/bin/accelerate"
 else
@@ -12,9 +12,14 @@ if [[ -z "${ACCELERATE_BIN}" || ! -x "${ACCELERATE_BIN}" ]]; then
   echo "accelerate was not found; activate kimodo-env or set KIMODO_ENV=/path/to/env" >&2
   exit 1
 fi
-CONFIG_PATH="${KIMODO_CONFIG:-${SCRIPT_DIR}/ft_HumanoidArena_sonic_8_refpose_v3_1.yaml}"
+CONFIG_PATH="${KIMODO_CONFIG:-${SCRIPT_DIR}/sonic_8_gbs128_50w_controlnet8_detach_false_mse.yaml}"
 GPU_LIST="${KIMODO_GPUS:-0,1,2,3}"
 INIT_CHECKPOINT="${1:-${KIMODO_INIT_CHECKPOINT:-}}"
+
+if [[ ! -f "${CONFIG_PATH}" ]]; then
+  echo "Training config does not exist: ${CONFIG_PATH}" >&2
+  exit 2
+fi
 
 if [[ -z "${INIT_CHECKPOINT}" ]]; then
   echo "Usage: bash $0 /path/to/pretrain/checkpoint_STEP" >&2
@@ -46,3 +51,10 @@ cd "${PROJECT_ROOT}"
   train.py \
   --config "${CONFIG_PATH}" \
   --init-checkpoint "${INIT_CHECKPOINT}"
+
+# conda activate kimodo-env
+# export KIMODO_ENV="$CONDA_PREFIX"
+# KIMODO_GPUS=0,1,2,3 \
+# HUMANOID_ARENA_ROOT=/path/to/HumanoidArena_dataset_v3_1 \
+# bash scripts/experiments/fine_tuning/sonic_8_gbs128_50w_controlnet8_detach_false_mse.sh \
+#   /path/to/pretrain/checkpoint_STEP
