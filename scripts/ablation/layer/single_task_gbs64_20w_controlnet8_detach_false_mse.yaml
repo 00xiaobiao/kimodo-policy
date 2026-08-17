@@ -1,12 +1,12 @@
 main:
-  batch_size: 32
-  max_steps: 1000000
+  batch_size: 16
+  max_steps: 200000
   save_steps: 100000
   action_chunk: 50
   action_history: 100
   sample_stride: 1
   seed: 42
-  save_root: "log/experiments/sonic_8/gbs128_controlnet8_mse_loss_detach_true/"
+  save_root: "${oc.env:KIMODO_SINGLE_TASK_SAVE_ROOT,log/ablation/layer/single_task_gbs64_20w_controlnet8_detach_false_mse/}"
   dtype: "bf16"
 
   dataset_roots:
@@ -14,21 +14,20 @@ main:
 
   dataset_selection:
     HumanoidArena:
-      merged: "sonic_8_refpose_v3_1"
+      task: "${oc.env:KIMODO_ARENA_TASK}"
+      backend: "${oc.env:KIMODO_ARENA_BACKEND,sonic}"
 
   sampling:
     mode: "episode_uniform"
 
-  # The legacy merged name contains 8 tasks; the loader excludes HOI_grap_cup,
-  # leaving 7 tasks and 700 episodes for training.
-  episode_cache_size: 700  # cache all usable episodes per worker; 2 TiB host RAM is sufficient
-  cpu_workers_num: 24      # 4 ranks x 24 workers = 96, matched to the 96 physical cores
+  episode_cache_size: 700
+  cpu_workers_num: 24
   precompute_text_embeddings: true
   wandb: "offline"
   wandb_project: "Kimodo-Policy"
-  wandb_run_name: "gbs128_controlnet8_mse_loss_detach_true"
+  wandb_run_name: "${oc.env:KIMODO_SINGLE_TASK_RUN_NAME,single_task_gbs64_20w_controlnet8_detach_false_mse}"
   gradient:
-    grad_clip_norm: 1.0
+    grad_clip_norm: 0.5
     hand_grad_clip_norm: 1.0
     grad_accumulation_steps: 1
 
@@ -39,7 +38,7 @@ model:
   dinov3_checkpoint: null
   text_feature_dim: 4096
   controlnet_num_layers: 8
-  detach_root_control_for_body: true
+  detach_root_control_for_body: false
   hand_hidden_dim: 256
   hand_num_layers: 4
   hand_num_heads: 4

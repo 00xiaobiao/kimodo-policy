@@ -6,7 +6,7 @@ main:
   action_history: 100
   sample_stride: 1
   seed: 42
-  save_root: "${oc.env:KIMODO_SINGLE_TASK_SAVE_ROOT,log/only_HumanoidArena_single_task/}"
+  save_root: "${oc.env:KIMODO_SINGLE_TASK_SAVE_ROOT,log/ablation/detach/single_task_gbs64_20w_controlnet8_detach_true_mse/}"
   dtype: "bf16"
 
   dataset_roots:
@@ -37,8 +37,8 @@ model:
   dinov3_model_name: "dinov3-vitl16-pretrain-lvd1689m"
   dinov3_checkpoint: null
   text_feature_dim: 4096
-  controlnet_num_layers: 2
-  detach_root_control_for_body: false
+  controlnet_num_layers: 8
+  detach_root_control_for_body: true
   hand_hidden_dim: 256
   hand_num_layers: 4
   hand_num_heads: 4

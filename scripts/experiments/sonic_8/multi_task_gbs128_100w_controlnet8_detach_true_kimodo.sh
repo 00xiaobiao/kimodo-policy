@@ -12,7 +12,11 @@ if [[ -z "${ACCELERATE_BIN}" || ! -x "${ACCELERATE_BIN}" ]]; then
   echo "accelerate was not found; activate kimodo-env or set KIMODO_ENV=/path/to/env" >&2
   exit 1
 fi
-CONFIG_PATH="${KIMODO_CONFIG:-${SCRIPT_DIR}/gbs128_controlnet8_kimodo_loss_detach_true.yaml}"
+CONFIG_PATH="${KIMODO_CONFIG:-${SCRIPT_DIR}/multi_task_gbs128_100w_controlnet8_detach_true_kimodo.yaml}"
+if [[ ! -f "${CONFIG_PATH}" ]]; then
+  echo "Training config does not exist: ${CONFIG_PATH}" >&2
+  exit 2
+fi
 GPU_LIST="${KIMODO_GPUS:-0,1,2,3}"
 
 IFS=',' read -r -a GPU_IDS <<< "${GPU_LIST}"
@@ -39,4 +43,4 @@ cd "${PROJECT_ROOT}"
 # export KIMODO_ENV="$CONDA_PREFIX"
 # KIMODO_GPUS=4,5,6,7 \
 # HUMANOID_ARENA_ROOT=/mnt/workspace/vla/users/xujunzhe/yunhengwang/DataSet/Humanoid/HumanoidArena_dataset_v3_1 \
-# bash scripts/experiments/sonic_8/gbs128_controlnet8_kimodo_loss_detach_true.sh
+# bash scripts/experiments/sonic_8/multi_task_gbs128_100w_controlnet8_detach_true_kimodo.sh

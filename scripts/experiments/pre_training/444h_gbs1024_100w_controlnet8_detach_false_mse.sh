@@ -12,14 +12,13 @@ if [[ -z "${ACCELERATE_BIN}" || ! -x "${ACCELERATE_BIN}" ]]; then
   echo "accelerate was not found; activate kimodo-env or set KIMODO_ENV=/path/to/env" >&2
   exit 1
 fi
-CONFIG_PATH="${KIMODO_CONFIG:-${SCRIPT_DIR}/gbs128_controlnet8_mse_loss_detach_true.yaml}"
-GPU_LIST="${KIMODO_GPUS:-0,1,2,3}"
 
+GPU_LIST="${KIMODO_GPUS:-0,1,2,3,4,5,6,7}"
 IFS=',' read -r -a GPU_IDS <<< "${GPU_LIST}"
 NUM_PROCESSES="${#GPU_IDS[@]}"
-if (( NUM_PROCESSES < 1 )); then
-  echo "KIMODO_GPUS must contain at least one GPU index" >&2
-  exit 2
+if (( NUM_PROCESSES <= 0 )); then
+  echo "KIMODO_GPUS must contain at least one GPU id" >&2
+  exit 1
 fi
 
 export CUDA_VISIBLE_DEVICES="${GPU_LIST}"
@@ -31,12 +30,13 @@ cd "${PROJECT_ROOT}"
   --multi_gpu \
   --num_processes "${NUM_PROCESSES}" \
   --mixed_precision bf16 \
-  --main_process_port "${KIMODO_MASTER_PORT:-29652}" \
+  --main_process_port "${KIMODO_MASTER_PORT:-29650}" \
   train.py \
-  --config "${CONFIG_PATH}"
+  --config "${SCRIPT_DIR}/444h_gbs1024_100w_controlnet8_detach_false_mse.yaml"
 
 # conda activate kimodo-env
 # export KIMODO_ENV="$CONDA_PREFIX"
-# KIMODO_GPUS=4,5,6,7 \
-# HUMANOID_ARENA_ROOT=/mnt/workspace/vla/users/xujunzhe/yunhengwang/DataSet/Humanoid/HumanoidArena_dataset_v3_1 \
-# bash scripts/experiments/sonic_8/gbs128_controlnet8_mse_loss_detach_true.sh
+# UNIFOLM_ROOT=/mnt/workspace/vla/users/xujunzhe/yunhengwang/DataSet/Humanoid/UnifoLM_WBT_Dataset \
+# HUMANOID_EVERYDAY_ROOT=/mnt/workspace/vla/users/xujunzhe/yunhengwang/DataSet/Humanoid/humanoid-everyday \
+# HIW500_ROOT=/mnt/workspace/vla/users/xujunzhe/yunhengwang/DataSet/Humanoid/HIW-500-LeRobot \
+# bash scripts/experiments/pre_training/444h_gbs1024_100w_controlnet8_detach_false_mse.sh

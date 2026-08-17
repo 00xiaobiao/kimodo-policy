@@ -1,0 +1,77 @@
+main:
+  batch_size: 16
+  max_steps: 200000
+  save_steps: 100000
+  action_chunk: 50
+  action_history: 100
+  sample_stride: 1
+  seed: 42
+  save_root: "${oc.env:KIMODO_SINGLE_TASK_SAVE_ROOT,log/ablation/loss/single_task_gbs64_20w_controlnet8_detach_false_kimodo/}"
+  dtype: "bf16"
+
+  dataset_roots:
+    HumanoidArena: "${oc.env:HUMANOID_ARENA_ROOT,/data/local-data/data/Humanoid/HumanoidArena_dataset_v3_1}"
+
+  dataset_selection:
+    HumanoidArena:
+      task: "${oc.env:KIMODO_ARENA_TASK}"
+      backend: "${oc.env:KIMODO_ARENA_BACKEND,sonic}"
+
+  sampling:
+    mode: "episode_uniform"
+
+  episode_cache_size: 700
+  cpu_workers_num: 24
+  precompute_text_embeddings: true
+  wandb: "offline"
+  wandb_project: "Kimodo-Policy"
+  wandb_run_name: "${oc.env:KIMODO_SINGLE_TASK_RUN_NAME,single_task_gbs64_20w_controlnet8_detach_false_kimodo}"
+  gradient:
+    grad_clip_norm: 1.0
+    hand_grad_clip_norm: 1.0
+    grad_accumulation_steps: 1
+
+model:
+  fps: 30
+  motion_mask_mode: "concat"
+  dinov3_model_name: "dinov3-vitl16-pretrain-lvd1689m"
+  dinov3_checkpoint: null
+  text_feature_dim: 4096
+  controlnet_num_layers: 8
+  detach_root_control_for_body: true
+  hand_hidden_dim: 256
+  hand_num_layers: 4
+  hand_num_heads: 4
+  hand_ffn_dim: 1024
+  hand_init_seed: 3407
+  compile: true
+  compile_mode: "reduce-overhead"
+
+training:
+  loss:
+    motion_loss_type: kimodo_smooth_l1
+    kimodo_smooth_l1_weights:
+      root_position: 10.0
+      root_heading: 2.0
+      joint_position: 10.0
+      joint_velocity: 3.0
+      joint_rotation: 10.0
+      foot_contact: 4.0
+      fk: 5.0
+    mse_weights:
+      root: 4.0
+      body: 1.0
+      hand: 1.0
+      hand_transition: 0.2
+  optimizer:
+    control_backbone_lr: 3.0e-5
+    control_adapter_lr: 1.0e-4
+    hand_lr: 1.0e-4
+    weight_decay: 0.01
+    betas: [0.9, 0.999]
+    eps: 1.0e-8
+    fused: true
+  scheduler:
+    warmup_ratio: 0.01
+    num_cycles: 0.5
+    min_lr_ratio: 0.1
