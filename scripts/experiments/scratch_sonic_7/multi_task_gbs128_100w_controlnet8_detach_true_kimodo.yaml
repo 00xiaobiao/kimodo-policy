@@ -6,7 +6,7 @@ main:
   action_history: 100
   sample_stride: 1
   seed: 42
-  save_root: "log/experiments/sonic_8/multi_task_gbs128_100w_controlnet8_detach_true_kimodo/"
+  save_root: "log/experiments/scratch_sonic_7/multi_task_gbs128_100w_controlnet8_detach_true_kimodo/"
   dtype: "bf16"
 
   dataset_roots:

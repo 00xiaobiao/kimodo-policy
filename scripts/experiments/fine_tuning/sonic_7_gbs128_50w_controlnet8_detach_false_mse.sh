@@ -12,7 +12,7 @@ if [[ -z "${ACCELERATE_BIN}" || ! -x "${ACCELERATE_BIN}" ]]; then
   echo "accelerate was not found; activate kimodo-env or set KIMODO_ENV=/path/to/env" >&2
   exit 1
 fi
-CONFIG_PATH="${KIMODO_CONFIG:-${SCRIPT_DIR}/sonic_8_gbs128_50w_controlnet8_detach_false_mse.yaml}"
+CONFIG_PATH="${KIMODO_CONFIG:-${SCRIPT_DIR}/sonic_7_gbs128_50w_controlnet8_detach_false_mse.yaml}"
 GPU_LIST="${KIMODO_GPUS:-0,1,2,3}"
 INIT_CHECKPOINT="${1:-${KIMODO_INIT_CHECKPOINT:-}}"
 
@@ -56,5 +56,5 @@ cd "${PROJECT_ROOT}"
 # export KIMODO_ENV="$CONDA_PREFIX"
 # KIMODO_GPUS=0,1,2,3 \
 # HUMANOID_ARENA_ROOT=/path/to/HumanoidArena_dataset_v3_1 \
-# bash scripts/experiments/fine_tuning/sonic_8_gbs128_50w_controlnet8_detach_false_mse.sh \
+# bash scripts/experiments/fine_tuning/sonic_7_gbs128_50w_controlnet8_detach_false_mse.sh \
 #   /path/to/pretrain/checkpoint_STEP

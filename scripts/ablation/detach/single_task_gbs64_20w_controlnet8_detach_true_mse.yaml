@@ -25,7 +25,7 @@ main:
   precompute_text_embeddings: true
   wandb: "offline"
   wandb_project: "Kimodo-Policy"
-  wandb_run_name: "${oc.env:KIMODO_SINGLE_TASK_RUN_NAME,only_HumanoidArena_single_task}"
+  wandb_run_name: "${oc.env:KIMODO_SINGLE_TASK_RUN_NAME,single_task_gbs64_20w_controlnet8_detach_true_mse}"
   gradient:
     grad_clip_norm: 0.5
     hand_grad_clip_norm: 1.0

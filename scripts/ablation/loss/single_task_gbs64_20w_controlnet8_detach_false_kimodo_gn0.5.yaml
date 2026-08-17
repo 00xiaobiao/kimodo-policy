@@ -6,7 +6,7 @@ main:
   action_history: 100
   sample_stride: 1
   seed: 42
-  save_root: "${oc.env:KIMODO_SINGLE_TASK_SAVE_ROOT,log/ablation/loss/single_task_gbs64_20w_controlnet8_detach_false_kimodo/}"
+  save_root: "${oc.env:KIMODO_SINGLE_TASK_SAVE_ROOT,log/ablation/loss/single_task_gbs64_20w_controlnet8_detach_false_kimodo_gn0.5/}"
   dtype: "bf16"
 
   dataset_roots:
@@ -25,7 +25,7 @@ main:
   precompute_text_embeddings: true
   wandb: "offline"
   wandb_project: "Kimodo-Policy"
-  wandb_run_name: "${oc.env:KIMODO_SINGLE_TASK_RUN_NAME,single_task_gbs64_20w_controlnet8_detach_false_kimodo}"
+  wandb_run_name: "${oc.env:KIMODO_SINGLE_TASK_RUN_NAME,single_task_gbs64_20w_controlnet8_detach_false_kimodo_gn0.5}"
   gradient:
     grad_clip_norm: 0.5
     hand_grad_clip_norm: 1.0

@@ -6,17 +6,17 @@ PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/../../.." && pwd)"
 
 usage() {
   cat <<'EOF'
-Train the Kimodo Smooth-L1 single-task loss ablation.
+Train the detach=false, Kimodo Smooth-L1, grad-norm=1.0 single-task ablation.
 
 Usage:
-  bash scripts/ablation/loss/single_task_gbs64_20w_controlnet8_detach_false_kimodo.sh TASK [BACKEND]
+  bash scripts/ablation/loss/single_task_gbs64_20w_controlnet8_detach_false_kimodo_gn1.0.sh TASK [BACKEND]
 
 BACKEND defaults to sonic. TASK accepts the dataset task name or a short alias:
   doubledesk, football, grap_cup, pp_box, boxing, open_door, sit_sofa, vision_navi
 
 Examples:
-  KIMODO_GPUS=0,1,2,3 bash scripts/ablation/loss/single_task_gbs64_20w_controlnet8_detach_false_kimodo.sh doubledesk
-  KIMODO_GPUS=0,1,2,3 bash scripts/ablation/loss/single_task_gbs64_20w_controlnet8_detach_false_kimodo.sh HSI_open_door sonic
+  KIMODO_GPUS=0,1,2,3 bash scripts/ablation/loss/single_task_gbs64_20w_controlnet8_detach_false_kimodo_gn1.0.sh doubledesk
+  KIMODO_GPUS=0,1,2,3 bash scripts/ablation/loss/single_task_gbs64_20w_controlnet8_detach_false_kimodo_gn1.0.sh HSI_open_door sonic
 EOF
 }
 
@@ -80,7 +80,7 @@ if [[ -z "${ACCELERATE_BIN}" || ! -x "${ACCELERATE_BIN}" ]]; then
   exit 1
 fi
 
-CONFIG_PATH="${KIMODO_CONFIG:-${SCRIPT_DIR}/single_task_gbs64_20w_controlnet8_detach_false_kimodo.yaml}"
+CONFIG_PATH="${KIMODO_CONFIG:-${SCRIPT_DIR}/single_task_gbs64_20w_controlnet8_detach_false_kimodo_gn1.0.yaml}"
 if [[ ! -f "${CONFIG_PATH}" ]]; then
   echo "Training config does not exist: ${CONFIG_PATH}" >&2
   exit 2
@@ -94,7 +94,7 @@ if (( NUM_PROCESSES < 1 )); then
   exit 2
 fi
 
-RUN_NAME="single_task_gbs64_20w_controlnet8_detach_false_kimodo_${ARENA_TASK}_${BACKEND}"
+RUN_NAME="single_task_gbs64_20w_controlnet8_detach_false_kimodo_gn1.0_${ARENA_TASK}_${BACKEND}"
 export KIMODO_ARENA_TASK="${ARENA_TASK}"
 export KIMODO_ARENA_BACKEND="${BACKEND}"
 export KIMODO_SINGLE_TASK_SAVE_ROOT="${KIMODO_SINGLE_TASK_SAVE_ROOT:-log/ablation/loss/${RUN_NAME}/}"
@@ -122,4 +122,4 @@ cd "${PROJECT_ROOT}"
 # export KIMODO_ENV="$CONDA_PREFIX"
 # KIMODO_GPUS=0,1,2,3 \
 # HUMANOID_ARENA_ROOT=/path/to/HumanoidArena_dataset_v3_1 \
-# bash scripts/ablation/loss/single_task_gbs64_20w_controlnet8_detach_false_kimodo.sh doubledesk sonic
+# bash scripts/ablation/loss/single_task_gbs64_20w_controlnet8_detach_false_kimodo_gn1.0.sh doubledesk sonic

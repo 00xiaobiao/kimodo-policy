@@ -53,7 +53,7 @@ DEFAULT_CONFIG = (
     / "scripts"
     / "experiments"
     / "pre_training"
-    / "444h_gbs1024_100w_controlnet8_detach_false_mse.yaml"
+    / "419h_gbs1024_100w_controlnet8_detach_false_mse.yaml"
 )
 
 _WORKER_READER: ParquetEpisodeReader | None = None
@@ -681,6 +681,6 @@ if __name__ == "__main__":
 # export HIW500_ROOT=/mnt/workspace/vla/users/xujunzhe/yunhengwang/DataSet/Humanoid/HIW-500-LeRobot \
 
 # python utils/check_datasets.py \
-#     --config scripts/experiments/pre_training/444h_gbs1024_100w_controlnet8_detach_false_mse.yaml \
+#     --config scripts/experiments/pre_training/419h_gbs1024_100w_controlnet8_detach_false_mse.yaml \
 #     --workers 24 \
-#     --output audit_444h_filter_report.json
+#     --output audit_419h_filter_report.json
