@@ -19,6 +19,11 @@ import pyarrow.parquet as pq
 import torch
 from torch.utils import data
 
+from data.motion_cache import (
+    PRETRAIN_MOTION_CACHE_SOURCES,
+    episode_cache_token,
+    load_motion_cache_manifest,
+)
 from motion.g1_reference import (
     CANONICAL_G1_JOINT_NAMES_29,
     HumanoidArenaActionDecoder,
@@ -2212,6 +2217,9 @@ class MultiSourceG1Dataset(data.Dataset):
         self._runtime_invalid_episodes: set[
             tuple[str, str, str, str, int, int]
         ] = set()
+        self._motion_cache_dir: Path | None = None
+        self._motion_cache_signature: str | None = None
+        self._motion_cache_invalid_tokens: set[str] = set()
         self._text_embeddings: dict[str, torch.Tensor] = {}
         sampling = dict(sampling or {})
         windows_per_episode = sampling.get("windows_per_episode", 1)
@@ -2234,6 +2242,7 @@ class MultiSourceG1Dataset(data.Dataset):
                 "'source_task_balanced', or 'window_proportional'"
             )
         self.sampling_mode = mode
+        self._configured_source_weights = dict(sampling.get("source_weights", {}))
         self._source_names = list(self._episodes_by_source)
         self._all_episode_records = [
             record
@@ -2244,7 +2253,7 @@ class MultiSourceG1Dataset(data.Dataset):
         self._episode_weights: list[int] | None = None
         sampling_detail = "all episodes have equal probability"
         if mode in {"source_balanced", "source_task_balanced"}:
-            configured_weights = dict(sampling.get("source_weights", {}))
+            configured_weights = self._configured_source_weights
             self._source_weights = [
                 float(configured_weights.get(source, 1.0))
                 for source in self._source_names
@@ -2272,6 +2281,82 @@ class MultiSourceG1Dataset(data.Dataset):
             self._length,
             self.sampling_mode,
             sampling_detail,
+        )
+
+    def attach_motion_cache(self, cache_dir: str | Path, signature: str) -> None:
+        """Attach a completed pre-training motion cache to this dataset.
+
+        HumanoidArena records are intentionally left untouched.  For the three
+        supported pre-training sources, invalid records are removed before the
+        sampler is built and valid records are loaded lazily from the cache
+        instead of parquet and the source adapters.
+        """
+
+        cache_dir = Path(cache_dir).expanduser().resolve()
+        manifest = load_motion_cache_manifest(cache_dir, signature)
+        entries = manifest["entries"]
+        invalid_tokens: set[str] = set()
+        filtered_sources: dict[str, list[tuple[BaseSourceAdapter, EpisodeRecord]]] = {}
+        removed = 0
+
+        for source_name, records in self._episodes_by_source.items():
+            if source_name not in PRETRAIN_MOTION_CACHE_SOURCES:
+                filtered_sources[source_name] = records
+                continue
+            filtered_records: list[tuple[BaseSourceAdapter, EpisodeRecord]] = []
+            for adapter, episode in records:
+                token = episode_cache_token(episode.cache_key)
+                entry = entries.get(token)
+                if entry is None:
+                    raise RuntimeError(
+                        f"Motion cache has no entry for {source_name}/{episode.episode_id}"
+                    )
+                if entry.get("status") != "valid":
+                    invalid_tokens.add(token)
+                    removed += 1
+                    continue
+                filtered_records.append((adapter, episode))
+            filtered_sources[source_name] = filtered_records
+
+        self._episodes_by_source = filtered_sources
+        self._episodes_by_source_task = {}
+        for source_name, records in filtered_sources.items():
+            records_by_task: dict[
+                str, list[tuple[BaseSourceAdapter, EpisodeRecord]]
+            ] = defaultdict(list)
+            for record in records:
+                records_by_task[record[1].task_id].append(record)
+            self._episodes_by_source_task[source_name] = dict(records_by_task)
+
+        self._source_names = [
+            source for source in self._source_names if self._episodes_by_source[source]
+        ]
+        self._all_episode_records = [
+            record
+            for source in self._source_names
+            for record in self._episodes_by_source[source]
+        ]
+        self._length = sum(episode.sample_count for _, episode in self._all_episode_records)
+        if self.sampling_mode in {"source_balanced", "source_task_balanced"}:
+            self._source_weights = [
+                float(self._configured_source_weights.get(source, 1.0))
+                for source in self._source_names
+            ]
+        elif self.sampling_mode == "window_proportional":
+            self._episode_weights = [
+                episode.sample_count for _, episode in self._all_episode_records
+            ]
+
+        self._motion_cache_dir = cache_dir
+        self._motion_cache_signature = str(signature)
+        self._motion_cache_invalid_tokens = invalid_tokens
+        self._runtime_invalid_episodes.clear()
+        logger.info(
+            "Attached pre-training motion cache %s: removed_invalid=%d remaining_episodes=%d windows=%d",
+            cache_dir,
+            removed,
+            len(self._all_episode_records),
+            self._length,
         )
 
     def __getstate__(self) -> dict:
@@ -2524,7 +2609,37 @@ class MultiSourceG1Dataset(data.Dataset):
         if cached is not None:
             self._episode_cache[cache_key] = cached
             return cached
-        motion = adapter.load_episode(episode)
+        motion_cache_dir = getattr(self, "_motion_cache_dir", None)
+        if motion_cache_dir is not None and episode.source in PRETRAIN_MOTION_CACHE_SOURCES:
+            token = episode_cache_token(cache_key)
+            if token in getattr(self, "_motion_cache_invalid_tokens", set()):
+                raise RuntimeError(
+                    f"Invalid cached episode reached sampler: {episode.source}/{episode.episode_id}"
+                )
+            cache_path = (
+                motion_cache_dir
+                / "episodes"
+                / token[:2]
+                / f"{token}.pt"
+            )
+            try:
+                payload = torch.load(
+                    cache_path,
+                    map_location="cpu",
+                    weights_only=True,
+                )
+            except TypeError:  # torch versions without weights_only
+                payload = torch.load(cache_path, map_location="cpu")
+            if (
+                payload.get("version") != 1
+                or payload.get("signature")
+                != getattr(self, "_motion_cache_signature", None)
+                or payload.get("token") != token
+            ):
+                raise RuntimeError(f"Incompatible motion cache payload: {cache_path}")
+            motion = payload["motion"]
+        else:
+            motion = adapter.load_episode(episode)
         self._episode_cache[cache_key] = motion
         while len(self._episode_cache) > self.episode_cache_size:
             self._episode_cache.popitem(last=False)

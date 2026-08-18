@@ -6,7 +6,7 @@ main:
   action_history: 100
   sample_stride: 1
   seed: 42
-  save_root: "log/experiments/pre_training/419h_gbs1024_100w_controlnet8_detach_false_mse/"
+  save_root: "log/experiments/pre_training/419h_gbs1024_100w_controlnet8_detach_false_kimodo/"
   dtype: "bf16"
 
   dataset_roots:
@@ -42,7 +42,7 @@ main:
   precompute_motion_cache: true
   wandb: "offline"
   wandb_project: "Kimodo-Policy"
-  wandb_run_name: "419h_gbs1024_100w_controlnet8_detach_false_mse"
+  wandb_run_name: "419h_gbs1024_100w_controlnet8_detach_false_kimodo"
   gradient:
     grad_clip_norm: 1.0
     hand_grad_clip_norm: 1.0
@@ -66,7 +66,7 @@ model:
 
 training:
   loss:
-    motion_loss_type: mse
+    motion_loss_type: kimodo_smooth_l1
     kimodo_smooth_l1_weights:
       root_position: 10.0
       root_heading: 2.0

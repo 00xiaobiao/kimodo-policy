@@ -22,6 +22,12 @@ from accelerate.utils import InitProcessGroupKwargs
 from accelerate.utils import set_seed
 from datetime import timedelta
 from data.multisource_dataset import MultiSourceG1Dataset
+from data.motion_cache import (
+    PRETRAIN_MOTION_CACHE_SOURCES,
+    MOTION_CACHE_VERSION,
+    motion_cache_signature,
+    prepare_motion_cache,
+)
 from model.kimodo_policy import KimodoPolicy, KimodoPolicyConfig
 from torch.optim.lr_scheduler import LambdaLR
 
@@ -200,6 +206,71 @@ def build_dataset(config):
         target_fps=config.model.fps,
         sampling_seed=int(config.main.seed),
     )
+
+
+def prepare_pretrain_motion_cache(config, dataset, accelerator, config_path):
+    """Build/reuse the optional cache for non-Arena pre-training sources."""
+
+    # Cache generation is opt-in from the pre-training YAML. Fine-tuning
+    # configs intentionally omit this key and keep the live loader.
+    enabled = bool(config.main.get("precompute_motion_cache", False))
+    if not enabled:
+        return
+    selected_sources = set(dataset.adapters) & set(PRETRAIN_MOTION_CACHE_SOURCES)
+    if not selected_sources:
+        if accelerator.is_main_process:
+            logger.info(
+                "precompute_motion_cache=true but no supported pre-training source "
+                "is selected; HumanoidArena is intentionally left on the live loader"
+            )
+        return
+
+    dataset_selection = OmegaConf.to_container(
+        config.main.get("dataset_selection", {}), resolve=True
+    )
+    dataset_roots = OmegaConf.to_container(
+        config.main.get("dataset_roots", {}), resolve=True
+    )
+    signature_payload = {
+        "cache_version": MOTION_CACHE_VERSION,
+        "action_chunk": int(config.main.action_chunk),
+        "sample_stride": int(config.main.get("sample_stride", 1)),
+        "target_fps": float(config.model.fps),
+        "dataset_roots": dataset_roots,
+        "dataset_selection": dataset_selection,
+        "selected_sources": sorted(selected_sources),
+    }
+    signature = motion_cache_signature(signature_payload)
+    config_name = os.path.splitext(os.path.basename(str(config_path)))[0]
+    cache_root = os.path.join(
+        os.path.dirname(__file__),
+        "data",
+        "cache",
+        f"pretrain_motion_{config_name}",
+    )
+
+    result = [None, None]
+    if accelerator.is_main_process:
+        try:
+            cache_dir = prepare_motion_cache(
+                dataset,
+                cache_root,
+                signature,
+            )
+            result[0] = str(cache_dir)
+        except Exception as error:  # propagate a useful error to every rank
+            result[1] = f"{type(error).__name__}: {error}"
+    if dist.is_initialized():
+        dist.broadcast_object_list(result, src=0)
+    if result[1] is not None:
+        raise RuntimeError(result[1])
+    dataset.attach_motion_cache(result[0], signature)
+    if accelerator.is_main_process:
+        logger.info(
+            "Pre-training motion cache enabled: root=%s signature=%s",
+            result[0],
+            signature[:16],
+        )
 
 
 class ResumableOrdinalSampler(Sampler[int]):
@@ -556,6 +627,7 @@ _RESUME_CONFIG_FIELDS = (
     "main.sampling",
     "main.sample_stride",
     "main.precompute_text_embeddings",
+    "main.precompute_motion_cache",
     "main.gradient.grad_clip_norm",
     "main.gradient.hand_grad_clip_norm",
     "main.gradient.grad_accumulation_steps",
@@ -607,6 +679,8 @@ def _config_value(config, path):
 
 def _normalize_resume_config_value(path, value):
     """Fill newly introduced no-op defaults when comparing old checkpoints."""
+    if path == "main.precompute_motion_cache":
+        return False if value is _MISSING_CONFIG_VALUE else value
     if path == "model.enable_hand_head":
         return True if value is _MISSING_CONFIG_VALUE else value
     if path == "model.detach_root_control_for_body":
@@ -1027,13 +1101,20 @@ def learning(config_path=None, resume=None, init_checkpoint=None):
     if init_checkpoint:
         _validate_init_checkpoint_config(config, init_checkpoint)
     # 2. 配置分布式
+    distributed_timeout_seconds = int(
+        config.main.get("distributed_timeout_seconds", 3600)
+    )
+    if config.main.get("precompute_motion_cache", False):
+        # Rank 0 builds the cache before broadcasting its location.  Allow a
+        # long one-time build without letting the other ranks time out.
+        distributed_timeout_seconds = max(distributed_timeout_seconds, 21600)
     accelerator = Accelerator(
         gradient_accumulation_steps = config.main.gradient.grad_accumulation_steps,
         mixed_precision = config.main.dtype,
         step_scheduler_with_optimizer = False,
         project_dir = config.main.save_root,
         project_config = ProjectConfiguration(total_limit= 20),
-        kwargs_handlers = [InitProcessGroupKwargs(timeout=timedelta(seconds=3600)),
+        kwargs_handlers = [InitProcessGroupKwargs(timeout=timedelta(seconds=distributed_timeout_seconds)),
                         DistributedDataParallelKwargs(
                             find_unused_parameters=False,
                             gradient_as_bucket_view=True,
@@ -1057,6 +1138,7 @@ def learning(config_path=None, resume=None, init_checkpoint=None):
     setup_logging(rank, save_path)
     # 3. 加载数据
     train_dataset = build_dataset(config)
+    prepare_pretrain_motion_cache(config, train_dataset, accelerator, config_path)
     if config.main.get("precompute_text_embeddings", True):
         prepare_text_embeddings(config, train_dataset, accelerator)
     # 4. 加载模型和优化器

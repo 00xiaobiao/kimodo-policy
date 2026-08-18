@@ -1,48 +1,32 @@
 main:
-  batch_size: 128
-  max_steps: 1000000
-  save_steps: 200000
+  batch_size: 32
+  max_steps: 500000
+  save_steps: 100000
   action_chunk: 50
   action_history: 100
   sample_stride: 1
   seed: 42
-  save_root: "log/experiments/pre_training/419h_gbs1024_100w_controlnet8_detach_false_mse/"
+  save_root: "log/experiments/scratch_sonic_7/multi_task_gbs128_50w_controlnet8_detach_false_mse/"
   dtype: "bf16"
 
   dataset_roots:
-    UnifoLM_WBT_Dataset: "${oc.env:UNIFOLM_ROOT,/data/local-data/data/Humanoid/UnifoLM_WBT_Dataset}"
-    HumanoidEveryday: "${oc.env:HUMANOID_EVERYDAY_ROOT,/data/local-data/data/Humanoid/HumanoidEveryday}"
-    HIW500: "${oc.env:HIW500_ROOT,/data/local-data/data/Humanoid/HIW500-LeRobot}"
+    HumanoidArena: "${oc.env:HUMANOID_ARENA_ROOT,/data/local-data/data/Humanoid/HumanoidArena_dataset_v3_1}"
 
   dataset_selection:
-    UnifoLM_WBT_Dataset:
-      tasks: ["*"]
-      camera: "observation.images.head_stereo_left"
-      joint_jump_threshold_radians: 0.5
-      root_rotation_jump_threshold_degrees: 30.0
-    HumanoidEveryday:
-      tasks: ["*"]
-      joint_jump_threshold_radians: 0.5
-      root_rotation_jump_threshold_degrees: 30.0
-    HIW500:
-      tasks: ["*"]
-      camera: "observation.images.head"
-      stereo_view: "left"
-      hand_trigger_threshold: 5.0
-      hand_squeeze_threshold: 0.5
-      joint_jump_threshold_radians: 0.5
+    HumanoidArena:
+      merged: "sonic_8_refpose_v3_1"
 
   sampling:
-    mode: "window_proportional"
-    windows_per_episode: 8
+    mode: "episode_uniform"
 
-  episode_cache_size: 16
-  cpu_workers_num: 24
+  # The legacy merged name contains 8 tasks; the loader excludes HOI_grap_cup,
+  # leaving 7 tasks and 700 episodes for training.
+  episode_cache_size: 700  # cache all usable episodes per worker; 2 TiB host RAM is sufficient
+  cpu_workers_num: 24      # 4 ranks x 24 workers = 96, matched to the 96 physical cores
   precompute_text_embeddings: true
-  precompute_motion_cache: true
   wandb: "offline"
   wandb_project: "Kimodo-Policy"
-  wandb_run_name: "419h_gbs1024_100w_controlnet8_detach_false_mse"
+  wandb_run_name: "multi_task_gbs128_50w_controlnet8_detach_false_mse"
   gradient:
     grad_clip_norm: 1.0
     hand_grad_clip_norm: 1.0
