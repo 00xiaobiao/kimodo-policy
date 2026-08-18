@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 PROJECT_ROOT="/ai/Yichi/yunhengwang/Kimodo-Policy/controlnet_v1.2"
 EVAL_SCRIPT="${PROJECT_ROOT}/evaluation/humanoidarena_eval_sonic.sh"
-RESULTS_ROOT="${PROJECT_ROOT}/eval_results/experiments/scratch_sonic_8/ordered_7tasks_3checkpoints"
+RESULTS_ROOT="${PROJECT_ROOT}/eval_results/experiments/scratch_sonic_8/ordered_5tasks_2checkpoints"
 QUEUE_LOG_DIR="${RESULTS_ROOT}/queue_logs"
 STATUS_FILE="${RESULTS_ROOT}/queue_status.tsv"
 
@@ -11,27 +11,24 @@ SIM_ENV="/ai/Yichi/0_Systems/miniconda3/envs/unitree_sim_env"
 CONDA_ROOT="/ai/Yichi/0_Systems/miniconda3"
 SERVER_PYTHON="/ai/Yichi/0_Systems/miniconda3/envs/MOGE3/bin/python"
 GPU_LIST="5,6,7"
+EVAL_TIMEOUT_SECONDS="${EVAL_TIMEOUT_SECONDS:-10800}"
 
 TASKS=(
-  doubledesk
-  football
   pp_box
-  sit_sofa
   boxing
+  sit_sofa
   vision_navi
   open_door
 )
 
 CHECKPOINTS=(
-  "${PROJECT_ROOT}/log/experiments/scratch_sonic_8/multi_task_gbs128_100w_controlnet8_detach_true_mse/checkpoint_800000"
   "${PROJECT_ROOT}/log/experiments/scratch_sonic_8/multi_task_gbs128_100w_controlnet8_detach_true_kimodo/checkpoint_800000"
-  "${PROJECT_ROOT}/log/experiments/scratch_sonic_8/multi_task_gbs128_100w_controlnet8_detach_true_mse/checkpoint_1000000"
+  "${PROJECT_ROOT}/log/experiments/scratch_sonic_8/multi_task_gbs128_100w_controlnet8_detach_true_mse/checkpoint_800000"
 )
 
 CHECKPOINT_LABELS=(
-  mse_checkpoint_800000
   kimodo_checkpoint_800000
-  mse_checkpoint_1000000
+  mse_checkpoint_800000
 )
 
 mkdir -p "${QUEUE_LOG_DIR}"
@@ -52,6 +49,10 @@ if [[ ! -d "${SIM_ENV}" ]]; then
 fi
 if [[ ! -x "${SERVER_PYTHON}" ]]; then
   echo "Model-server Python does not exist: ${SERVER_PYTHON}" >&2
+  exit 2
+fi
+if ! command -v timeout >/dev/null 2>&1; then
+  echo "GNU timeout is required for evaluation watchdogs." >&2
   exit 2
 fi
 if ((${#CHECKPOINTS[@]} != ${#CHECKPOINT_LABELS[@]})); then
@@ -114,7 +115,12 @@ PY_VERIFY
 TOTAL_RUNS=$((${#TASKS[@]} * ${#CHECKPOINTS[@]}))
 RUN_INDEX=0
 
-write_status "QUEUE_STARTED" "0/${TOTAL_RUNS}" "-" "-" "gpus=${GPU_LIST}"
+write_status \
+  "QUEUE_STARTED" \
+  "0/${TOTAL_RUNS}" \
+  "-" \
+  "-" \
+  "gpus=${GPU_LIST}; timeout=${EVAL_TIMEOUT_SECONDS}s"
 
 for task in "${TASKS[@]}"; do
   for checkpoint_index in "${!CHECKPOINTS[@]}"; do
@@ -134,10 +140,15 @@ for task in "${TASKS[@]}"; do
     write_status "STARTED" "${RUN_INDEX}/${TOTAL_RUNS}" "${task}" "${label}" "${result_dir}"
 
     set +e
-    KIMODO_SIM_ENV="${SIM_ENV}" \
-    KIMODO_CONDA_ROOT="${CONDA_ROOT}" \
-    KIMODO_SERVER_PYTHON="${SERVER_PYTHON}" \
-    bash "${EVAL_SCRIPT}" \
+    timeout \
+      --signal=TERM \
+      --kill-after=120s \
+      "${EVAL_TIMEOUT_SECONDS}" \
+      env \
+      KIMODO_SIM_ENV="${SIM_ENV}" \
+      KIMODO_CONDA_ROOT="${CONDA_ROOT}" \
+      KIMODO_SERVER_PYTHON="${SERVER_PYTHON}" \
+      bash "${EVAL_SCRIPT}" \
       --project "${PROJECT_ROOT}" \
       --task "${task}" \
       --checkpoint "${checkpoint}" \
@@ -157,6 +168,15 @@ for task in "${TASKS[@]}"; do
     eval_status=${PIPESTATUS[0]}
     set -e
 
+    if ((eval_status == 124)); then
+      write_status \
+        "TIMEOUT" \
+        "${RUN_INDEX}/${TOTAL_RUNS}" \
+        "${task}" \
+        "${label}" \
+        "limit=${EVAL_TIMEOUT_SECONDS}s; log=${item_log}"
+      exit "${eval_status}"
+    fi
     if ((eval_status != 0)); then
       write_status "FAILED" "${RUN_INDEX}/${TOTAL_RUNS}" "${task}" "${label}" "exit=${eval_status}; log=${item_log}"
       exit "${eval_status}"
