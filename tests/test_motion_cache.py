@@ -6,7 +6,11 @@ from types import SimpleNamespace
 
 import torch
 
-from data.motion_cache import motion_cache_signature, prepare_motion_cache
+from data.motion_cache import (
+    load_motion_cache_manifest,
+    motion_cache_signature,
+    prepare_motion_cache,
+)
 from data.multisource_dataset import MultiSourceG1Dataset
 
 
@@ -88,6 +92,36 @@ def _dataset_for_attach(records, adapters):
     return dataset
 
 
+def _distributed_cache_process(rank, world_size, init_file, cache_dir, signature):
+    torch.distributed.init_process_group(
+        "gloo",
+        init_method=f"file://{init_file}",
+        rank=rank,
+        world_size=world_size,
+    )
+    try:
+        adapter = _Adapter()
+        episodes = [
+            _Episode("HIW500", f"distributed-{index}") for index in range(8)
+        ]
+        records = {"HIW500": [(adapter, episode) for episode in episodes]}
+        dataset = SimpleNamespace(
+            _source_names=["HIW500"],
+            _episodes_by_source=records,
+            adapters={"HIW500": adapter},
+        )
+        prepare_motion_cache(
+            dataset,
+            cache_dir,
+            signature,
+            rank=rank,
+            world_size=world_size,
+            workers_per_rank=2,
+        )
+    finally:
+        torch.distributed.destroy_process_group()
+
+
 class MotionCacheTest(unittest.TestCase):
     def test_cached_motion_is_identical_and_arena_stays_live(self):
         pretrain_adapter = _Adapter()
@@ -162,6 +196,53 @@ class MotionCacheTest(unittest.TestCase):
                         self.assertEqual(tuple(actual.shape), tuple(expected.shape), key)
                     else:
                         self.assertEqual(actual, expected, key)
+
+    def test_parallel_workers_produce_the_same_cache_payloads(self):
+        adapter = _Adapter()
+        episodes = [_Episode("HIW500", f"good-{index}") for index in range(4)]
+        records = {"HIW500": [(adapter, episode) for episode in episodes]}
+        dataset_for_build = SimpleNamespace(
+            _source_names=["HIW500"],
+            _episodes_by_source=records,
+            adapters={"HIW500": adapter},
+        )
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            signature = motion_cache_signature({"test": "parallel-cache"})
+            cache_dir = prepare_motion_cache(
+                dataset_for_build,
+                temporary_dir,
+                signature,
+                workers_per_rank=2,
+            )
+            manifest = load_motion_cache_manifest(cache_dir, signature)
+            self.assertEqual(
+                manifest["stats"],
+                {"valid": 4, "invalid": 0, "error": 0, "total": 4},
+            )
+            self.assertEqual(adapter.calls, [])
+            cached_dataset = _dataset_for_attach(records, {"HIW500": adapter})
+            cached_dataset.attach_motion_cache(cache_dir, signature)
+            for index in range(4):
+                sample = cached_dataset[index]
+                self.assertEqual(tuple(sample["gt_motion"].shape), (7, 417))
+
+    def test_two_ranks_use_all_configured_workers_without_duplicate_episodes(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            init_file = str(Path(temporary_dir) / "distributed_init")
+            cache_dir = str(Path(temporary_dir) / "cache")
+            signature = motion_cache_signature({"test": "distributed-cache"})
+            torch.multiprocessing.spawn(
+                _distributed_cache_process,
+                args=(2, init_file, cache_dir, signature),
+                nprocs=2,
+                join=True,
+            )
+            manifest = load_motion_cache_manifest(cache_dir, signature)
+            self.assertEqual(
+                manifest["stats"],
+                {"valid": 8, "invalid": 0, "error": 0, "total": 8},
+            )
+            self.assertEqual(len(manifest["entries"]), 8)
 
 
 if __name__ == "__main__":

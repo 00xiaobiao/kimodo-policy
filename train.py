@@ -249,27 +249,24 @@ def prepare_pretrain_motion_cache(config, dataset, accelerator, config_path):
         f"pretrain_motion_{config_name}",
     )
 
-    result = [None, None]
-    if accelerator.is_main_process:
-        try:
-            cache_dir = prepare_motion_cache(
-                dataset,
-                cache_root,
-                signature,
-            )
-            result[0] = str(cache_dir)
-        except Exception as error:  # propagate a useful error to every rank
-            result[1] = f"{type(error).__name__}: {error}"
-    if dist.is_initialized():
-        dist.broadcast_object_list(result, src=0)
-    if result[1] is not None:
-        raise RuntimeError(result[1])
-    dataset.attach_motion_cache(result[0], signature)
+    workers_per_rank = max(1, int(config.main.get("cpu_workers_num", 1)))
+    cache_dir = prepare_motion_cache(
+        dataset,
+        cache_root,
+        signature,
+        rank=accelerator.process_index,
+        world_size=accelerator.num_processes,
+        workers_per_rank=workers_per_rank,
+    )
+    dataset.attach_motion_cache(cache_dir, signature)
     if accelerator.is_main_process:
         logger.info(
-            "Pre-training motion cache enabled: root=%s signature=%s",
-            result[0],
+            "Pre-training motion cache enabled: root=%s signature=%s "
+            "workers_per_rank=%d total_workers=%d",
+            cache_dir,
             signature[:16],
+            workers_per_rank,
+            workers_per_rank * accelerator.num_processes,
         )
 
 
