@@ -16,7 +16,9 @@ import argparse
 import json
 import math
 import re
+import struct
 import sys
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -39,7 +41,6 @@ except ModuleNotFoundError as exc:  # pragma: no cover - environment guard
 
 try:
     from wandb.proto import wandb_internal_pb2
-    from wandb.sdk.internal.datastore import DataStore
 except ModuleNotFoundError as exc:  # pragma: no cover - environment guard
     raise SystemExit("Missing dependency 'wandb'. Install it with: pip install wandb") from exc
 
@@ -48,6 +49,198 @@ BLUE = "#1f77b4"
 RED = "#d62728"
 ORANGE = "#ff7f0e"
 GREEN = "#2ca02c"
+
+
+# W&B offline files use the LevelDB log format.  Reading the file through
+# ``wandb.sdk.internal.datastore.DataStore`` is tempting, but DataStore is a
+# private API and its scanner has changed between W&B releases.  In
+# particular, some versions raise ``expected record to be type 3 but found 0``
+# when they encounter a zero-filled block trailer.  The small reader below
+# implements the stable on-disk framing directly and treats a zero-filled
+# trailer as EOF/padding instead of crashing before the already-written
+# history can be plotted.
+_LEVELDBLOG_HEADER_LEN = 7
+_LEVELDBLOG_BLOCK_LEN = 32768
+_LEVELDBLOG_FULL = 1
+_LEVELDBLOG_FIRST = 2
+_LEVELDBLOG_MIDDLE = 3
+_LEVELDBLOG_LAST = 4
+_LEVELDBLOG_HEADER_IDENT = b":W&B"
+_LEVELDBLOG_HEADER_MAGIC = 0xBEE1
+_LEVELDBLOG_HEADER_VERSION = 0
+_LEVELDBLOG_CRC = {
+    record_type: zlib.crc32(bytes((record_type,))) & 0xFFFFFFFF
+    for record_type in (
+        _LEVELDBLOG_FULL,
+        _LEVELDBLOG_FIRST,
+        _LEVELDBLOG_MIDDLE,
+        _LEVELDBLOG_LAST,
+    )
+}
+
+
+class _WandbRecordError(RuntimeError):
+    """A malformed or incomplete W&B LevelDB record."""
+
+
+def _read_wandb_records(
+    wandb_file: Path, *, diagnostics: list[str] | None = None
+):
+    """Yield protobuf payloads from a W&B offline file.
+
+    This mirrors W&B's LevelDB framing, but is deliberately independent of
+    the private ``DataStore`` implementation.  A zero-filled block is valid
+    padding in a few writer/reader combinations; it is treated as a block
+    trailer.  If a zero-filled block interrupts a fragmented record, that one
+    incomplete record is discarded and scanning resumes at the next FULL or
+    FIRST record.  This is important for large sparse/preallocated files that
+    contain valid history after a zero-filled hole.
+
+    If the physical file ends in a partially written record, an informative
+    ``_WandbRecordError`` is raised after all complete records have been
+    yielded, allowing the caller to keep the valid prefix.
+    """
+
+    def read_record_header(stream, offset: int):
+        block_offset = offset % _LEVELDBLOG_BLOCK_LEN
+        space_left = _LEVELDBLOG_BLOCK_LEN - block_offset
+        if space_left < _LEVELDBLOG_HEADER_LEN:
+            padding = stream.read(space_left)
+            # A file may end without materializing the final 1--6 bytes of a
+            # LevelDB block.  Treat both an absent trailer and explicit zero
+            # padding as a clean EOF.
+            if not padding or (
+                len(padding) < space_left and padding == b"\x00" * len(padding)
+            ):
+                return "eof", b"", offset + len(padding)
+            if padding != b"\x00" * space_left:
+                raise _WandbRecordError(
+                    f"invalid LevelDB padding at byte offset {offset}"
+                )
+            return "padding", b"", offset + space_left
+
+        header = stream.read(_LEVELDBLOG_HEADER_LEN)
+        if not header:
+            return "eof", b"", offset
+        if len(header) != _LEVELDBLOG_HEADER_LEN:
+            raise _WandbRecordError(
+                f"truncated record header at byte offset {offset}: "
+                f"got {len(header)} bytes"
+            )
+
+        checksum, data_length, record_type = struct.unpack("<IHB", header)
+        # A zero-filled tail/block is what older DataStore implementations
+        # report as `type 0`.  Consume the rest of this block only when it is
+        # actually all zero; otherwise report a real framing error.
+        if checksum == 0 and data_length == 0 and record_type == 0:
+            remaining = _LEVELDBLOG_BLOCK_LEN - (offset % _LEVELDBLOG_BLOCK_LEN)
+            padding = stream.read(remaining - _LEVELDBLOG_HEADER_LEN)
+            if padding != b"\x00" * (remaining - _LEVELDBLOG_HEADER_LEN):
+                raise _WandbRecordError(
+                    f"invalid zero record/trailer at byte offset {offset}"
+                )
+            return "padding", b"", offset + remaining
+
+        if record_type not in _LEVELDBLOG_CRC:
+            raise _WandbRecordError(
+                f"invalid W&B record type {record_type} at byte offset {offset}"
+            )
+        if data_length > space_left - _LEVELDBLOG_HEADER_LEN:
+            raise _WandbRecordError(
+                f"record at byte offset {offset} crosses a LevelDB block "
+                f"without a fragment boundary"
+            )
+
+        data = stream.read(data_length)
+        if len(data) != data_length:
+            raise _WandbRecordError(
+                f"truncated record payload at byte offset {offset}: "
+                f"expected {data_length} bytes, got {len(data)}"
+            )
+        expected_checksum = zlib.crc32(
+            data, _LEVELDBLOG_CRC[record_type]
+        ) & 0xFFFFFFFF
+        if checksum != expected_checksum:
+            raise _WandbRecordError(
+                f"invalid record checksum at byte offset {offset}"
+            )
+        return record_type, data, offset + _LEVELDBLOG_HEADER_LEN + data_length
+
+    with wandb_file.open("rb") as stream:
+        header = stream.read(_LEVELDBLOG_HEADER_LEN)
+        if len(header) != _LEVELDBLOG_HEADER_LEN:
+            raise _WandbRecordError(
+                f"W&B file header has {len(header)} bytes; expected "
+                f"{_LEVELDBLOG_HEADER_LEN}"
+            )
+        ident, magic, version = struct.unpack("<4sHB", header)
+        if (
+            ident != _LEVELDBLOG_HEADER_IDENT
+            or magic != _LEVELDBLOG_HEADER_MAGIC
+            or version != _LEVELDBLOG_HEADER_VERSION
+        ):
+            raise _WandbRecordError(
+                "invalid W&B offline-file header "
+                f"(ident={ident!r}, magic=0x{magic:04x}, version={version})"
+            )
+
+        offset = _LEVELDBLOG_HEADER_LEN
+        pending = None
+        pending_offset = None
+        while True:
+            record_type, data, next_offset = read_record_header(stream, offset)
+            if record_type == "eof":
+                break
+            offset = next_offset
+            if record_type == "padding":
+                if pending is not None:
+                    raise _WandbRecordError(
+                        "file ended inside a fragmented record "
+                        f"started at byte offset {pending_offset}"
+                    )
+                # There may be another valid block after padding.  The
+                # normal writer only uses zero padding at the physical tail,
+                # but continuing is harmless and makes this reader tolerant
+                # of block-aligned copies.
+                continue
+            if record_type == _LEVELDBLOG_FULL:
+                if pending is not None:
+                    raise _WandbRecordError(
+                        "FULL record encountered while a fragmented record "
+                        f"from byte offset {pending_offset} is open"
+                    )
+                yield data
+            elif record_type == _LEVELDBLOG_FIRST:
+                if pending is not None:
+                    raise _WandbRecordError(
+                        "nested FIRST record at byte offset "
+                        f"{offset - len(data)}"
+                    )
+                pending = bytearray(data)
+                pending_offset = offset - _LEVELDBLOG_HEADER_LEN - len(data)
+            elif record_type == _LEVELDBLOG_MIDDLE:
+                if pending is None:
+                    raise _WandbRecordError(
+                        f"MIDDLE record at byte offset {offset - _LEVELDBLOG_HEADER_LEN - len(data)} "
+                        "has no preceding FIRST record"
+                    )
+                pending.extend(data)
+            elif record_type == _LEVELDBLOG_LAST:
+                if pending is None:
+                    raise _WandbRecordError(
+                        f"LAST record at byte offset {offset - _LEVELDBLOG_HEADER_LEN - len(data)} "
+                        "has no preceding FIRST record"
+                    )
+                pending.extend(data)
+                yield bytes(pending)
+                pending = None
+                pending_offset = None
+
+        if pending is not None:
+            raise _WandbRecordError(
+                "file ended inside a fragmented record "
+                f"started at byte offset {pending_offset}"
+            )
 
 
 @dataclass
@@ -151,54 +344,61 @@ def default_output_path(input_path: Path, wandb_file: Path) -> Path:
 
 
 def read_wandb_run(wandb_file: Path, *, quiet: bool = False) -> WandbRunData:
-    store = DataStore()
-    store.open_for_scan(str(wandb_file))
-
     rows_by_step: dict[int, dict[str, Any]] = {}
     config: dict[str, Any] = {}
     display_name = ""
     history_records = 0
     fallback_step = 0
 
-    while True:
-        data = store.scan_data()
-        if data is None:
-            break
-        record = wandb_internal_pb2.Record()
-        record.ParseFromString(data)
+    try:
+        record_stream = _read_wandb_records(wandb_file)
+        for data in record_stream:
+            record = wandb_internal_pb2.Record()
+            record.ParseFromString(data)
 
-        if record.HasField("run"):
-            if record.run.display_name:
-                display_name = record.run.display_name
-            _apply_config_items(config, record.run.config.update)
-        if record.HasField("config"):
-            _apply_config_items(config, record.config.update)
-        if not record.HasField("history"):
-            continue
+            if record.HasField("run"):
+                if record.run.display_name:
+                    display_name = record.run.display_name
+                _apply_config_items(config, record.run.config.update)
+            if record.HasField("config"):
+                _apply_config_items(config, record.config.update)
+            if not record.HasField("history"):
+                continue
 
-        row: dict[str, Any] = {}
-        for item in record.history.item:
-            key = _item_key(item)
-            if key:
-                row[key] = _json_value(item.value_json)
+            row: dict[str, Any] = {}
+            for item in record.history.item:
+                key = _item_key(item)
+                if key:
+                    row[key] = _json_value(item.value_json)
 
-        if "_step" in row:
-            try:
-                step = int(row["_step"])
-            except (TypeError, ValueError, OverflowError):
+            if "_step" in row:
+                try:
+                    step = int(row["_step"])
+                except (TypeError, ValueError, OverflowError):
+                    step = fallback_step
+            elif record.history.HasField("step"):
+                step = int(record.history.step.num)
+            else:
                 step = fallback_step
-        elif record.history.HasField("step"):
-            step = int(record.history.step.num)
-        else:
-            step = fallback_step
-        fallback_step = max(fallback_step + 1, step + 1)
+            fallback_step = max(fallback_step + 1, step + 1)
 
-        existing = rows_by_step.setdefault(step, {"_step": step})
-        existing.update(row)
-        existing["_step"] = step
-        history_records += 1
-        if not quiet and history_records % 50_000 == 0:
-            print(f"Parsed {history_records:,} W&B history records...", file=sys.stderr)
+            existing = rows_by_step.setdefault(step, {"_step": step})
+            existing.update(row)
+            existing["_step"] = step
+            history_records += 1
+            if not quiet and history_records % 50_000 == 0:
+                print(
+                    f"Parsed {history_records:,} W&B history records...",
+                    file=sys.stderr,
+                )
+    except _WandbRecordError as exc:
+        if not rows_by_step:
+            raise RuntimeError(f"Could not read W&B file {wandb_file}: {exc}") from exc
+        print(
+            f"Warning: stopped at the first unreadable/incomplete W&B block "
+            f"after {history_records:,} history records: {exc}",
+            file=sys.stderr,
+        )
 
     rows = [rows_by_step[step] for step in sorted(rows_by_step)]
     if not rows:
@@ -271,6 +471,37 @@ def metric_series(
         steps.append(step)
         values.append(value)
     return np.asarray(steps, dtype=np.float64), np.asarray(values, dtype=np.float64)
+
+_DASHBOARD_METRICS = (
+    "train/loss",
+    "train/motion_loss",
+    "train/root_loss",
+    "train/body_loss",
+    "train/hand_loss",
+    "train/control_grad_norm",
+    "train/control_was_clipped",
+    "train/control_clip_scale",
+    "train/hand_grad_norm",
+    "train/hand_was_clipped",
+    "train/hand_clip_scale",
+    "train/lr_control_adapter",
+    "train/lr_control_backbone",
+    "train/lr_hand",
+    "perf/compute_time",
+    "perf/data_time",
+)
+
+
+def dashboard_metric_counts(rows: Sequence[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for metric in _DASHBOARD_METRICS:
+        candidates = (metric, metric.replace("/", "."))
+        counts[metric] = sum(
+            1
+            for row in rows
+            if any(candidate in row for candidate in candidates)
+        )
+    return counts
 
 
 def _ema(values: np.ndarray, span: int) -> np.ndarray:
@@ -497,11 +728,11 @@ def build_dashboard(
 ) -> tuple[float | None, float | None]:
     history_steps = np.asarray([float(row["_step"]) for row in run.rows])
     max_step = float(np.max(history_steps))
-    configured_steps = _nested_get(run.config, "main.max_steps")
-    configured_steps = _as_finite_float(configured_steps)
-    total_steps = max(max_step, configured_steps or 0.0)
-    if total_steps <= 0:
-        total_steps = max(1.0, float(len(run.rows)))
+    # ``main.max_steps`` is the planned training budget, not the amount of
+    # history that was successfully written/read.  For a partial W&B file
+    # (for example, 935 parsed steps from a 500k-step run), using it as the
+    # x-axis limit makes every curve look empty at the left edge.
+    total_steps = max(1.0, max_step)
 
     control_threshold = _as_finite_float(
         _nested_get(run.config, "main.gradient.grad_clip_norm", 1.0)
@@ -644,6 +875,21 @@ def main() -> int:
         )
         print(f"W&B run: {wandb_file}")
         run = read_wandb_run(wandb_file, quiet=args.quiet)
+        if not args.quiet:
+            metric_counts = dashboard_metric_counts(run.rows)
+            available = [
+                f"{metric}={count:,}"
+                for metric, count in metric_counts.items()
+                if count
+            ]
+            if available:
+                print("Dashboard metrics: " + ", ".join(available))
+            else:
+                print(
+                    "Warning: none of the dashboard metrics were found in the "
+                    "parsed history",
+                    file=sys.stderr,
+                )
         control_rate, hand_rate = build_dashboard(
             run,
             output_path,
