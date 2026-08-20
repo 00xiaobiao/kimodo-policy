@@ -76,6 +76,9 @@ class KimodoPolicyConfig:
     hand_loss_weight: float = 1.0
     hand_transition_loss_weight: float = 0.2
     hand_init_seed: int = 3407
+    # Keep this new optional field last so existing positional construction
+    # of KimodoPolicyConfig remains compatible.
+    control_fusion_mode: str = "both"
 
 
 class KimodoPolicy(nn.Module):
@@ -145,6 +148,7 @@ class KimodoPolicy(nn.Module):
             num_control_layers=config.controlnet_num_layers,
             future_token_count=config.action_chunk,
             detach_root_control_for_body=config.detach_root_control_for_body,
+            control_fusion_mode=config.control_fusion_mode,
         )
         for p in self.controlnet.parameters():
             p.requires_grad = True

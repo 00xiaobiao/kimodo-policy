@@ -136,6 +136,9 @@ def build_model_and_optimizer(config):
         detach_root_control_for_body = config.model.get(
             "detach_root_control_for_body", False
         ),
+        control_fusion_mode = str(
+            config.model.get("control_fusion_mode", "both")
+        ),
         motion_loss_type = config.training.loss.get("motion_loss_type", "mse"),
         kimodo_smooth_l1_weights = kimodo_smooth_l1_weights,
         root_loss_weight = mse_weights.get(
@@ -635,6 +638,7 @@ _RESUME_CONFIG_FIELDS = (
     "model.text_feature_dim",
     "model.controlnet_num_layers",
     "model.detach_root_control_for_body",
+    "model.control_fusion_mode",
     "model.enable_hand_head",
     "model.hand_hidden_dim",
     "model.hand_num_layers",
@@ -654,6 +658,7 @@ _INIT_CHECKPOINT_CONFIG_FIELDS = (
     "model.dinov3_checkpoint",
     "model.text_feature_dim",
     "model.controlnet_num_layers",
+    "model.control_fusion_mode",
     "model.enable_hand_head",
     "model.hand_hidden_dim",
     "model.hand_num_layers",
@@ -682,6 +687,10 @@ def _normalize_resume_config_value(path, value):
         return True if value is _MISSING_CONFIG_VALUE else value
     if path == "model.detach_root_control_for_body":
         return False if value is _MISSING_CONFIG_VALUE else value
+    if path == "model.control_fusion_mode":
+        if value is _MISSING_CONFIG_VALUE:
+            return "both"
+        return str(value).strip().lower()
     if (
         path != "training.loss"
         or value is _MISSING_CONFIG_VALUE

@@ -486,6 +486,9 @@ class KimodoHumanoidArenaRuntime:
             detach_root_control_for_body=bool(
                 model_config.get("detach_root_control_for_body", False)
             ),
+            control_fusion_mode=str(
+                model_config.get("control_fusion_mode", "both")
+            ),
             root_loss_weight=float(
                 mse_weights.get("root", loss_config.get("root_weight", 2.0))
             ),

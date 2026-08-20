@@ -47,7 +47,10 @@ class _RecordingFuser(nn.Module):
 
 class ControlNetArchitectureTest(unittest.TestCase):
     @staticmethod
-    def _controlnet(detach_root_control_for_body: bool = False):
+    def _controlnet(
+        detach_root_control_for_body: bool = False,
+        control_fusion_mode: str = "both",
+    ):
         return ControlNet(
             _Denoiser(),
             image_feat_dim=6,
@@ -57,6 +60,7 @@ class ControlNetArchitectureTest(unittest.TestCase):
             future_token_count=2,
             token_mlp_hidden_dims=(6, 4),
             detach_root_control_for_body=detach_root_control_for_body,
+            control_fusion_mode=control_fusion_mode,
         )
 
     @staticmethod
@@ -177,6 +181,52 @@ class ControlNetArchitectureTest(unittest.TestCase):
                 hint = fuser(layer_index, visual_tokens, future_motion_tokens)
                 self.assertEqual(tuple(hint.shape), (2, 2, 8))
                 self.assertTrue(torch.equal(hint, torch.zeros_like(hint)))
+
+    def test_default_mode_matches_explicit_both_structure(self):
+        default_controlnet = self._controlnet()
+        explicit_controlnet = self._controlnet(control_fusion_mode="both")
+        self.assertEqual(
+            tuple(default_controlnet.state_dict()),
+            tuple(explicit_controlnet.state_dict()),
+        )
+
+    def test_control_fusion_modes_only_construct_selected_paths(self):
+        for mode in ("both", "cross_attn", "mlp"):
+            with self.subTest(mode=mode):
+                controlnet = self._controlnet(control_fusion_mode=mode)
+                parameter_names = tuple(name for name, _ in controlnet.named_parameters())
+                has_mlp = any("visual_token_mlp" in name for name in parameter_names)
+                has_cross_attention = any(
+                    "shared_cross_attention" in name for name in parameter_names
+                )
+                self.assertEqual(has_mlp, mode in {"both", "mlp"})
+                self.assertEqual(
+                    has_cross_attention, mode in {"both", "cross_attn"}
+                )
+
+    def test_control_fusion_modes_preserve_shape_and_zero_initialization(self):
+        for mode in ("both", "cross_attn", "mlp"):
+            with self.subTest(mode=mode):
+                controlnet = self._controlnet(control_fusion_mode=mode)
+                root_tokens, body_tokens = controlnet(
+                    timesteps=torch.tensor([3, 7]),
+                    image_features=torch.randn(2, 4, 6),
+                    sequence_length=6,
+                    future_start=4,
+                )
+                future_motion_tokens = torch.randn(2, 2, 8)
+                for fuser, visual_tokens_by_layer in (
+                    (controlnet.root_hint_fusion, root_tokens),
+                    (controlnet.body_hint_fusion, body_tokens),
+                ):
+                    for layer_index, visual_tokens in visual_tokens_by_layer.items():
+                        hint = fuser(layer_index, visual_tokens, future_motion_tokens)
+                        self.assertEqual(tuple(hint.shape), (2, 2, 8))
+                        self.assertTrue(torch.equal(hint, torch.zeros_like(hint)))
+
+    def test_invalid_control_fusion_mode_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "control_fusion_mode"):
+            self._controlnet(control_fusion_mode="invalid")
 
     def test_future_motion_hidden_is_cross_attention_query_and_both_paths_get_gradients(self):
         torch.manual_seed(11)

@@ -6,6 +6,19 @@ from torch import nn
 from .backbone import TimestepEmbedder
 
 
+_VALID_CONTROL_FUSION_MODES = frozenset({"both", "cross_attn", "mlp"})
+
+
+def _normalize_control_fusion_mode(mode: str) -> str:
+    normalized = str(mode).strip().lower()
+    if normalized not in _VALID_CONTROL_FUSION_MODES:
+        valid_modes = ", ".join(sorted(_VALID_CONTROL_FUSION_MODES))
+        raise ValueError(
+            f"control_fusion_mode must be one of {{{valid_modes}}}, got {mode!r}"
+        )
+    return normalized
+
+
 def _zero_linear(dim: int) -> nn.Linear:
     layer = nn.Linear(dim, dim)
     nn.init.zeros_(layer.weight)
@@ -119,7 +132,7 @@ class _VisualTokenMLP(nn.Module):
 
 
 class _LayerHintProjection(nn.Module):
-    """Fuse two visual paths and produce one zero-initialized future-motion hint."""
+    """Fuse configured visual paths and produce a zero-initialized hint."""
 
     def __init__(
         self,
@@ -127,22 +140,27 @@ class _LayerHintProjection(nn.Module):
         future_token_count: int,
         latent_dim: int,
         token_mlp_hidden_dims: tuple[int, ...],
+        control_fusion_mode: str = "both",
     ):
         super().__init__()
+        self.control_fusion_mode = _normalize_control_fusion_mode(control_fusion_mode)
         self.future_token_count = int(future_token_count)
         self.latent_dim = int(latent_dim)
-        self.visual_token_mlp = _VisualTokenMLP(
-            image_token_count=image_token_count,
-            future_token_count=self.future_token_count,
-            hidden_token_dims=token_mlp_hidden_dims,
-        )
+        if self.control_fusion_mode in {"both", "mlp"}:
+            # Keep the original module name and construction order in the
+            # default ``both`` mode so existing checkpoints are unchanged.
+            self.visual_token_mlp = _VisualTokenMLP(
+                image_token_count=image_token_count,
+                future_token_count=self.future_token_count,
+                hidden_token_dims=token_mlp_hidden_dims,
+            )
         self.fusion_zero_projection = _zero_linear(latent_dim)
 
     def forward(
         self,
         visual_tokens: torch.Tensor,
         future_motion_tokens: torch.Tensor,
-        shared_cross_attention: _SharedCrossAttention,
+        shared_cross_attention: _SharedCrossAttention | None,
     ) -> torch.Tensor:
         if future_motion_tokens.ndim != 3:
             raise ValueError(
@@ -159,24 +177,40 @@ class _LayerHintProjection(nn.Module):
                 f"{tuple(future_motion_tokens.shape)}"
             )
 
-        mlp_future_tokens = self.visual_token_mlp(visual_tokens)
-        attended_visual_tokens = shared_cross_attention(
-            future_motion_tokens,
-            visual_tokens,
-        )
-        if mlp_future_tokens.shape != attended_visual_tokens.shape:
-            raise RuntimeError(
-                "Visual MLP and shared cross-attention outputs must have identical shapes, "
-                f"got {tuple(mlp_future_tokens.shape)} and "
-                f"{tuple(attended_visual_tokens.shape)}"
+        if self.control_fusion_mode == "both":
+            # Keep the original dual-path operation order intact.
+            mlp_future_tokens = self.visual_token_mlp(visual_tokens)
+            if shared_cross_attention is None:
+                raise RuntimeError(
+                    "Cross-Attention is required for control_fusion_mode='both'"
+                )
+            attended_visual_tokens = shared_cross_attention(
+                future_motion_tokens,
+                visual_tokens,
             )
-
-        fused_future_tokens = mlp_future_tokens + attended_visual_tokens
+            if mlp_future_tokens.shape != attended_visual_tokens.shape:
+                raise RuntimeError(
+                    "Visual MLP and shared cross-attention outputs must have identical shapes, "
+                    f"got {tuple(mlp_future_tokens.shape)} and "
+                    f"{tuple(attended_visual_tokens.shape)}"
+                )
+            fused_future_tokens = mlp_future_tokens + attended_visual_tokens
+        elif self.control_fusion_mode == "mlp":
+            fused_future_tokens = self.visual_token_mlp(visual_tokens)
+        else:
+            if shared_cross_attention is None:
+                raise RuntimeError(
+                    "Cross-Attention is required for control_fusion_mode='cross_attn'"
+                )
+            fused_future_tokens = shared_cross_attention(
+                future_motion_tokens,
+                visual_tokens,
+            )
         return self.fusion_zero_projection(fused_future_tokens)
 
 
 class _StageHintFusion(nn.Module):
-    """Fuse per-layer visual tokens with motion queries using one shared attention."""
+    """Fuse per-layer visual tokens with the configured visual paths."""
 
     def __init__(
         self,
@@ -186,19 +220,25 @@ class _StageHintFusion(nn.Module):
         latent_dim: int,
         num_heads: int,
         token_mlp_hidden_dims: tuple[int, ...],
+        control_fusion_mode: str = "both",
     ):
         super().__init__()
+        self.control_fusion_mode = _normalize_control_fusion_mode(control_fusion_mode)
         self.injection_layers = tuple(int(layer) for layer in injection_layers)
-        self.shared_cross_attention = _SharedCrossAttention(
-            latent_dim=latent_dim,
-            num_heads=num_heads,
-        )
+        if self.control_fusion_mode in {"both", "cross_attn"}:
+            # In ``both`` this is intentionally constructed exactly as before;
+            # in ``mlp`` it is absent from the module/state-dict entirely.
+            self.shared_cross_attention = _SharedCrossAttention(
+                latent_dim=latent_dim,
+                num_heads=num_heads,
+            )
         self.projections = nn.ModuleList(
             _LayerHintProjection(
                 image_token_count=image_token_count,
                 future_token_count=future_token_count,
                 latent_dim=latent_dim,
                 token_mlp_hidden_dims=token_mlp_hidden_dims,
+                control_fusion_mode=self.control_fusion_mode,
             )
             for _ in self.injection_layers
         )
@@ -216,10 +256,14 @@ class _StageHintFusion(nn.Module):
                 f"Layer {layer_index} is not a configured injection layer "
                 f"{self.injection_layers}"
             ) from error
+        if self.control_fusion_mode == "mlp":
+            shared_cross_attention = None
+        else:
+            shared_cross_attention = self.shared_cross_attention
         return self.projections[projection_index](
             visual_tokens,
             future_motion_tokens,
-            self.shared_cross_attention,
+            shared_cross_attention,
         )
 
 
@@ -236,8 +280,10 @@ class ControlNet(nn.Module):
         future_token_count: int | None = None,
         token_mlp_hidden_dims: tuple[int, ...] = (256, 128),
         detach_root_control_for_body: bool = False,
+        control_fusion_mode: str = "both",
     ):
         super().__init__()
+        self.control_fusion_mode = _normalize_control_fusion_mode(control_fusion_mode)
         root_model = denoiser.root_model
         body_model = denoiser.body_model
         if root_model.latent_dim != body_model.latent_dim:
@@ -288,6 +334,7 @@ class ControlNet(nn.Module):
             latent_dim=latent_dim,
             num_heads=root_num_heads,
             token_mlp_hidden_dims=self.token_mlp_hidden_dims,
+            control_fusion_mode=self.control_fusion_mode,
         )
         self.body_hint_fusion = _StageHintFusion(
             injection_layers=self.body_injection_layers,
@@ -296,6 +343,7 @@ class ControlNet(nn.Module):
             latent_dim=latent_dim,
             num_heads=body_num_heads,
             token_mlp_hidden_dims=self.token_mlp_hidden_dims,
+            control_fusion_mode=self.control_fusion_mode,
         )
 
     @staticmethod
