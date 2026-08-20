@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/../../.." && pwd)"
+PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 if [[ -n "${KIMODO_ENV:-}" ]]; then
   ACCELERATE_BIN="${KIMODO_ENV}/bin/accelerate"
 else
@@ -12,7 +12,7 @@ if [[ -z "${ACCELERATE_BIN}" || ! -x "${ACCELERATE_BIN}" ]]; then
   echo "accelerate was not found; activate kimodo-env or set KIMODO_ENV=/path/to/env" >&2
   exit 1
 fi
-CONFIG_PATH="${KIMODO_CONFIG:-${SCRIPT_DIR}/multi_task_gbs128_50w_controlnet8_detach_false_mse.yaml}"
+CONFIG_PATH="${KIMODO_CONFIG:-${SCRIPT_DIR}/multi_task_gbs128_50w_controlnet8_detach_false_kimodo.yaml}"
 if [[ ! -f "${CONFIG_PATH}" ]]; then
   echo "Training config does not exist: ${CONFIG_PATH}" >&2
   exit 2
@@ -35,7 +35,7 @@ cd "${PROJECT_ROOT}"
   --multi_gpu \
   --num_processes "${NUM_PROCESSES}" \
   --mixed_precision bf16 \
-  --main_process_port "${KIMODO_MASTER_PORT:-29652}" \
+  --main_process_port "${KIMODO_MASTER_PORT:-29654}" \
   train.py \
   --config "${CONFIG_PATH}"
 
@@ -43,4 +43,4 @@ cd "${PROJECT_ROOT}"
 # export KIMODO_ENV="$CONDA_PREFIX"
 # KIMODO_GPUS=4,5,6,7 \
 # HUMANOID_ARENA_ROOT=/mnt/workspace/vla/users/xujunzhe/yunhengwang/DataSet/Humanoid/HumanoidArena_dataset_v3_1 \
-# bash scripts/experiments/scratch_sonic_7/multi_task_gbs128_50w_controlnet8_detach_false_mse.sh
+# bash scripts/ablation/multi_task_gbs128_50w_controlnet8_detach_false_kimodo.sh

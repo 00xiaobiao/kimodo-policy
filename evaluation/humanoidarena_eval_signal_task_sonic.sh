@@ -173,7 +173,7 @@ usage() {
 Kimodo HumanoidArena SONIC evaluator.
 
 Usage:
-  humanoidarena_eval_sonic.sh [options]
+  humanoidarena_eval_signal_task_sonic.sh [options]
 
 Core options:
   --project NAME|PATH       Project containing model/ and evaluation/humanoidarena_server.py
@@ -208,13 +208,13 @@ Runtime options:
   -h, --help                Show this help
 
 Examples:
-  humanoidarena_eval_sonic.sh --task football --gpus 0,1,2 --seeds 0,1,2
-  humanoidarena_eval_sonic.sh --task sit_sofa --gpus 0,1,2 --seeds 0,1,2
-  humanoidarena_eval_sonic.sh --task doubledesk --gpus 0,1,2 --seeds 0,1,2
-  humanoidarena_eval_sonic.sh --task pp_box --checkpoint /path/to/checkpoint --text-cache /path/to/cache
-  humanoidarena_eval_sonic.sh --project cross_attention_v1_eval_scaled \
+  humanoidarena_eval_signal_task_sonic.sh --task football --gpus 0,1,2 --seeds 0,1,2
+  humanoidarena_eval_signal_task_sonic.sh --task sit_sofa --gpus 0,1,2 --seeds 0,1,2
+  humanoidarena_eval_signal_task_sonic.sh --task doubledesk --gpus 0,1,2 --seeds 0,1,2
+  humanoidarena_eval_signal_task_sonic.sh --task pp_box --checkpoint /path/to/checkpoint --text-cache /path/to/cache
+  humanoidarena_eval_signal_task_sonic.sh --project cross_attention_v1_eval_scaled \
     --checkpoint eval_checkpoints/checkpoint_100000 --task football --gpus 0,1,2
-  humanoidarena_eval_sonic.sh --task football --gpus 7 --seeds 0 --repeats 1 --dry-run
+  humanoidarena_eval_signal_task_sonic.sh --task football --gpus 7 --seeds 0 --repeats 1 --dry-run
 EOF
 }
 
@@ -418,7 +418,7 @@ elif [[ "$CHECKPOINT" != /* ]]; then
 fi
 CHECKPOINT="$(readlink -m "$CHECKPOINT")"
 
-EVALUATOR_SCRIPT="${PROJECT_ROOT}/evaluation/humanoidarena_eval_sonic.sh"
+EVALUATOR_SCRIPT="${PROJECT_ROOT}/evaluation/humanoidarena_eval_signal_task_sonic.sh"
 SONIC_POLICY_ROOT="${HUMANOIDARENA_ROOT}/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release"
 
 if [[ -z "$SERVER_PYTHON" ]]; then

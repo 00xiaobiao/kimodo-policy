@@ -1,12 +1,12 @@
 main:
   batch_size: 32
   max_steps: 500000
-  save_steps: 100000
+  save_steps: 500000
   action_chunk: 50
   action_history: 100
   sample_stride: 1
   seed: 42
-  save_root: "log/experiments/scratch_sonic_7/multi_task_gbs128_50w_controlnet8_detach_false_mse/"
+  save_root: "log/ablation/multi_task_gbs128_50w_controlnet8_detach_true_mse/"
   dtype: "bf16"
 
   dataset_roots:
@@ -26,7 +26,7 @@ main:
   precompute_text_embeddings: true
   wandb: "offline"
   wandb_project: "Kimodo-Policy"
-  wandb_run_name: "multi_task_gbs128_50w_controlnet8_detach_false_mse"
+  wandb_run_name: "multi_task_gbs128_50w_controlnet8_detach_true_mse"
   gradient:
     grad_clip_norm: 1.0
     hand_grad_clip_norm: 1.0
@@ -39,7 +39,7 @@ model:
   dinov3_checkpoint: null
   text_feature_dim: 4096
   controlnet_num_layers: 8
-  detach_root_control_for_body: false
+  detach_root_control_for_body: true
   hand_hidden_dim: 256
   hand_num_layers: 4
   hand_num_heads: 4
