@@ -281,6 +281,7 @@ class ControlNet(nn.Module):
         token_mlp_hidden_dims: tuple[int, ...] = (256, 128),
         detach_root_control_for_body: bool = False,
         control_fusion_mode: str = "both",
+        controlnet_scale: int = 1,
     ):
         super().__init__()
         self.control_fusion_mode = _normalize_control_fusion_mode(control_fusion_mode)
@@ -292,6 +293,12 @@ class ControlNet(nn.Module):
         latent_dim = root_model.latent_dim
         self.image_token_count = int(image_token_count)
         self.motion_token_count = int(motion_token_count)
+        self.num_control_layers = int(num_control_layers)
+        self.controlnet_scale = int(controlnet_scale)
+        if self.controlnet_scale <= 0:
+            raise ValueError(
+                f"controlnet_scale must be a positive integer, got {controlnet_scale}"
+            )
         self.future_token_count = int(
             motion_token_count if future_token_count is None else future_token_count
         )
@@ -310,22 +317,30 @@ class ControlNet(nn.Module):
         root_num_heads = int(getattr(root_model, "num_heads", 8))
         body_num_heads = int(getattr(body_model, "num_heads", root_num_heads))
         self.root_injection_layers = self._injection_layers(
-            len(root_model.seqTransEncoder.layers), num_control_layers
+            len(root_model.seqTransEncoder.layers), self.num_control_layers
         )
         self.body_injection_layers = self._injection_layers(
-            len(body_model.seqTransEncoder.layers), num_control_layers
+            len(body_model.seqTransEncoder.layers), self.num_control_layers
+        )
+        self.root_branch_injection_layers = self._branch_injection_layers(
+            self.root_injection_layers, self.controlnet_scale
+        )
+        self.body_branch_injection_layers = self._branch_injection_layers(
+            self.body_injection_layers, self.controlnet_scale
         )
         self.sequence_pos_encoder = copy.deepcopy(root_model.sequence_pos_encoder)
         self.embed_timestep = TimestepEmbedder(latent_dim, self.sequence_pos_encoder)
         self.image_projection = nn.Linear(image_feat_dim, latent_dim)
 
-        self.root_layers = nn.ModuleList(
-            copy.deepcopy(root_model.seqTransEncoder.layers[layer_index])
-            for layer_index in self.root_injection_layers
+        self.root_layers = self._build_branch_layers(
+            root_model.seqTransEncoder.layers,
+            self.root_injection_layers,
+            self.controlnet_scale,
         )
-        self.body_layers = nn.ModuleList(
-            copy.deepcopy(body_model.seqTransEncoder.layers[layer_index])
-            for layer_index in self.body_injection_layers
+        self.body_layers = self._build_branch_layers(
+            body_model.seqTransEncoder.layers,
+            self.body_injection_layers,
+            self.controlnet_scale,
         )
         self.root_hint_fusion = _StageHintFusion(
             injection_layers=self.root_injection_layers,
@@ -362,17 +377,147 @@ class ControlNet(nn.Module):
         stride = backbone_depth // num_control_layers
         return tuple(range(stride - 1, backbone_depth, stride))
 
+    @staticmethod
+    def _branch_injection_layers(
+        injection_layers: tuple[int, ...], controlnet_scale: int
+    ) -> tuple[int, ...]:
+        """Return the branch-layer indices at which visual hints are emitted.
+
+        ``injection_layers`` describes the frozen Kimodo backbone positions and
+        is intentionally kept separate from the number of layers in the
+        ControlNet branch.  Each branch segment has ``controlnet_scale``
+        layers, so the hint is emitted after every segment.
+        """
+        if controlnet_scale <= 0:
+            raise ValueError(
+                f"controlnet_scale must be a positive integer, got {controlnet_scale}"
+            )
+        return tuple(
+            (segment_index + 1) * controlnet_scale - 1
+            for segment_index in range(len(injection_layers))
+        )
+
+    @staticmethod
+    def _randomized_layer(template):
+        """Clone a Transformer layer and reset its learnable submodules.
+
+        The branch uses the same layer type/configuration as Kimodo, but these
+        layers must not inherit the copied Kimodo weights.  PyTorch's
+        ``TransformerEncoderLayer`` does not expose a public reset method, so
+        reset every child module that provides ``reset_parameters``.
+        """
+        layer = copy.deepcopy(template)
+        for child in layer.modules():
+            if child is layer:
+                continue
+            reset_parameters = getattr(child, "reset_parameters", None)
+            if callable(reset_parameters):
+                reset_parameters()
+        return layer
+
+    @staticmethod
+    def _copied_backbone_indices(
+        backbone_depth: int, branch_depth: int
+    ) -> tuple[int, ...]:
+        """Choose copied Kimodo layers from the total ControlNet depth.
+
+        This makes equivalent total-depth configurations share the same
+        copied layers.  For example, a 16-layer Kimodo with branch depth 8
+        selects layers ``(1, 3, ..., 15)`` whether the branch is configured as
+        8 injections x 1 block or 4 injections x 2 blocks.
+        """
+        if branch_depth <= backbone_depth:
+            if backbone_depth % branch_depth != 0:
+                raise ValueError(
+                    f"Kimodo depth {backbone_depth} must be divisible by "
+                    f"ControlNet copied depth {branch_depth}"
+                )
+            stride = backbone_depth // branch_depth
+            return tuple(range(stride - 1, backbone_depth, stride))
+        return tuple(range(backbone_depth))
+
+    @classmethod
+    def _build_branch_layers(
+        cls,
+        backbone_layers,
+        injection_layers: tuple[int, ...],
+        controlnet_scale: int,
+    ) -> nn.ModuleList:
+        """Build one branch segment per main-backbone injection.
+
+        A segment contains the random prefix required when the requested
+        branch is deeper than the corresponding Kimodo span, followed by the
+        copied Kimodo layers.  Copied layers are selected from the *total*
+        branch depth, so equivalent configurations use the same Kimodo
+        layers.  For example, ``num_control_layers=4, scale=2`` and
+        ``num_control_layers=8, scale=1`` both copy Kimodo layers
+        ``(2, 4, ..., 16)`` (1-based).
+
+        At ``scale=1`` this reduces exactly to the legacy construction: one
+        copied layer (the final layer of each Kimodo segment) per injection.
+        """
+        backbone_depth = len(backbone_layers)
+        num_control_layers = len(injection_layers)
+        if num_control_layers <= 0:
+            raise ValueError("At least one ControlNet injection layer is required")
+        if backbone_depth % num_control_layers != 0:
+            raise ValueError(
+                f"Backbone depth {backbone_depth} must be divisible by "
+                f"num_control_layers={num_control_layers}"
+            )
+        if controlnet_scale <= 0:
+            raise ValueError(
+                f"controlnet_scale must be a positive integer, got {controlnet_scale}"
+            )
+
+        branch_depth = num_control_layers * controlnet_scale
+        backbone_segment_depth = backbone_depth // num_control_layers
+        copied_per_segment = min(controlnet_scale, backbone_segment_depth)
+        random_per_segment = controlnet_scale - copied_per_segment
+        copied_indices = cls._copied_backbone_indices(backbone_depth, branch_depth)
+        expected_copied_depth = num_control_layers * copied_per_segment
+        if len(copied_indices) != expected_copied_depth:
+            raise RuntimeError(
+                f"Selected {len(copied_indices)} copied Kimodo layers, "
+                f"expected {expected_copied_depth}"
+            )
+        layers = nn.ModuleList()
+        random_template = backbone_layers[0]
+        for segment_index in range(num_control_layers):
+            for _ in range(random_per_segment):
+                layers.append(cls._randomized_layer(random_template))
+
+            copied_start = segment_index * copied_per_segment
+            copied_end = copied_start + copied_per_segment
+            for layer_index in copied_indices[copied_start:copied_end]:
+                layers.append(copy.deepcopy(backbone_layers[layer_index]))
+
+        if len(layers) != branch_depth:
+            raise RuntimeError(
+                f"Built {len(layers)} ControlNet layers, expected {branch_depth}"
+            )
+        return layers
+
     def _collect_visual_tokens(
         self,
         xseq: torch.Tensor,
         layers: nn.ModuleList,
-        injection_layers: tuple[int, ...],
+        branch_injection_layers: tuple[int, ...],
+        output_injection_layers: tuple[int, ...],
         padding_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, dict[int, torch.Tensor]]:
         visual_tokens_by_layer = {}
-        for layer_index, layer in zip(injection_layers, layers):
+        branch_injection_lookup = {
+            branch_layer_index: output_layer_index
+            for branch_layer_index, output_layer_index in zip(
+                branch_injection_layers, output_injection_layers
+            )
+        }
+        for branch_layer_index, layer in enumerate(layers):
             xseq = layer(xseq, src_key_padding_mask=padding_mask)
-            visual_tokens_by_layer[layer_index] = xseq[:, 1:]
+            output_layer_index = branch_injection_lookup.get(branch_layer_index)
+            if output_layer_index is not None:
+                visual_tokens_by_layer[output_layer_index] = xseq[:, 1:]
         return xseq, visual_tokens_by_layer
 
     def forward(
@@ -410,6 +555,7 @@ class ControlNet(nn.Module):
         xseq, root_visual_tokens = self._collect_visual_tokens(
             xseq,
             self.root_layers,
+            self.root_branch_injection_layers,
             self.root_injection_layers,
             padding_mask,
         )
@@ -421,6 +567,7 @@ class ControlNet(nn.Module):
         _, body_visual_tokens = self._collect_visual_tokens(
             body_xseq,
             self.body_layers,
+            self.body_branch_injection_layers,
             self.body_injection_layers,
             padding_mask,
         )

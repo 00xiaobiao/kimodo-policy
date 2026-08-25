@@ -27,3 +27,8 @@ results/
 eval_results/
 checkpoints/
 *.ckpt
+
+# Playback-generated media and debug artifacts.
+/data/playback/output/
+/data/playback/debug_frames/
+/tea_debug.log

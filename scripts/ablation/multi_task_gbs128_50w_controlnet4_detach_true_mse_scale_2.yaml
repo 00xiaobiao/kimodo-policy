@@ -1,33 +1,32 @@
 main:
-  batch_size: 16
-  max_steps: 50000
-  save_steps: 10000
+  batch_size: 32
+  max_steps: 500000
+  save_steps: 500000
   action_chunk: 50
   action_history: 100
   sample_stride: 1
   seed: 42
-  # 4 ranks x batch_size 16 = global batch size 64 (the launcher defaults to 4 GPUs).
-  save_root: "log/experiments/real_world/real_world_bottle_packing_gbs64_5w_controlnet4_detach_false_mse/"
+  save_root: "log/ablation/multi_task_gbs128_50w_controlnet4_detach_true_mse_scale_2/"
   dtype: "bf16"
 
   dataset_roots:
-    RealWorld: "${oc.env:REAL_WORLD_ROOT,/data/local-data/data/code/yunhengwang/kimodo-polocy/controlnet_v1.2/real-world}"
+    HumanoidArena: "${oc.env:HUMANOID_ARENA_ROOT,/data/local-data/data/Humanoid/HumanoidArena_dataset_v3_1}"
 
   dataset_selection:
-    RealWorld:
-      task: "Bottle_Packing"
-      dataset: "g1_real_20260823_11_59"
-      camera: "observation.images.ego_view"
+    HumanoidArena:
+      merged: "sonic_8_refpose_v3_1"
 
   sampling:
     mode: "episode_uniform"
 
+  # The legacy merged name contains 8 tasks; the loader excludes HOI_grap_cup,
+  # leaving 7 tasks and 700 episodes for training.
   episode_cache_size: 700
   cpu_workers_num: 24
   precompute_text_embeddings: true
   wandb: "offline"
   wandb_project: "Kimodo-Policy"
-  wandb_run_name: "real_world_bottle_packing_gbs64_5w_controlnet4_detach_false_mse"
+  wandb_run_name: "multi_task_gbs128_50w_controlnet4_detach_true_mse_scale_2"
   gradient:
     grad_clip_norm: 1.0
     hand_grad_clip_norm: 1.0
@@ -40,7 +39,9 @@ model:
   dinov3_checkpoint: null
   text_feature_dim: 4096
   controlnet_num_layers: 4
-  detach_root_control_for_body: false
+  controlnet_scale: 2
+  detach_root_control_for_body: true
+  control_fusion_mode: "both"
   hand_hidden_dim: 256
   hand_num_layers: 4
   hand_num_heads: 4

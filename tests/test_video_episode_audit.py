@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import av
 
-from data.multisource_dataset import EpisodeRecord, SOURCE_HIW500
+from data.datasetloader import EpisodeRecord, SOURCE_HIW500
 from scripts import audit_video_episodes as audit
 
 

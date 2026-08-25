@@ -12,7 +12,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
 
-from data.multisource_dataset import (
+from data.datasetloader import (
     BaseSourceAdapter,
     EpisodeRecord,
     HIW_G1_JOINT_FEATURE_NAMES_29,
@@ -680,7 +680,7 @@ class MultiSourceDatasetTest(unittest.TestCase):
 
             reader = ParquetEpisodeReader()
             with patch(
-                "data.multisource_dataset.pq.ParquetFile",
+                "data.datasetloader.pq.ParquetFile",
                 wraps=pq.ParquetFile,
             ) as open_parquet:
                 result = reader.read(episode, ["value"])
@@ -939,7 +939,7 @@ class MultiSourceDatasetTest(unittest.TestCase):
             1094995529, "Invalid data found when processing input"
         )
         with patch(
-            "data.multisource_dataset.av.open", side_effect=error
+                "data.datasetloader.av.open", side_effect=error
         ), self.assertRaises(VideoFrameDecodeError) as raised:
             dataset._read_video_frame(Path("broken.mp4"), timestamp=1.25)
 
@@ -965,7 +965,7 @@ class MultiSourceDatasetTest(unittest.TestCase):
         container.streams.video = [stream]
         container.decode.side_effect = [[first_frame], [second_frame]]
 
-        with patch("data.multisource_dataset.av.open", return_value=container) as open_video:
+        with patch("data.datasetloader.av.open", return_value=container) as open_video:
             first = dataset._read_video_frame(Path("sample.mp4"), 1.0)
             second = dataset._read_video_frame(Path("sample.mp4"), 2.0)
 
@@ -1054,7 +1054,7 @@ class MultiSourceDatasetTest(unittest.TestCase):
         }
         dataset.sample_stride = 1
 
-        with patch("data.multisource_dataset.random.choices", return_value=[SOURCE_HIW500]) as choices:
+        with patch("data.datasetloader.random.choices", return_value=[SOURCE_HIW500]) as choices:
             _, selected, cut = dataset._sample_record()
 
         choices.assert_called_once_with(
@@ -1072,7 +1072,7 @@ class MultiSourceDatasetTest(unittest.TestCase):
         dataset.sample_stride = 1
 
         with patch(
-            "data.multisource_dataset.random.choice", return_value=hiw_record
+            "data.datasetloader.random.choice", return_value=hiw_record
         ) as choice:
             _, selected, cut = dataset._sample_record()
 
@@ -1124,7 +1124,7 @@ class MultiSourceDatasetTest(unittest.TestCase):
         dataset.sample_stride = 1
 
         with patch(
-            "data.multisource_dataset.random.choices", return_value=[long]
+            "data.datasetloader.random.choices", return_value=[long]
         ) as choices:
             _, selected, _ = dataset._sample_record()
 
@@ -1298,7 +1298,7 @@ class MultiSourceDatasetTest(unittest.TestCase):
             )
 
         with patch.object(dataset, "_sample_episode", side_effect=episode_sequence), patch(
-            "data.multisource_dataset.random.Random.randrange",
+            "data.datasetloader.random.Random.randrange",
             autospec=True,
             side_effect=lambda rng, stop: stop - 1,
         ):

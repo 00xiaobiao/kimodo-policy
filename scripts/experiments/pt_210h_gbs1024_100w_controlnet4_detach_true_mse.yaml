@@ -6,9 +6,8 @@ main:
   action_history: 100
   sample_stride: 1
   seed: 42
-  # Optional deterministic pre-training subset; omitted also defaults to 1.0.
-  pretrain_data_fraction: 1.0
-  save_root: "log/experiments/pre_training/419h_gbs1024_100w_controlnet8_detach_false_kimodo/"
+  pretrain_data_fraction: 0.5
+  save_root: "${oc.env:KIMODO_PT_SAVE_ROOT,log/experiments/pt_210h_gbs1024_100w_controlnet4_detach_true_mse/}"
   dtype: "bf16"
 
   dataset_roots:
@@ -44,7 +43,7 @@ main:
   precompute_motion_cache: true
   wandb: "offline"
   wandb_project: "Kimodo-Policy"
-  wandb_run_name: "419h_gbs1024_100w_controlnet8_detach_false_kimodo"
+  wandb_run_name: "${oc.env:KIMODO_PT_RUN_NAME,pt_210h_gbs1024_100w_controlnet4_detach_true_mse}"
   gradient:
     grad_clip_norm: 1.0
     hand_grad_clip_norm: 1.0
@@ -56,8 +55,9 @@ model:
   dinov3_model_name: "dinov3-vitl16-pretrain-lvd1689m"
   dinov3_checkpoint: null
   text_feature_dim: 4096
-  controlnet_num_layers: 8
-  detach_root_control_for_body: false
+  controlnet_num_layers: 4
+  detach_root_control_for_body: true
+  control_fusion_mode: "both"
   hand_hidden_dim: 256
   hand_num_layers: 4
   hand_num_heads: 4
@@ -68,7 +68,7 @@ model:
 
 training:
   loss:
-    motion_loss_type: kimodo_smooth_l1
+    motion_loss_type: mse
     kimodo_smooth_l1_weights:
       root_position: 10.0
       root_heading: 2.0

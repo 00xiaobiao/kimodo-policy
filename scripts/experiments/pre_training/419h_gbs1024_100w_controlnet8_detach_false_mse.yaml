@@ -6,6 +6,8 @@ main:
   action_history: 100
   sample_stride: 1
   seed: 42
+  # Optional deterministic pre-training subset; omitted also defaults to 1.0.
+  pretrain_data_fraction: 1.0
   save_root: "log/experiments/pre_training/419h_gbs1024_100w_controlnet8_detach_false_mse/"
   dtype: "bf16"
 

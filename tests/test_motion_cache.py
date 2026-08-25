@@ -11,7 +11,7 @@ from data.motion_cache import (
     motion_cache_signature,
     prepare_motion_cache,
 )
-from data.multisource_dataset import MultiSourceG1Dataset
+from data.datasetloader import MultiSourceG1Dataset
 
 
 class _Episode:

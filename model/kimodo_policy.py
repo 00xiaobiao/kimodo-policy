@@ -79,6 +79,7 @@ class KimodoPolicyConfig:
     # Keep this new optional field last so existing positional construction
     # of KimodoPolicyConfig remains compatible.
     control_fusion_mode: str = "both"
+    controlnet_scale: int = 1
 
 
 class KimodoPolicy(nn.Module):
@@ -146,6 +147,7 @@ class KimodoPolicy(nn.Module):
             image_feat_dim=self.image_encoder.output_dim,
             motion_token_count=config.action_history + config.action_chunk,
             num_control_layers=config.controlnet_num_layers,
+            controlnet_scale=config.controlnet_scale,
             future_token_count=config.action_chunk,
             detach_root_control_for_body=config.detach_root_control_for_body,
             control_fusion_mode=config.control_fusion_mode,

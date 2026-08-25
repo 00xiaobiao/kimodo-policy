@@ -21,7 +21,7 @@ from datetime import datetime
 from accelerate.utils import InitProcessGroupKwargs
 from accelerate.utils import set_seed
 from datetime import timedelta
-from data.multisource_dataset import MultiSourceG1Dataset
+from data.datasetloader import MultiSourceG1Dataset
 from data.motion_cache import (
     PRETRAIN_MOTION_CACHE_SOURCES,
     MOTION_CACHE_VERSION,
@@ -133,6 +133,7 @@ def build_model_and_optimizer(config):
         action_history   = config.main.action_history,
         load_text_encoder = not config.main.get("precompute_text_embeddings", True),
         controlnet_num_layers = config.model.get("controlnet_num_layers", 8),
+        controlnet_scale = config.model.get("controlnet_scale", 1),
         detach_root_control_for_body = config.model.get(
             "detach_root_control_for_body", False
         ),
@@ -270,6 +271,35 @@ def prepare_pretrain_motion_cache(config, dataset, accelerator, config_path):
             signature[:16],
             workers_per_rank,
             workers_per_rank * accelerator.num_processes,
+        )
+
+
+def apply_pretrain_data_fraction(config, dataset, accelerator):
+    """Apply the optional deterministic subset switch to pre-training data only."""
+
+    configured_fraction = config.main.get("pretrain_data_fraction", 1.0)
+    # Missing fields in older pre-training YAMLs intentionally mean full data.
+    fraction = 1.0 if configured_fraction is None else float(configured_fraction)
+    selected_sources = set(dataset.adapters) & set(PRETRAIN_MOTION_CACHE_SOURCES)
+    if not selected_sources:
+        if fraction != 1.0 and accelerator.is_main_process:
+            logger.info(
+                "Ignoring main.pretrain_data_fraction=%.6f because no pre-training "
+                "source is selected",
+                fraction,
+            )
+        return
+
+    summary = dataset.apply_pretrain_data_fraction(fraction)
+    if accelerator.is_main_process and summary["applied"]:
+        logger.info(
+            "Pre-training data fraction summary: fraction=%.6f "
+            "episodes=%d/%d windows=%d/%d",
+            summary["fraction"],
+            summary["after_episodes"],
+            summary["before_episodes"],
+            summary["after_windows"],
+            summary["before_windows"],
         )
 
 
@@ -628,6 +658,7 @@ _RESUME_CONFIG_FIELDS = (
     "main.sample_stride",
     "main.precompute_text_embeddings",
     "main.precompute_motion_cache",
+    "main.pretrain_data_fraction",
     "main.gradient.grad_clip_norm",
     "main.gradient.hand_grad_clip_norm",
     "main.gradient.grad_accumulation_steps",
@@ -637,6 +668,7 @@ _RESUME_CONFIG_FIELDS = (
     "model.dinov3_checkpoint",
     "model.text_feature_dim",
     "model.controlnet_num_layers",
+    "model.controlnet_scale",
     "model.detach_root_control_for_body",
     "model.control_fusion_mode",
     "model.enable_hand_head",
@@ -658,6 +690,7 @@ _INIT_CHECKPOINT_CONFIG_FIELDS = (
     "model.dinov3_checkpoint",
     "model.text_feature_dim",
     "model.controlnet_num_layers",
+    "model.controlnet_scale",
     "model.control_fusion_mode",
     "model.enable_hand_head",
     "model.hand_hidden_dim",
@@ -683,10 +716,14 @@ def _normalize_resume_config_value(path, value):
     """Fill newly introduced no-op defaults when comparing old checkpoints."""
     if path == "main.precompute_motion_cache":
         return False if value is _MISSING_CONFIG_VALUE else value
+    if path == "main.pretrain_data_fraction":
+        return 1.0 if value is _MISSING_CONFIG_VALUE else float(value)
     if path == "model.enable_hand_head":
         return True if value is _MISSING_CONFIG_VALUE else value
     if path == "model.detach_root_control_for_body":
         return False if value is _MISSING_CONFIG_VALUE else value
+    if path == "model.controlnet_scale":
+        return 1 if value is _MISSING_CONFIG_VALUE else int(value)
     if path == "model.control_fusion_mode":
         if value is _MISSING_CONFIG_VALUE:
             return "both"
@@ -1145,6 +1182,7 @@ def learning(config_path=None, resume=None, init_checkpoint=None):
     # 3. 加载数据
     train_dataset = build_dataset(config)
     prepare_pretrain_motion_cache(config, train_dataset, accelerator, config_path)
+    apply_pretrain_data_fraction(config, train_dataset, accelerator)
     if config.main.get("precompute_text_embeddings", True):
         prepare_text_embeddings(config, train_dataset, accelerator)
     # 4. 加载模型和优化器

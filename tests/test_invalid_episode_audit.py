@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 
 import numpy as np
 
-from data.multisource_dataset import (
+from data.datasetloader import (
     EpisodeRecord,
     SOURCE_HIW500,
     SOURCE_HUMANOID_EVERYDAY,

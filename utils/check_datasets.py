@@ -2,7 +2,7 @@
 """Audit motion-quality filtering for a multisource training config.
 
 This script intentionally reuses the discontinuity detectors used by
-``data.multisource_dataset``.  It scans parquet motion/state columns only; it
+``data.datasetloader``.  It scans parquet motion/state columns only; it
 does not initialize the model, decode training images, or modify the dataset.
 """
 
@@ -28,7 +28,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from omegaconf import OmegaConf
 
-from data.multisource_dataset import (
+from data.datasetloader import (
     HIW_TRIGGER_CLOSE_THRESHOLD,
     HIW_SQUEEZE_OPEN_THRESHOLD,
     UNIFOLM_FIRST_ROOT_JUMP_THRESHOLD_METERS,

@@ -1,99 +1,502 @@
-"""Legacy standalone HumanoidArena loader.
+"""Central mixed-source dataset loader.
 
-New mixed-source training uses :mod:`data.multisource_dataset` directly.
+The source-specific adapters live in sibling modules; this module retains the
+original MultiSourceG1Dataset orchestration and sampling implementation.
 """
 
-from __future__ import annotations
+from .common import *  # noqa: F401,F403
+from .humanoidarena_loader import HumanoidArenaAdapter
+from .unifolm_loader import UnifoLMAdapter
+from .humanoid_everyday_loader import HumanoidEverydayAdapter
+from .hiw500_loader import HIW500Adapter
+from .realworld_loader import RealWorldAdapter
+from .humanoidarena_legacy import *  # noqa: F401,F403
 
-import json
-import logging
-import random
-import time
-from collections import OrderedDict
-from pathlib import Path
-from collections.abc import Mapping
-
-import av
-import numpy as np
-import pyarrow.parquet as pq
-import torch
-from torch.utils import data
-
-from motion.g1_reference import (
-    HumanoidArenaActionDecoder,
-    resample_hand_binary,
-    resample_motion,
-)
-from motion.representation.kimodo_motionrep import KimodoMotionRep
-from skeleton.definitions import G1Skeleton34
-
-
-logger = logging.getLogger(__name__)
-
-EXPECTED_SCHEMA = "unitree_g1_gmt_refpose_v3_1"
-PREFERRED_VIDEO_KEYS = ("observation.images.front", "observation.image")
-TASK_KEY_BY_TASK_ID = {
-    "Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody": "HOI_double_desk",
-    "Isaac-Move-Football-Single-G129-Dex3-Wholebody": "HOI_football",
-    "Isaac-Move-ArtVIP-Livingroom-GrapCup-G129-Dex3-Wholebody": "HOI_grap_cup",
-    "Isaac-Move-PickPlace-Box-G129-Dex3-Wholedoby": "HOI_pp_box",
-    "Isaac-Move-Boxing-Bag-G129-Dex3-Wholebody": "HSI_boxing",
-    "Isaac-Move-Open-Door-G129-Dex3-Wholebody": "HSI_open_door",
-    "Isaac-Move-Sit-Sofa-G129-Dex3-Wholebody": "HSI_sit_sofa",
-    "Isaac-Move-SmallWarehouse-VisionNavigation-G129-Dex3-Wholebody": "HSI_vision_navi",
+ADAPTER_BY_SOURCE = {
+    SOURCE_HUMANOID_ARENA: HumanoidArenaAdapter,
+    SOURCE_HUMANOID_EVERYDAY: HumanoidEverydayAdapter,
+    SOURCE_HIW500: HIW500Adapter,
+    SOURCE_UNIFOLM: UnifoLMAdapter,
+    SOURCE_REAL_WORLD: RealWorldAdapter,
 }
-TASK_INDEX_BY_TASK_ID = {
-    task_id: task_index
-    for task_index, task_id in enumerate(TASK_KEY_BY_TASK_ID)
-}
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
-_CHECKPOINTS_ROOT = _PROJECT_ROOT.parent / "checkpoints"
-_XML_PATH = _PROJECT_ROOT / "skeleton/assets/g1skel34/xml/g1.xml"
-_STATS_PATH = _CHECKPOINTS_ROOT / "Kimodo-G1-RP-v1/stats/motion"
-_VIDEO_READ_MAX_ATTEMPTS = 4
-_VIDEO_READ_RETRY_DELAY_SECONDS = 0.05
 
 
-class HumanoidArenaDataset(data.Dataset):
-    """Windowed HumanoidArena V3.1 dataset encoded in Kimodo's 417D motion space."""
+class MultiSourceG1Dataset(data.Dataset):
+    """Source-balanced mixed dataset aligned to Kimodo's 417D G1 contract."""
 
     def __init__(
         self,
-        dataset_root: str,
+        dataset_root: str | None = None,
+        dataset_roots: Mapping[str, str] | None = None,
         action_history: int = 100,
         action_chunk: int = 50,
         sample_stride: int = 1,
-        episode_cache_size: int = 2,
-        dataset_selection: Mapping[str, str | list[str]] | None = None,
+        episode_cache_size: int = 8,
+        video_cache_size: int = DEFAULT_VIDEO_CACHE_SIZE,
+        dataset_selection: Mapping | None = None,
+        sampling: Mapping | None = None,
         target_fps: float = 30.0,
-    ):
-        dataset_path = Path(dataset_root).expanduser()
-        if not dataset_path.is_absolute():
-            dataset_path = _PROJECT_ROOT / dataset_path
-        self.dataset_root = dataset_path.resolve()
+        sampling_seed: int = 0,
+    ) -> None:
         self.action_history = int(action_history)
         self.action_chunk = int(action_chunk)
         self.sample_stride = int(sample_stride)
         self.episode_cache_size = int(episode_cache_size)
-        self.dataset_selection = self._normalize_selection(dataset_selection)
+        self.video_cache_size = int(video_cache_size)
         self.target_fps = float(target_fps)
-        if self.action_history <= 0 or self.action_chunk <= 0 or self.sample_stride <= 0:
-            raise ValueError("action_history, action_chunk, and sample_stride must be positive")
-        if not self.dataset_root.is_dir():
-            raise FileNotFoundError(
-                f"HumanoidArena dataset root does not exist: {self.dataset_root}. "
-                "Expected a downloaded HumanoidArena_dataset_v3_1 directory."
+        self.sampling_seed = int(sampling_seed)
+        if min(self.action_history, self.action_chunk, self.sample_stride) <= 0:
+            raise ValueError("action_history, action_chunk and sample_stride must be positive")
+        if self.episode_cache_size < 0 or self.video_cache_size < 0:
+            raise ValueError("episode_cache_size and video_cache_size must be non-negative")
+
+        roots = self._normalize_roots(dataset_root, dataset_roots)
+        selections = self._normalize_selection(dataset_selection, roots)
+        self.adapters: dict[str, BaseSourceAdapter] = {}
+        self._episodes_by_source: dict[str, list[tuple[BaseSourceAdapter, EpisodeRecord]]] = {}
+        self._episodes_by_source_task: dict[
+            str, dict[str, list[tuple[BaseSourceAdapter, EpisodeRecord]]]
+        ] = {}
+        self._task_instructions: dict[str, str] = {}
+        self._task_cache_names: dict[str, str] = {}
+        total_windows = 0
+        for source_name, selection in selections.items():
+            root = roots.get(source_name)
+            if root is None:
+                raise KeyError(f"No dataset root configured for selected source {source_name}")
+            if not root.is_dir():
+                raise FileNotFoundError(f"{source_name} dataset root does not exist: {root}")
+            adapter = ADAPTER_BY_SOURCE[source_name](
+                root=root,
+                selection=selection,
+                target_fps=self.target_fps,
+                action_chunk=self.action_chunk,
+            )
+            if not adapter.episodes:
+                raise RuntimeError(
+                    f"No compatible {source_name} episodes found below {root} for selection {selection}"
+                )
+            for episode in adapter.episodes:
+                episode.metadata["sample_stride"] = self.sample_stride
+                last_cut = episode.target_length - self.action_chunk
+                episode.sample_count = last_cut // self.sample_stride + 1
+                existing = self._task_instructions.get(episode.task_id)
+                if existing is not None and existing != episode.instruction:
+                    raise ValueError(
+                        f"Task ID {episode.task_id!r} maps to conflicting instructions"
+                    )
+                existing_name = self._task_cache_names.get(episode.task_id)
+                if existing_name is not None and existing_name != episode.task_name:
+                    raise ValueError(
+                        f"Task ID {episode.task_id!r} maps to conflicting task names"
+                    )
+                self._task_instructions[episode.task_id] = episode.instruction
+                self._task_cache_names[episode.task_id] = episode.task_name
+                total_windows += episode.sample_count
+            self.adapters[source_name] = adapter
+            self._episodes_by_source[source_name] = [
+                (adapter, episode) for episode in adapter.episodes
+            ]
+            records_by_task: dict[
+                str, list[tuple[BaseSourceAdapter, EpisodeRecord]]
+            ] = defaultdict(list)
+            for record in self._episodes_by_source[source_name]:
+                records_by_task[record[1].task_id].append(record)
+            self._episodes_by_source_task[source_name] = dict(records_by_task)
+
+        self._length = total_windows
+        self._episode_cache: OrderedDict[
+            tuple[str, str, str, str, int, int], dict[str, torch.Tensor]
+        ] = OrderedDict()
+        self._video_cache: OrderedDict[str, tuple[object, object]] = OrderedDict()
+        self._runtime_invalid_episodes: set[
+            tuple[str, str, str, str, int, int]
+        ] = set()
+        self._motion_cache_dir: Path | None = None
+        self._motion_cache_signature: str | None = None
+        self._motion_cache_invalid_tokens: set[str] = set()
+        self._text_embeddings: dict[str, torch.Tensor] = {}
+        sampling = dict(sampling or {})
+        windows_per_episode = sampling.get("windows_per_episode", 1)
+        if (
+            isinstance(windows_per_episode, bool)
+            or not isinstance(windows_per_episode, int)
+            or windows_per_episode <= 0
+        ):
+            raise ValueError("sampling.windows_per_episode must be a positive integer")
+        self.windows_per_episode = windows_per_episode
+        mode = str(sampling.get("mode", "episode_uniform"))
+        if mode not in {
+            "episode_uniform",
+            "source_balanced",
+            "source_task_balanced",
+            "window_proportional",
+        }:
+            raise ValueError(
+                "sampling.mode must be 'episode_uniform', 'source_balanced', "
+                "'source_task_balanced', or 'window_proportional'"
+            )
+        self.sampling_mode = mode
+        self._configured_source_weights = dict(sampling.get("source_weights", {}))
+        self._source_names = list(self._episodes_by_source)
+        self._all_episode_records = [
+            record
+            for source in self._source_names
+            for record in self._episodes_by_source[source]
+        ]
+        self._source_weights: list[float] | None = None
+        self._episode_weights: list[int] | None = None
+        sampling_detail = "all episodes have equal probability"
+        if mode in {"source_balanced", "source_task_balanced"}:
+            configured_weights = self._configured_source_weights
+            self._source_weights = [
+                float(configured_weights.get(source, 1.0))
+                for source in self._source_names
+            ]
+            if any(weight <= 0 for weight in self._source_weights):
+                raise ValueError("All selected source sampling weights must be positive")
+            sampling_detail = (
+                f"source_weights={dict(zip(self._source_names, self._source_weights))}"
+            )
+            if mode == "source_task_balanced":
+                sampling_detail += "; tasks are uniform within each source"
+        elif mode == "window_proportional":
+            self._episode_weights = [
+                episode.sample_count for _, episode in self._all_episode_records
+            ]
+            sampling_detail = "episode weights are proportional to valid start points"
+        if self.windows_per_episode > 1:
+            sampling_detail += (
+                f"; {self.windows_per_episode} windows are sampled per episode group"
+            )
+        logger.info(
+            "Loaded mixed G1 dataset: sources=%s episodes=%s windows=%d sampling=%s (%s)",
+            self._source_names,
+            {source: len(self._episodes_by_source[source]) for source in self._source_names},
+            self._length,
+            self.sampling_mode,
+            sampling_detail,
+        )
+
+    def attach_motion_cache(self, cache_dir: str | Path, signature: str) -> None:
+        """Attach a completed pre-training motion cache to this dataset.
+
+        HumanoidArena records are intentionally left untouched.  For the three
+        supported pre-training sources, invalid records are removed before the
+        sampler is built and valid records are loaded lazily from the cache
+        instead of parquet and the source adapters.
+        """
+
+        cache_dir = Path(cache_dir).expanduser().resolve()
+        manifest = load_motion_cache_manifest(cache_dir, signature)
+        entries = manifest["entries"]
+        invalid_tokens: set[str] = set()
+        filtered_sources: dict[str, list[tuple[BaseSourceAdapter, EpisodeRecord]]] = {}
+        removed = 0
+
+        for source_name, records in self._episodes_by_source.items():
+            if source_name not in PRETRAIN_MOTION_CACHE_SOURCES:
+                filtered_sources[source_name] = records
+                continue
+            filtered_records: list[tuple[BaseSourceAdapter, EpisodeRecord]] = []
+            for adapter, episode in records:
+                token = episode_cache_token(episode.cache_key)
+                entry = entries.get(token)
+                if entry is None:
+                    raise RuntimeError(
+                        f"Motion cache has no entry for {source_name}/{episode.episode_id}"
+                    )
+                if entry.get("status") != "valid":
+                    invalid_tokens.add(token)
+                    removed += 1
+                    continue
+                filtered_records.append((adapter, episode))
+            filtered_sources[source_name] = filtered_records
+
+        self._episodes_by_source = filtered_sources
+        self._episodes_by_source_task = {}
+        for source_name, records in filtered_sources.items():
+            records_by_task: dict[
+                str, list[tuple[BaseSourceAdapter, EpisodeRecord]]
+            ] = defaultdict(list)
+            for record in records:
+                records_by_task[record[1].task_id].append(record)
+            self._episodes_by_source_task[source_name] = dict(records_by_task)
+
+        self._source_names = [
+            source for source in self._source_names if self._episodes_by_source[source]
+        ]
+        self._all_episode_records = [
+            record
+            for source in self._source_names
+            for record in self._episodes_by_source[source]
+        ]
+        self._length = sum(episode.sample_count for _, episode in self._all_episode_records)
+        if self.sampling_mode in {"source_balanced", "source_task_balanced"}:
+            self._source_weights = [
+                float(self._configured_source_weights.get(source, 1.0))
+                for source in self._source_names
+            ]
+        elif self.sampling_mode == "window_proportional":
+            self._episode_weights = [
+                episode.sample_count for _, episode in self._all_episode_records
+            ]
+
+        self._motion_cache_dir = cache_dir
+        self._motion_cache_signature = str(signature)
+        self._motion_cache_invalid_tokens = invalid_tokens
+        self._runtime_invalid_episodes.clear()
+        logger.info(
+            "Attached pre-training motion cache %s: removed_invalid=%d remaining_episodes=%d windows=%d",
+            cache_dir,
+            removed,
+            len(self._all_episode_records),
+            self._length,
+        )
+
+    def apply_pretrain_data_fraction(self, fraction: float) -> dict[str, int | float]:
+        """Keep a deterministic fraction of the discovered pre-training episodes.
+
+        The subset is selected globally across the configured pre-training
+        sources.  A fixed internal seed is used after sorting by stable episode
+        identity, and the selected records are the prefix of one fixed
+        permutation.  Consequently, a 25% subset is nested in a 50% subset and
+        repeated runs with the same dataset inventory select the same episodes.
+
+        This method intentionally leaves non-pre-training sources untouched and
+        is a no-op when no pre-training source is configured.  The fraction is
+        defined over complete episodes; the existing sampler continues to draw
+        windows from the selected episodes according to its configured mode.
+        """
+
+        if isinstance(fraction, bool):
+            raise ValueError("pretrain_data_fraction must be a number in (0, 1]")
+        fraction = float(fraction)
+        if not math.isfinite(fraction) or not 0.0 < fraction <= 1.0:
+            raise ValueError(
+                f"pretrain_data_fraction must be in (0, 1], got {fraction!r}"
             )
 
-        self.episodes: list[dict] = []
-        self._cumulative_samples: list[int] = []
-        self._episode_cache: OrderedDict[int, dict[str, torch.Tensor]] = OrderedDict()
-        self._data_file_cache: dict[Path, tuple[np.ndarray, np.ndarray]] = {}
-        self._decoder = None
-        self._representation = None
-        self._text_embeddings: dict[str, torch.Tensor] = {}
-        self._task_instructions: dict[str, str] = {}
-        self._load_metadata()
+        pretrain_sources = set(self.adapters) & set(PRETRAIN_MOTION_CACHE_SOURCES)
+        if not pretrain_sources:
+            return {
+                "fraction": fraction,
+                "before_episodes": 0,
+                "after_episodes": 0,
+                "before_windows": 0,
+                "after_windows": 0,
+                "applied": 0,
+            }
+
+        pretrain_records = [
+            record
+            for source_name in self._source_names
+            if source_name in pretrain_sources
+            for record in self._episodes_by_source.get(source_name, [])
+        ]
+        before_episodes = len(pretrain_records)
+        before_windows = sum(episode.sample_count for _, episode in pretrain_records)
+        if fraction >= 1.0 or before_episodes == 0:
+            return {
+                "fraction": fraction,
+                "before_episodes": before_episodes,
+                "after_episodes": before_episodes,
+                "before_windows": before_windows,
+                "after_windows": before_windows,
+                "applied": 0,
+            }
+
+        def stable_record_key(record):
+            _, episode = record
+            return (
+                str(episode.source),
+                str(episode.task_id),
+                str(episode.task_name),
+                str(episode.episode_id),
+                tuple(str(value) for value in episode.cache_key),
+            )
+
+        ordered_records = sorted(pretrain_records, key=stable_record_key)
+        random.Random(_PRETRAIN_DATA_FRACTION_SEED).shuffle(ordered_records)
+        selected_count = max(1, int(before_episodes * fraction))
+        selected_keys = {
+            episode.cache_key for _, episode in ordered_records[:selected_count]
+        }
+
+        filtered_by_source = {}
+        for source_name, records in self._episodes_by_source.items():
+            if source_name not in pretrain_sources:
+                filtered_by_source[source_name] = records
+                continue
+            filtered_by_source[source_name] = [
+                record
+                for record in records
+                if record[1].cache_key in selected_keys
+            ]
+
+        self._episodes_by_source = filtered_by_source
+        self._episodes_by_source_task = {}
+        for source_name, records in filtered_by_source.items():
+            records_by_task: dict[
+                str, list[tuple[BaseSourceAdapter, EpisodeRecord]]
+            ] = defaultdict(list)
+            for record in records:
+                records_by_task[record[1].task_id].append(record)
+            self._episodes_by_source_task[source_name] = dict(records_by_task)
+
+        # Rebuild all sampling tables after replacing the episode inventory.
+        self._source_names = [
+            source_name
+            for source_name in self._source_names
+            if self._episodes_by_source.get(source_name)
+        ]
+        self._all_episode_records = [
+            record
+            for source_name in self._source_names
+            for record in self._episodes_by_source[source_name]
+        ]
+        self._length = sum(
+            episode.sample_count for _, episode in self._all_episode_records
+        )
+        if self.sampling_mode in {"source_balanced", "source_task_balanced"}:
+            self._source_weights = [
+                float(self._configured_source_weights.get(source_name, 1.0))
+                for source_name in self._source_names
+            ]
+        else:
+            self._source_weights = None
+        if self.sampling_mode == "window_proportional":
+            self._episode_weights = [
+                episode.sample_count for _, episode in self._all_episode_records
+            ]
+        else:
+            self._episode_weights = None
+        self._runtime_invalid_episodes.clear()
+
+        after_episodes = len(selected_keys)
+        after_windows = sum(
+            episode.sample_count
+            for _, episode in self._all_episode_records
+            if episode.source in pretrain_sources
+        )
+        logger.info(
+            "Applied deterministic pre-training data fraction %.6f: "
+            "episodes %d -> %d, windows %d -> %d, seed=%d",
+            fraction,
+            before_episodes,
+            after_episodes,
+            before_windows,
+            after_windows,
+            _PRETRAIN_DATA_FRACTION_SEED,
+        )
+        return {
+            "fraction": fraction,
+            "before_episodes": before_episodes,
+            "after_episodes": after_episodes,
+            "before_windows": before_windows,
+            "after_windows": after_windows,
+            "applied": 1,
+        }
+
+    def __getstate__(self) -> dict:
+        state = self.__dict__.copy()
+        state["_video_cache"] = OrderedDict()
+        return state
+
+    def close(self) -> None:
+        video_cache = getattr(self, "_video_cache", None)
+        if video_cache is not None:
+            while video_cache:
+                _, (container, _) = video_cache.popitem(last=False)
+                container.close()
+        for adapter in getattr(self, "adapters", {}).values():
+            adapter.reader.close()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _canonical_source_name(name: str) -> str:
+        aliases = {
+            "humanoidarena": SOURCE_HUMANOID_ARENA,
+            "humanoideveryday": SOURCE_HUMANOID_EVERYDAY,
+            "hiw500": SOURCE_HIW500,
+            "hiw-500": SOURCE_HIW500,
+            "unifolm_wbt_dataset": SOURCE_UNIFOLM,
+            "unifolm": SOURCE_UNIFOLM,
+            "realworld": SOURCE_REAL_WORLD,
+            "real_world": SOURCE_REAL_WORLD,
+        }
+        canonical = aliases.get(str(name).strip().lower())
+        if canonical is None:
+            raise ValueError(f"Unsupported dataset source {name!r}; expected one of {KNOWN_SOURCES}")
+        return canonical
+
+    @classmethod
+    def _normalize_roots(
+        cls,
+        dataset_root: str | None,
+        dataset_roots: Mapping[str, str] | None,
+    ) -> dict[str, Path]:
+        roots = {}
+        for name, value in dict(dataset_roots or {}).items():
+            canonical = cls._canonical_source_name(name)
+            path = Path(value).expanduser()
+            if not path.is_absolute():
+                path = PROJECT_ROOT / path
+            roots[canonical] = path.resolve()
+        if dataset_root is not None and SOURCE_HUMANOID_ARENA not in roots:
+            path = Path(dataset_root).expanduser()
+            if not path.is_absolute():
+                path = PROJECT_ROOT / path
+            roots[SOURCE_HUMANOID_ARENA] = path.resolve()
+        if not roots:
+            raise ValueError("Configure main.data_root or main.dataset_roots")
+        return roots
+
+    @classmethod
+    def _normalize_selection(
+        cls,
+        selection: Mapping | None,
+        roots: Mapping[str, Path],
+    ) -> dict[str, Mapping]:
+        selection = dict(selection or {})
+        nested = any(
+            str(key).strip().lower()
+            in {
+                "humanoidarena",
+                "humanoideveryday",
+                "hiw500",
+                "hiw-500",
+                "unifolm_wbt_dataset",
+                "unifolm",
+                "realworld",
+                "real_world",
+            }
+            for key in selection
+        )
+        if not nested:
+            return {SOURCE_HUMANOID_ARENA: selection}
+        normalized = {}
+        for name, source_selection in selection.items():
+            canonical = cls._canonical_source_name(name)
+            if source_selection is False or source_selection is None:
+                continue
+            if source_selection is True:
+                source_selection = {}
+            if not isinstance(source_selection, Mapping):
+                raise TypeError(
+                    f"dataset_selection.{canonical} must be a mapping"
+                )
+            normalized[canonical] = dict(source_selection)
+        if not normalized:
+            raise ValueError(
+                "dataset_selection disables every configured data source"
+            )
+        return normalized
 
     @property
     def instructions(self) -> list[str]:
@@ -101,8 +504,21 @@ class HumanoidArenaDataset(data.Dataset):
 
     @property
     def task_instructions(self) -> dict[str, str]:
-        """Map simulator task IDs to the natural-language text used by LLM2Vec."""
         return dict(sorted(self._task_instructions.items()))
+
+    @property
+    def task_cache_names(self) -> dict[str, str]:
+        return dict(sorted(self._task_cache_names.items()))
+
+    @property
+    def source_summary(self) -> dict[str, dict[str, int]]:
+        return {
+            source: {
+                "episodes": len(records),
+                "windows": sum(episode.sample_count for _, episode in records),
+            }
+            for source, records in self._episodes_by_source.items()
+        }
 
     def set_text_embeddings(self, embeddings: Mapping[str, torch.Tensor]) -> None:
         missing = set(self._task_instructions) - set(embeddings)
@@ -113,432 +529,461 @@ class HumanoidArenaDataset(data.Dataset):
             for task_id in self._task_instructions
         }
 
-    @staticmethod
-    def _normalize_backend(backend: str) -> str:
-        backend = str(backend).strip().lower()
-        aliases = {"twice2": "twist2", "twist": "twist2"}
-        backend = aliases.get(backend, backend)
-        if backend not in {"sonic", "twist2"}:
-            raise ValueError(f"Unsupported HumanoidArena backend '{backend}'; use 'sonic' or 'twist2'")
-        return backend
-
-    @classmethod
-    def _normalize_selection(
-        cls, selection: Mapping[str, str | list[str]] | None
-    ) -> dict[str, set[str]]:
-        if not selection:
-            return {}
-        normalized = {}
-        for task_name, backends in selection.items():
-            if isinstance(backends, str):
-                backends = [backends]
-            normalized[str(task_name)] = {cls._normalize_backend(backend) for backend in backends}
-        return normalized
-
-    def _is_selected(self, task_name: str, backend: str) -> bool:
-        if not self.dataset_selection:
-            return True
-        allowed_backends = self.dataset_selection.get(
-            task_name, self.dataset_selection.get("*")
-        )
-        return allowed_backends is not None and backend in allowed_backends
-
-    def _backend_may_be_selected(self, backend: str) -> bool:
-        if not self.dataset_selection:
-            return True
-        return any(backend in backends for backends in self.dataset_selection.values())
-
-    def _get_motion_tools(self, source_fps: float):
-        if self._decoder is None:
-            skeleton = G1Skeleton34()
-            self._decoder = HumanoidArenaActionDecoder(skeleton, _XML_PATH, source_fps)
-            self._representation = KimodoMotionRep(
-                skeleton=skeleton,
-                fps=self.target_fps,
-                stats_path=str(_STATS_PATH),
-            )
-        elif abs(self._decoder.fps - source_fps) > 1e-6:
-            raise ValueError(
-                f"Mixed source FPS is unsupported in one loader worker: "
-                f"{self._decoder.fps} vs {source_fps}"
-            )
-        return self._decoder, self._representation
-
-    @staticmethod
-    def _choose_video_key(features: dict) -> str:
-        video_keys = [
-            key
-            for key, spec in features.items()
-            if key.startswith("observation.image")
-            and isinstance(spec, dict)
-            and spec.get("dtype") in {"video", "image"}
-        ]
-        for preferred in PREFERRED_VIDEO_KEYS:
-            if preferred in video_keys:
-                return preferred
-        if not video_keys:
-            raise ValueError("Dataset has no observation image/video feature")
-        return sorted(video_keys)[0]
-
-    @staticmethod
-    def _instruction(tasks) -> str:
-        if isinstance(tasks, np.ndarray):
-            tasks = tasks.tolist()
-        if isinstance(tasks, (list, tuple)):
-            return str(tasks[0]) if tasks else ""
-        return str(tasks)
-
-    @staticmethod
-    def _load_task_text_by_index(task_root: Path) -> dict[int, str]:
-        tasks_path = task_root / "meta/tasks.parquet"
-        if not tasks_path.is_file():
-            raise FileNotFoundError(f"Dataset task language file is missing: {tasks_path}")
-        task_table = pq.read_table(tasks_path, columns=["task_index", "task"]).to_pydict()
-        task_text_by_index = {
-            int(task_index): str(task_text).strip()
-            for task_index, task_text in zip(
-                task_table.get("task_index", []), task_table.get("task", [])
-            )
-        }
-        if not task_text_by_index or any(not text for text in task_text_by_index.values()):
-            raise ValueError(f"Dataset has invalid natural-language tasks in {tasks_path}")
-        return task_text_by_index
-
-    @staticmethod
-    def _resolve_task_instruction(
-        task_id: str,
-        task_text_by_index: Mapping[int, str],
-        is_aggregate: bool,
-    ) -> str:
-        if len(task_text_by_index) == 1:
-            return next(iter(task_text_by_index.values()))
-        if not is_aggregate:
-            raise ValueError(
-                f"Individual dataset exposes multiple language tasks for task ID {task_id!r}"
-            )
-        task_index = TASK_INDEX_BY_TASK_ID.get(task_id)
-        if task_index is None or task_index not in task_text_by_index:
-            raise KeyError(
-                f"Cannot map aggregate task ID {task_id!r} to meta/tasks.parquet"
-            )
-        return task_text_by_index[task_index]
-
-    @staticmethod
-    def _is_aggregate_task_root(dataset_root: Path, task_root: Path) -> bool:
-        relative_parts = task_root.relative_to(dataset_root).parts
-        if relative_parts and relative_parts[0].lower().startswith(
-            "humanoidarena_merged_datasets"
-        ):
-            return True
-        return (
-            task_root.parent.name.lower().startswith("humanoidarena_merged_datasets")
-            and task_root.name.lower().startswith(
-                ("all_", "sonic_", "twist2_", "twice2_")
-            )
-        )
-
-    @staticmethod
-    def _prefer_individual_task_roots(
-        dataset_root: Path,
-        task_roots: list[Path],
-    ) -> list[Path]:
-        individual_roots = []
-        aggregate_roots = []
-        for task_root in task_roots:
-            if HumanoidArenaDataset._is_aggregate_task_root(dataset_root, task_root):
-                aggregate_roots.append(task_root)
-            else:
-                individual_roots.append(task_root)
-        if individual_roots and aggregate_roots:
-            logger.info(
-                "Ignoring %d aggregate dataset root(s) because individual task roots are present",
-                len(aggregate_roots),
-            )
-            return individual_roots
-        if aggregate_roots:
-            backend_roots = [
-                task_root
-                for task_root in aggregate_roots
-                if task_root.name.lower().startswith(("sonic_", "twist2_", "twice2_"))
-            ]
-            combined_roots = [
-                task_root
-                for task_root in aggregate_roots
-                if task_root.name.lower().startswith("all_")
-            ]
-            if backend_roots and combined_roots:
-                logger.info(
-                    "Ignoring %d combined aggregate root(s) because backend-specific roots are present",
-                    len(combined_roots),
-                )
-                return backend_roots
-        return task_roots
-
-    def _load_metadata(self) -> None:
-        task_roots = sorted(path.parent.parent for path in self.dataset_root.rglob("meta/info.json"))
-        if not task_roots:
-            raise FileNotFoundError(
-                f"No LeRobot meta/info.json found below {self.dataset_root}. "
-                "HumanoidArena_dataset_v3_1 is a collection of LeRobot task directories."
-            )
-        task_roots = self._prefer_individual_task_roots(self.dataset_root, task_roots)
-
-        total_samples = 0
-        selected_roots = []
-        for task_root in task_roots:
-            info = json.loads((task_root / "meta/info.json").read_text(encoding="utf-8"))
-            protocol = info.get("vla_protocol", {})
-            schema = protocol.get("schema")
-            if schema and schema != EXPECTED_SCHEMA:
-                logger.warning("Skipping incompatible dataset %s with schema=%s", task_root, schema)
-                continue
-            relative_parts = task_root.relative_to(self.dataset_root).parts
-            task_name = relative_parts[0] if relative_parts else task_root.name
-            is_aggregate = self._is_aggregate_task_root(self.dataset_root, task_root)
-            task_text_by_index = self._load_task_text_by_index(task_root)
-            backend = protocol.get("backend_source")
-            if backend is None:
-                backend = "sonic" if "sonic" in task_root.name.lower() else "twist2"
-            backend = self._normalize_backend(backend)
-            if is_aggregate:
-                if not self._backend_may_be_selected(backend):
-                    continue
-            elif not self._is_selected(task_name, backend):
-                continue
-            selected_roots.append(f"{task_name}/{backend}")
-            features = info.get("features", {})
-            action_spec = features.get("action", {})
-            action_shape = tuple(action_spec.get("shape", ()))
-            if action_shape and action_shape != (40,):
-                logger.warning("Skipping %s because action shape is %s, expected (40,)", task_root, action_shape)
-                continue
-            video_key = self._choose_video_key(features)
-            source_fps = float(info["fps"])
-            episode_meta_root = task_root / "meta/episodes"
-            if not episode_meta_root.is_dir():
-                logger.warning("Skipping %s because meta/episodes is missing", task_root)
-                continue
-
-            for meta_file in sorted(episode_meta_root.rglob("*.parquet")):
-                metadata = pq.read_table(meta_file).to_pydict()
-                for row_index in range(len(metadata.get("episode_index", []))):
-                    task_id = self._instruction(metadata["tasks"][row_index])
-                    instruction = self._resolve_task_instruction(
-                        task_id,
-                        task_text_by_index,
-                        is_aggregate,
-                    )
-                    episode_task_name = (
-                        TASK_KEY_BY_TASK_ID.get(task_id, task_name)
-                        if is_aggregate
-                        else task_name
-                    )
-                    if is_aggregate and not self._is_selected(episode_task_name, backend):
-                        continue
-                    source_length = int(metadata["length"][row_index])
-                    episode_length = int(
-                        round((source_length - 1) * self.target_fps / source_fps)
-                    ) + 1
-                    first_cut = 0
-                    last_cut = episode_length - self.action_chunk
-                    if last_cut < first_cut:
-                        continue
-                    sample_count = (last_cut - first_cut) // self.sample_stride + 1
-
-                    video_chunk = int(metadata[f"videos/{video_key}/chunk_index"][row_index])
-                    video_file = int(metadata[f"videos/{video_key}/file_index"][row_index])
-                    data_chunk = int(metadata["data/chunk_index"][row_index])
-                    data_file = int(metadata["data/file_index"][row_index])
-                    episode = {
-                        "task_id": task_id,
-                        "instruction": instruction,
-                        "video_path": task_root / "videos" / video_key
-                        / f"chunk-{video_chunk:03d}" / f"file-{video_file:03d}.mp4",
-                        "video_from_timestamp": float(
-                            metadata[f"videos/{video_key}/from_timestamp"][row_index]
-                        ),
-                        "data_path": task_root / "data" / f"chunk-{data_chunk:03d}"
-                        / f"file-{data_file:03d}.parquet",
-                        "data_from_index": int(metadata["dataset_from_index"][row_index]),
-                        "data_to_index": int(metadata["dataset_to_index"][row_index]),
-                        "length": episode_length,
-                        "source_fps": source_fps,
-                        "target_fps": self.target_fps,
-                        "source_length": source_length,
-                        "first_cut": first_cut,
-                        "sample_count": sample_count,
-                        "task_name": episode_task_name,
-                        "backend": backend,
-                    }
-                    if not episode["data_path"].is_file() or not episode["video_path"].is_file():
-                        logger.warning("Skipping episode with missing data/video files: %s", episode)
-                        continue
-                    existing_instruction = self._task_instructions.get(task_id)
-                    if (
-                        existing_instruction is not None
-                        and existing_instruction != instruction
-                    ):
-                        raise ValueError(
-                            f"Task ID {task_id!r} maps to conflicting instructions: "
-                            f"{existing_instruction!r} and {instruction!r}"
-                        )
-                    self._task_instructions[task_id] = instruction
-                    self.episodes.append(episode)
-                    total_samples += sample_count
-                    self._cumulative_samples.append(total_samples)
-
-        if not self.episodes:
-            raise RuntimeError(
-                f"No compatible HumanoidArena V3.1 episodes found under {self.dataset_root}"
-            )
-        logger.info(
-            "Loaded %d HumanoidArena episodes and %d windows from %s; selected=%s",
-            len(self.episodes), total_samples, self.dataset_root, sorted(set(selected_roots)),
-        )
-
     def __len__(self) -> int:
-        return self._cumulative_samples[-1]
+        return self._length
 
-    def _sample_random_window(self) -> tuple[int, int]:
-        episode_index = random.randrange(len(self.episodes))
-        episode = self.episodes[episode_index]
-        local_index = random.randrange(episode["sample_count"])
-        cut = episode["first_cut"] + local_index * self.sample_stride
-        return episode_index, cut
+    def _rng_for_index(self, index: int) -> random.Random:
+        # SplitMix64 gives a stable, process-independent mapping from ordinal to seed.
+        value = (int(index) + 0x9E3779B97F4A7C15) & _UINT64_MASK
+        value = (value ^ (value >> 30)) * 0xBF58476D1CE4E5B9 & _UINT64_MASK
+        value = (value ^ (value >> 27)) * 0x94D049BB133111EB & _UINT64_MASK
+        value ^= value >> 31
+        seed = value ^ (int(getattr(self, "sampling_seed", 0)) & _UINT64_MASK)
+        return random.Random(seed)
 
-    def _load_episode_motion(self, episode_index: int) -> dict[str, torch.Tensor]:
-        cached = self._episode_cache.pop(episode_index, None)
-        if cached is not None:
-            self._episode_cache[episode_index] = cached
-            return cached
+    def _sample_episode(
+        self, rng=None
+    ) -> tuple[BaseSourceAdapter, EpisodeRecord]:
+        rng = random if rng is None else rng
+        if self.sampling_mode in {"source_balanced", "source_task_balanced"}:
+            source = rng.choices(
+                self._source_names, weights=self._source_weights, k=1
+            )[0]
+            if self.sampling_mode == "source_task_balanced":
+                records_by_task = self._episodes_by_source_task[source]
+                task_id = rng.choice(list(records_by_task))
+                adapter, episode = rng.choice(records_by_task[task_id])
+            else:
+                adapter, episode = rng.choice(self._episodes_by_source[source])
+        elif self.sampling_mode == "window_proportional":
+            adapter, episode = rng.choices(
+                self._all_episode_records,
+                weights=self._episode_weights,
+                k=1,
+            )[0]
+        else:
+            adapter, episode = rng.choice(self._all_episode_records)
+        return adapter, episode
 
-        episode = self.episodes[episode_index]
-        data_path = episode["data_path"]
-        cached_file = self._data_file_cache.get(data_path)
-        if cached_file is None:
-            table = pq.read_table(data_path, columns=["action", "index"]).to_pydict()
-            indices = np.asarray(table["index"], dtype=np.int64).reshape(-1)
-            actions = np.stack(table["action"]).astype(np.float32, copy=False)
-            cached_file = (indices, actions)
-            self._data_file_cache[data_path] = cached_file
-        indices, actions = cached_file
-        file_start = int(indices[0])
-        relative_start = episode["data_from_index"] - file_start
-        relative_end = episode["data_to_index"] - file_start
-        actions = actions[relative_start:relative_end]
-        if actions.shape != (episode["source_length"], 40):
+    def _sample_record(
+        self, rng=None
+    ) -> tuple[BaseSourceAdapter, EpisodeRecord, int]:
+        rng = random if rng is None else rng
+        adapter, episode = self._sample_episode(rng)
+        local_index = rng.randrange(episode.sample_count)
+        cut = episode.first_cut + local_index * self.sample_stride
+        return adapter, episode, cut
+
+    def _sampling_state_for_index(
+        self, index: int
+    ) -> tuple[random.Random, int]:
+        windows_per_episode = int(getattr(self, "windows_per_episode", 1))
+        if windows_per_episode == 1:
+            return self._rng_for_index(index), 0
+        group_index, group_slot = divmod(int(index), windows_per_episode)
+        return self._rng_for_index(group_index), group_slot
+
+    def _sample_grouped_record(
+        self, rng: random.Random, group_slot: int
+    ) -> tuple[BaseSourceAdapter, EpisodeRecord, int]:
+        """Choose one episode and a deterministic window for one group slot."""
+        windows_per_episode = int(getattr(self, "windows_per_episode", 1))
+        if windows_per_episode == 1:
+            return self._sample_record(rng)
+        if not 0 <= int(group_slot) < windows_per_episode:
             raise ValueError(
-                f"Episode action shape mismatch in {episode['data_path']}: "
-                f"expected {(episode['source_length'], 40)}, got {actions.shape}"
+                f"group_slot must be in [0, {windows_per_episode}), got {group_slot}"
             )
-        decoder, representation = self._get_motion_tools(episode["source_fps"])
-        motion_dict = decoder.decode(actions)
-        local_rot_mats, root_positions = resample_motion(
-            motion_dict["local_rot_mats"],
-            motion_dict["root_positions"],
-            episode["source_fps"],
-            episode["target_fps"],
+
+        adapter, episode = self._sample_episode(rng)
+        cut_rng = random.Random(rng.getrandbits(64))
+        local_indices = self._sample_group_local_indices(
+            cut_rng,
+            first_local_index=0,
+            valid_sample_count=episode.sample_count,
         )
-        motion_features = representation(
-            local_rot_mats, root_positions, to_normalize=False
-        ).cpu()
-        hand_binary = resample_hand_binary(
-            actions[:, 38:40],
-            episode["source_fps"],
-            episode["target_fps"],
-        ).cpu()
-        if hand_binary.shape[0] != motion_features.shape[0]:
-            raise RuntimeError(
-                "Motion and hand resampling produced different frame counts: "
-                f"{motion_features.shape[0]} and {hand_binary.shape[0]}"
+        local_index = local_indices[int(group_slot)]
+        cut = episode.first_cut + local_index * self.sample_stride
+        return adapter, episode, cut
+
+    def _sample_group_local_indices(
+        self,
+        rng: random.Random,
+        *,
+        first_local_index: int,
+        valid_sample_count: int,
+    ) -> list[int]:
+        windows_per_episode = int(getattr(self, "windows_per_episode", 1))
+        first_local_index = int(first_local_index)
+        valid_sample_count = int(valid_sample_count)
+        if first_local_index < 0 or valid_sample_count <= 0:
+            raise ValueError(
+                "Grouped sampling requires a non-negative first index and at "
+                "least one valid sample"
             )
-        cached_episode = {
-            "motion": motion_features,
-            "hand_binary": hand_binary,
-        }
-        self._episode_cache[episode_index] = cached_episode
+
+        first_selected = first_local_index + rng.randrange(valid_sample_count)
+        local_indices = [first_selected]
+        remaining_count = windows_per_episode - 1
+        if valid_sample_count >= windows_per_episode:
+            # Sample the remaining indices without materializing the potentially
+            # large range and remap around the already selected first index.
+            remaining_indices = rng.sample(
+                range(valid_sample_count - 1), remaining_count
+            )
+            first_relative_index = first_selected - first_local_index
+            local_indices.extend(
+                first_local_index
+                + (index if index < first_relative_index else index + 1)
+                for index in remaining_indices
+            )
+        else:
+            local_indices.extend(
+                first_local_index + rng.randrange(valid_sample_count)
+                for _ in range(remaining_count)
+            )
+        return local_indices
+
+    def _episode_motion(
+        self, adapter: BaseSourceAdapter, episode: EpisodeRecord
+    ) -> dict[str, torch.Tensor]:
+        cache_key = episode.cache_key
+        cached = self._episode_cache.pop(cache_key, None)
+        if cached is not None:
+            self._episode_cache[cache_key] = cached
+            return cached
+        motion_cache_dir = getattr(self, "_motion_cache_dir", None)
+        if motion_cache_dir is not None and episode.source in PRETRAIN_MOTION_CACHE_SOURCES:
+            token = episode_cache_token(cache_key)
+            if token in getattr(self, "_motion_cache_invalid_tokens", set()):
+                raise RuntimeError(
+                    f"Invalid cached episode reached sampler: {episode.source}/{episode.episode_id}"
+                )
+            cache_path = (
+                motion_cache_dir
+                / "episodes"
+                / token[:2]
+                / f"{token}.pt"
+            )
+            try:
+                payload = torch.load(
+                    cache_path,
+                    map_location="cpu",
+                    weights_only=True,
+                )
+            except TypeError:  # torch versions without weights_only
+                payload = torch.load(cache_path, map_location="cpu")
+            if (
+                payload.get("version") != 1
+                or payload.get("signature")
+                != getattr(self, "_motion_cache_signature", None)
+                or payload.get("token") != token
+            ):
+                raise RuntimeError(f"Incompatible motion cache payload: {cache_path}")
+            motion = payload["motion"]
+        else:
+            motion = adapter.load_episode(episode)
+        self._episode_cache[cache_key] = motion
         while len(self._episode_cache) > self.episode_cache_size:
             self._episode_cache.popitem(last=False)
-        return cached_episode
+        return motion
 
     def __getitem__(self, index: int) -> dict:
-        del index
-        episode_index, cut = self._sample_random_window()
-        episode = self.episodes[episode_index]
-        episode_data = self._load_episode_motion(episode_index)
-        motion = episode_data["motion"]
-        hand_binary = episode_data["hand_binary"]
-        history_start = cut - self.action_history
-        future_end = cut + self.action_chunk
+        rng, group_slot = self._sampling_state_for_index(index)
+        windows_per_episode = int(getattr(self, "windows_per_episode", 1))
+        skipped_reasons = []
+        invalid_episodes = getattr(self, "_runtime_invalid_episodes", None)
+        if invalid_episodes is None:
+            invalid_episodes = set()
+            self._runtime_invalid_episodes = invalid_episodes
+        for _ in range(MAX_SAMPLE_ATTEMPTS):
+            if windows_per_episode == 1:
+                adapter, episode, original_cut = self._sample_record(rng)
+            else:
+                adapter, episode = self._sample_episode(rng)
+                cut_rng = random.Random(rng.getrandbits(64))
+            if episode.cache_key in invalid_episodes:
+                skipped_reasons.append(
+                    f"{episode.source}/{episode.episode_id}: "
+                    "previously marked invalid"
+                )
+                continue
+            episode_motion = self._episode_motion(adapter, episode)
+            if episode_motion.get("skip_episode", False):
+                invalid_episodes.add(episode.cache_key)
+                self._episode_cache.pop(episode.cache_key, None)
+                skipped_reasons.append(
+                    f"{episode.source}/{episode.episode_id}: "
+                    f"{episode_motion.get('quality_issue', 'invalid episode')}"
+                )
+                continue
+            frame_offset = int(episode_motion.get("frame_offset", 0))
+            available_length = int(episode_motion["target_motion"].shape[0])
+            if windows_per_episode > 1:
+                first_valid_cut = max(episode.first_cut, frame_offset)
+                first_local_index = max(
+                    0,
+                    (
+                        first_valid_cut
+                        - episode.first_cut
+                        + self.sample_stride
+                        - 1
+                    )
+                    // self.sample_stride,
+                )
+                last_valid_cut = (
+                    frame_offset + available_length - self.action_chunk
+                )
+                last_local_index = min(
+                    episode.sample_count - 1,
+                    (last_valid_cut - episode.first_cut) // self.sample_stride,
+                )
+                valid_sample_count = last_local_index - first_local_index + 1
+                if valid_sample_count <= 0:
+                    skipped_reasons.append(
+                        f"{episode.source}/{episode.episode_id}: no valid window "
+                        "after logical frame trimming"
+                    )
+                    continue
+                if (
+                    valid_sample_count < episode.sample_count
+                    and cut_rng.randrange(episode.sample_count)
+                    >= valid_sample_count
+                ):
+                    # Match the legacy rejection sampler: selecting an episode
+                    # remains proportional to its configured sample_count, while
+                    # logically trimmed windows are rejected before a group is built.
+                    continue
+                local_indices = self._sample_group_local_indices(
+                    cut_rng,
+                    first_local_index=first_local_index,
+                    valid_sample_count=valid_sample_count,
+                )
+                original_cut = (
+                    episode.first_cut
+                    + local_indices[group_slot] * self.sample_stride
+                )
+            cut = original_cut - frame_offset
+            if cut < 0:
+                continue
+            history_start = max(0, cut - self.action_history)
+            history_length = cut - history_start
+            future_end = min(available_length, cut + self.action_chunk)
+            future_length = future_end - cut
+            if future_length != self.action_chunk:
+                continue
+            video_timestamp = (
+                episode.video_from_timestamp
+                + original_cut / episode.target_fps
+            )
+            try:
+                egoview = self._read_video_frame(
+                    episode.video_path,
+                    video_timestamp,
+                    crop=episode.metadata.get("video_crop"),
+                )
+            except VideoFrameDecodeError as error:
+                invalid_episodes.add(episode.cache_key)
+                self._episode_cache.pop(episode.cache_key, None)
+                reason = (
+                    f"{episode.source}/{episode.episode_id}: video decoding "
+                    f"failed for {episode.video_path} at "
+                    f"{video_timestamp:.3f}s"
+                )
+                skipped_reasons.append(reason)
+                logger.warning("Excluding %s: %s", reason, error)
+                continue
+            break
+        else:
+            details = "; ".join(skipped_reasons[-5:]) or "no valid sampled window"
+            raise RuntimeError(
+                f"Could not sample a valid episode window after {MAX_SAMPLE_ATTEMPTS} attempts: "
+                f"{details}"
+            )
+
         total_length = self.action_history + self.action_chunk
-        gt_motion = torch.zeros(total_length, motion.shape[-1], dtype=motion.dtype)
-        gt_hand = torch.zeros(total_length, 2, dtype=hand_binary.dtype)
+        gt_motion = torch.zeros(
+            total_length, KIMODO_MOTION_DIM, dtype=torch.float32
+        )
+        condition_motion = torch.zeros(
+            total_length, KIMODO_MOTION_DIM, dtype=torch.float32
+        )
+        condition_motion_mask = torch.zeros(
+            total_length, KIMODO_MOTION_DIM, dtype=torch.bool
+        )
+        gt_hand = torch.zeros(total_length, 2, dtype=torch.float32)
+        gt_hand_mask = torch.zeros(total_length, 2, dtype=torch.bool)
         gt_mask = torch.zeros(total_length, dtype=torch.bool)
-        source_start = max(0, history_start)
-        destination_start = source_start - history_start
-        valid_motion = motion[source_start:future_end]
-        valid_hand = hand_binary[source_start:future_end]
-        gt_motion[destination_start:destination_start + valid_motion.shape[0]] = valid_motion
-        gt_hand[destination_start:destination_start + valid_hand.shape[0]] = valid_hand
-        gt_mask[destination_start:destination_start + valid_motion.shape[0]] = True
-        egoview = self._read_video_frame(
-            episode["video_path"],
-            episode["video_from_timestamp"] + cut / episode["target_fps"],
+        history_destination = self.action_history - history_length
+        if history_length:
+            history_slice = slice(history_start, cut)
+            destination = slice(history_destination, self.action_history)
+            gt_motion[destination] = episode_motion["target_motion"][history_slice]
+            condition_motion[destination] = episode_motion["observed_motion"][
+                history_slice
+            ]
+            observed_motion_valid = episode_motion.get("observed_motion_valid")
+            if observed_motion_valid is None:
+                condition_motion_mask[destination] = True
+            else:
+                condition_motion_mask[destination] = observed_motion_valid[
+                    history_slice
+                ]
+            gt_hand[destination] = episode_motion["observed_hand"][history_slice]
+            gt_hand_mask[destination] = episode_motion["observed_hand_valid"][history_slice]
+            gt_mask[destination] = True
+        future_slice = slice(cut, future_end)
+        destination = slice(self.action_history, self.action_history + future_length)
+        gt_motion[destination] = episode_motion["target_motion"][future_slice]
+        gt_hand[destination] = episode_motion["target_hand"][future_slice]
+        gt_hand_mask[destination] = episode_motion["target_hand_valid"][future_slice]
+        gt_mask[destination] = True
+
+        _canonicalize_kimodo_window_translation(
+            gt_motion,
+            condition_motion,
+            condition_motion_mask,
+            gt_mask,
         )
         sample = {
-            "instruction": episode["instruction"],
+            "instruction": episode.instruction,
             "egoview": egoview,
             "gt_motion": gt_motion,
+            "condition_motion": condition_motion,
+            "condition_motion_mask": condition_motion_mask,
             "gt_hand": gt_hand,
+            "gt_hand_mask": gt_hand_mask,
             "gt_mask": gt_mask,
-            "episode_index": episode_index,
-            "cut_index": cut,
+            "source": episode.source,
+            "task_id": episode.task_id,
+            "episode_id": episode.episode_id,
+            "cut_index": original_cut,
+            "motion_cut_index": cut,
+            "source_frame_offset": int(
+                episode_motion.get("source_frame_offset", 0)
+            ),
+            "target_motion_source": episode_motion.get(
+                "target_motion_source", "action"
+            ),
         }
         if self._text_embeddings:
-            sample["text_embedding"] = self._text_embeddings[episode["task_id"]]
+            sample["text_embedding"] = self._text_embeddings[episode.task_id]
             sample["text_length"] = torch.tensor(
                 sample["text_embedding"].shape[0], dtype=torch.long
             )
         return sample
 
-    def _read_video_frame(self, video_path: Path, timestamp: float) -> torch.Tensor:
-        for attempt in range(_VIDEO_READ_MAX_ATTEMPTS):
+    def _read_video_frame(
+        self,
+        video_path: Path,
+        timestamp: float,
+        crop: tuple[int, int, int, int] | None = None,
+    ) -> torch.Tensor:
+        for attempt in range(VIDEO_READ_MAX_ATTEMPTS):
+            container = None
+            cached = False
             try:
-                with av.open(str(video_path)) as container:
+                cache = getattr(self, "_video_cache", None)
+                if cache is None:
+                    cache = OrderedDict()
+                    self._video_cache = cache
+                cache_key = str(video_path)
+                entry = cache.pop(cache_key, None)
+                if entry is None:
+                    container = av.open(cache_key)
+                    if not container.streams.video:
+                        raise VideoFrameDecodeError(
+                            f"No video stream in {video_path}"
+                        )
                     stream = container.streams.video[0]
-                    # FFmpeg's automatic thread count follows the host CPU count.
-                    # On large servers, opening one decoder per sample can otherwise
-                    # create hundreds of threads in every DataLoader worker.
                     stream.codec_context.thread_count = 1
-                    container.seek(max(0, int(timestamp * av.time_base)))
-                    selected = None
-                    for frame in container.decode(stream):
-                        selected = frame
-                        frame_time = float(frame.pts * stream.time_base) if frame.pts is not None else timestamp
-                        if frame_time + 1e-6 >= timestamp:
-                            break
-                    if selected is None:
-                        raise RuntimeError(f"Could not decode frame at {timestamp:.3f}s from {video_path}")
-                    # Keep the decoded RGB frame untouched. DINOv3Encoder owns all
-                    # resize/rescale/normalize operations through the checkpoint's
-                    # official AutoImageProcessor.
-                    return (
-                        torch.from_numpy(selected.to_ndarray(format="rgb24"))
-                        .permute(2, 0, 1)
-                        .contiguous()
+                    if int(getattr(self, "video_cache_size", 0)) > 0:
+                        cache[cache_key] = (container, stream)
+                        cached = True
+                        while len(cache) > int(self.video_cache_size):
+                            _, (evicted, _) = cache.popitem(last=False)
+                            evicted.close()
+                else:
+                    container, stream = entry
+                    cache[cache_key] = entry
+                    cached = True
+
+                time_base = getattr(stream, "time_base", None)
+                if time_base is not None and float(time_base) > 0:
+                    seek_offset = max(0, int(timestamp / float(time_base)))
+                    container.seek(
+                        seek_offset,
+                        backward=True,
+                        any_frame=False,
+                        stream=stream,
                     )
-            except av.error.BlockingIOError as error:
-                if attempt == _VIDEO_READ_MAX_ATTEMPTS - 1:
-                    raise RuntimeError(
-                        f"PyAV repeatedly could not decode frame at {timestamp:.3f}s from {video_path}"
-                    ) from error
-                delay = _VIDEO_READ_RETRY_DELAY_SECONDS * (2 ** attempt)
-                logger.warning(
-                    "Transient PyAV video-read failure for %s at %.3fs; retrying (%d/%d) in %.2fs",
-                    video_path,
-                    timestamp,
-                    attempt + 1,
-                    _VIDEO_READ_MAX_ATTEMPTS,
-                    delay,
+                else:
+                    container.seek(max(0, int(timestamp * av.time_base)))
+                selected = None
+                for frame in container.decode(stream):
+                    selected = frame
+                    frame_time = (
+                        float(frame.pts * stream.time_base)
+                        if frame.pts is not None
+                        else timestamp
+                    )
+                    if frame_time + 1e-6 >= timestamp:
+                        break
+                if selected is None:
+                    raise VideoFrameDecodeError(
+                        f"Could not decode frame at {timestamp:.3f}s from {video_path}"
+                    )
+                image = selected.to_ndarray(format="rgb24")
+                if crop is not None:
+                    x0, y0, x1, y1 = map(int, crop)
+                    if not (0 <= x0 < x1 <= image.shape[1] and 0 <= y0 < y1 <= image.shape[0]):
+                        raise ValueError(
+                            f"Invalid video crop {crop} for frame shape {image.shape}"
+                        )
+                    image = image[y0:y1, x0:x1]
+                return (
+                    torch.from_numpy(image.copy())
+                    .permute(2, 0, 1)
+                    .contiguous()
                 )
+            except av.error.BlockingIOError as error:
+                self._discard_video_cache_entry(video_path)
+                if attempt == VIDEO_READ_MAX_ATTEMPTS - 1:
+                    raise VideoFrameDecodeError(
+                        f"PyAV repeatedly failed at {timestamp:.3f}s in {video_path}"
+                    ) from error
+                delay = VIDEO_READ_RETRY_DELAY_SECONDS * (2**attempt)
                 time.sleep(delay)
+            except VideoFrameDecodeError:
+                self._discard_video_cache_entry(video_path)
+                raise
+            except av.error.FFmpegError as error:
+                self._discard_video_cache_entry(video_path)
+                raise VideoFrameDecodeError(
+                    f"PyAV failed at {timestamp:.3f}s in {video_path}: {error}"
+                ) from error
+            except OSError as error:
+                self._discard_video_cache_entry(video_path)
+                raise VideoFrameDecodeError(
+                    f"Video I/O failed at {timestamp:.3f}s in {video_path}: {error}"
+                ) from error
+            finally:
+                if container is not None and not cached:
+                    container.close()
+        raise VideoFrameDecodeError(f"Could not read {video_path}")
+
+    def _discard_video_cache_entry(self, video_path: Path) -> None:
+        cache = getattr(self, "_video_cache", None)
+        if cache is None:
+            return
+        entry = cache.pop(str(video_path), None)
+        if entry is not None:
+            entry[0].close()
+
+
+# Preserve the complete import surface of the former monolithic module.
+__all__ = [
+    name
+    for name in globals()
+    if name != "__builtins__" and not name.startswith("__")
+]
