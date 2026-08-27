@@ -94,6 +94,89 @@ RIGHT_HAND_NAMES = (
 )
 
 
+class _WholebodyReplayObservationAdapter:
+    """Expose the Sonic proprioception schema without changing G1Wholebody.
+
+    The legacy MP robot predates ``prepare_obs``.  Replay still uses the
+    decoupled WBC policy, so build the small observation dictionary from the
+    robot's existing MuJoCo handles at the replay boundary.
+    """
+
+    def __init__(self, robot):
+        self.robot = robot
+
+    def prepare_obs(self) -> dict:
+        robot = self.robot
+        data, model = robot.mjdata, robot.mjmodel
+
+        def joint_values(names, field):
+            return np.asarray(
+                [float(getattr(robot.joints[name], field)[0]) for name in names],
+                dtype=np.float32,
+            )
+
+        body_names = robot.joints_names[:29]
+        left_hand_names = robot.joints_names[29:36]
+        right_hand_names = robot.joints_names[36:43]
+        torso_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "torso_link")
+        torso_velocity = np.zeros(6, dtype=np.float64)
+        mujoco.mj_objectVelocity(
+            model, data, mujoco.mjtObj.mjOBJ_BODY, torso_id, torso_velocity, 1
+        )
+        return {
+            "floating_base_pose": np.asarray(data.qpos[:7], dtype=np.float32).copy(),
+            "floating_base_vel": np.asarray(data.qvel[:6], dtype=np.float32).copy(),
+            "floating_base_acc": np.asarray(data.qacc[:6], dtype=np.float32).copy(),
+            "body_q": joint_values(body_names, "qpos"),
+            "body_dq": joint_values(body_names, "qvel"),
+            "body_ddq": joint_values(body_names, "qacc"),
+            "body_tau_est": np.asarray(
+                [float(robot.actuators[name].force[0]) for name in body_names],
+                dtype=np.float32,
+            ),
+            "left_hand_q": joint_values(left_hand_names, "qpos"),
+            "left_hand_dq": joint_values(left_hand_names, "qvel"),
+            "left_hand_ddq": joint_values(left_hand_names, "qacc"),
+            "left_hand_tau_est": np.asarray(
+                [float(robot.actuators[name].force[0]) for name in left_hand_names],
+                dtype=np.float32,
+            ),
+            "right_hand_q": joint_values(right_hand_names, "qpos"),
+            "right_hand_dq": joint_values(right_hand_names, "qvel"),
+            "right_hand_ddq": joint_values(right_hand_names, "qacc"),
+            "right_hand_tau_est": np.asarray(
+                [float(robot.actuators[name].force[0]) for name in right_hand_names],
+                dtype=np.float32,
+            ),
+            "secondary_imu_quat": np.asarray(data.xquat[torso_id], dtype=np.float32).copy(),
+            # mj_objectVelocity returns angular then linear velocity.
+            "secondary_imu_vel": np.concatenate(
+                (torso_velocity[3:6], torso_velocity[:3])
+            ).astype(np.float32),
+            "time": float(data.time),
+        }
+
+
+def _legacy_replay_action(action_cmd, robot):
+    """Convert a WBC target into G1Wholebody's existing replay command."""
+    from simple.core.action import ActionCmd
+
+    target_q = np.asarray(action_cmd["target_q"], dtype=np.float32).reshape(29)
+    target_qpos = {
+        name: float(value)
+        for name, value in zip(robot.joints_names[:29], target_q)
+    }
+    for names, values in (
+        (robot.joints_names[29:36], action_cmd["left_hand_q"]),
+        (robot.joints_names[36:43], action_cmd["right_hand_q"]),
+    ):
+        if values is not None:
+            target_qpos.update(
+                {name: float(value) for name, value in zip(names, np.asarray(values).reshape(7))}
+            )
+    return ActionCmd("replay_move_actuators", target_qpos=target_qpos)
+
+
 def assert_isaac_gpu_ready(simulation_app) -> dict:
     """Fail before replay when Kit has no usable Vulkan/CUDA device.
 
@@ -114,14 +197,25 @@ def assert_isaac_gpu_ready(simulation_app) -> dict:
             "Isaac Sim GPU Foundation interface is unavailable; RTX camera "
             "capture cannot be trusted. See the Kit log for Vulkan/CUDA errors."
         ) from exc
-    if count <= 0:
+    # On some multi-GPU Isaac 4.5 installations the CUDA-facing Foundation
+    # interface reports zero devices even though the Vulkan renderer has an
+    # active GPU (the Kit log prints the selected card and RTX can render).
+    # In that mode the camera validator below is the authoritative check: it
+    # rejects an all-zero frame before anything is written.  Keep the strict
+    # behaviour by default, with an explicit opt-in for this known Vulkan-only
+    # configuration.
+    allow_vulkan_only = os.environ.get("SIMPLE_ISAAC_ALLOW_ZERO_GPU_COUNT", "").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+    if count <= 0 and not allow_vulkan_only:
         raise RuntimeError(
             "Isaac Sim started without a usable GPU device (GPU Foundation "
             "device_count=0). The H20 host currently reports CUDA/Vulkan "
             "initialization failure; refusing to write blank scene frames. "
             "Try a matching Vulkan/CUDA GPU mapping or restart the node."
         )
-    return {"device_count": count, "devices": names}
+    return {"device_count": count, "devices": names,
+            "vulkan_only_fallback": bool(count <= 0 and allow_vulkan_only)}
 
 
 def validate_camera_frame(image: np.ndarray, frame_index: int) -> np.ndarray:
@@ -337,6 +431,16 @@ def validate_output(output_root: Path, fps: int) -> dict:
     # Feed both measured configuration and root trajectory through the same
     # decoder used by controlnet_v1.2's HumanoidArena adapter.
     sys.path.insert(0, str(PROJECT_ROOT))
+    # Isaac/Omniverse may preload a top-level ``utils`` package.  The motion
+    # decoder intentionally imports this repository's ``utils.geometry``;
+    # evict the unrelated module so the protocol validation is deterministic.
+    for name in list(sys.modules):
+        if name == "utils" or name.startswith("utils."):
+            sys.modules.pop(name, None)
+    import types
+    repo_utils = types.ModuleType("utils")
+    repo_utils.__path__ = [str(PROJECT_ROOT / "utils")]
+    sys.modules["utils"] = repo_utils
     from motion.g1_reference import (
         CANONICAL_G1_JOINT_NAMES_29,
         HumanoidArenaActionDecoder,
@@ -393,12 +497,18 @@ def run(args) -> dict:
     os.environ.setdefault("XDG_CACHE_HOME", str(ISAAC_CACHE_ROOT / "xdg"))
     os.environ.setdefault("TMPDIR", str(ISAAC_CACHE_ROOT / "tmp"))
     # Isaac Sim can otherwise probe every visible GPU and create one context
-    # per card.  A single idle H20 is sufficient for this one-episode
-    # renderer.  The physical GPU can be overridden with
-    # SIMPLE_ISAAC_GPU; CUDA_VISIBLE_DEVICES then remaps it to ordinal 0 for
-    # both Isaac and PyTorch.
+    # per card.  The physical GPU can be overridden with SIMPLE_ISAAC_GPU;
+    # the legacy CUDA mask remaps it to ordinal 0 for both Isaac and PyTorch.
+    # On RTX 4090 + Isaac 4.5, however, CUDA_VISIBLE_DEVICES makes GPU
+    # Foundation report zero devices even while Vulkan is healthy.  Disable
+    # that mask explicitly for the Vulkan-only fallback used by the remote
+    # renderer.
     isaac_gpu = os.environ.get("SIMPLE_ISAAC_GPU", "6").strip() or "6"
-    os.environ.setdefault("CUDA_VISIBLE_DEVICES", isaac_gpu)
+    no_cuda_mask = os.environ.get("SIMPLE_ISAAC_NO_CUDA_MASK", "").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+    if not no_cuda_mask:
+        os.environ.setdefault("CUDA_VISIBLE_DEVICES", isaac_gpu)
     os.environ.setdefault("SIMPLE_ISAAC_ACTIVE_GPU", "0")
     os.environ.setdefault("SIMPLE_ISAAC_PHYSICS_GPU", "0")
     os.environ.setdefault("SIMPLE_ISAAC_MAX_GPU_COUNT", "1")
@@ -431,26 +541,44 @@ def run(args) -> dict:
     task_text = json.loads((source_root / "meta/tasks.jsonl").read_text().splitlines()[0])["task"]
     sonic_config = make_wbc_config()
     env = gym.make(args.env_id, sim_mode=args.sim_mode, render_hz=50, headless=True,
-                   max_episode_steps=max(len(episode) + 200, 1000), physics_dt=0.005,
+                   max_episode_steps=max(len(episode) + 200, 1000), physics_dt=args.physics_dt,
                    sonic_config=sonic_config)
     raw_env = env.unwrapped
+    mujoco_sim = raw_env.mujoco
     isaac_gpu = None
     if "isaac" in args.sim_mode:
         isaac_gpu = assert_isaac_gpu_ready(raw_env.simulation_app)
     observation, info = env.reset(options={"state_dict": env_conf, "task_id": f"episode_{args.episode}"})
     robot = raw_env.task.robot
     agent = ReplayDecoupledAgent(robot, sonic_config)
+    # Keep the legacy G1Wholebody implementation untouched.  The adapter only
+    # supplies the observation method expected by ReplayDecoupledAgent; the
+    # command is converted back to its native replay action at env.step().
+    agent.robot = _WholebodyReplayObservationAdapter(robot)
     agent.load_episode(episode)
     if hasattr(agent._wbc_policy, "lower_body_policy"):
         agent._wbc_policy.lower_body_policy.use_policy_action = True
 
-    # Stabilize without recording the transient phase.
-    for _ in range(args.max_stabilize_steps):
-        if robot.stabilized:
+    # Stabilize without recording the transient phase.  Sonic robots expose a
+    # latched ``stabilized`` property; the older G1Wholebody implementation
+    # does not, so use the floating-base velocity as a compatible fallback.
+    has_stabilized_flag = hasattr(robot, "stabilized")
+    stabilized = False
+    min_fallback_steps = min(args.max_stabilize_steps, 30)
+    for stabilize_step in range(args.max_stabilize_steps):
+        if has_stabilized_flag:
+            stabilized = bool(robot.stabilized)
+        elif stabilize_step >= min_fallback_steps:
+            qvel = np.asarray(mujoco_sim.mjData.qvel[:6], dtype=np.float32)
+            stabilized = bool(np.max(np.abs(qvel)) < 0.05)
+        if stabilized:
             break
-        observation, _, _, _, info = env.step(agent.get_stabilize_action(observation))
-    if not robot.stabilized:
+        stabilize_action = _legacy_replay_action(agent.get_stabilize_action(observation), robot)
+        observation, _, _, _, info = env.step(stabilize_action)
+    if has_stabilized_flag and not stabilized:
         raise RuntimeError("robot did not stabilize; increase --max-stabilize-steps")
+    if not stabilized:
+        print("[replay] G1Wholebody fallback stabilization threshold not reached; continuing")
 
     states, actions, root_ps, root_qs, joint_qs, joint_dqs, hand_qs, target_joint_qs = [], [], [], [], [], [], [], []
     source_states, source_actions, dones, images = [], [], [], []
@@ -458,13 +586,15 @@ def run(args) -> dict:
     prev_p = None
     first_heading = None
     body_name_to_index = {name: i for i, name in enumerate(BODY_NAMES)}
-    for i in range(len(episode)):
+    frame_limit = len(episode) if args.max_frames is None else min(len(episode), max(1, args.max_frames))
+    for i in range(frame_limit):
         action_cmd = agent.get_action(observation)
         target_q_body = np.asarray(action_cmd["target_q"], dtype=np.float32).reshape(29)
         target_q = target_q_body[[body_name_to_index[name] for name in CANONICAL_NAMES]]
         source_row = episode.iloc[i]
-        observation, _, terminated, truncated, info = env.step(action_cmd)
-        qpos = np.asarray(raw_env.mjData.qpos[:7], dtype=np.float32).copy()
+        replay_action = _legacy_replay_action(action_cmd, robot)
+        observation, _, terminated, truncated, info = env.step(replay_action)
+        qpos = np.asarray(mujoco_sim.mjData.qpos[:7], dtype=np.float32).copy()
         p = qpos[:3].copy()
         r_world = root_matrix_from_qpos(qpos)
         if first_heading is None:
@@ -473,10 +603,10 @@ def run(args) -> dict:
         r_rel = first_heading.T @ r_world
         # Export the protocol's canonical order, not the MuJoCo XML/Unitree
         # contiguous-leg order used internally by the WBC controller.
-        q = joint_vector(raw_env.mjData, CANONICAL_NAMES, "qpos")
-        dq = joint_vector(raw_env.mjData, CANONICAL_NAMES, "qvel")
-        hq = np.concatenate([joint_vector(raw_env.mjData, LEFT_HAND_NAMES, "qpos"),
-                             joint_vector(raw_env.mjData, RIGHT_HAND_NAMES, "qpos")])
+        q = joint_vector(mujoco_sim.mjData, CANONICAL_NAMES, "qpos")
+        dq = joint_vector(mujoco_sim.mjData, CANONICAL_NAMES, "qvel")
+        hq = np.concatenate([joint_vector(mujoco_sim.mjData, LEFT_HAND_NAMES, "qpos"),
+                             joint_vector(mujoco_sim.mjData, RIGHT_HAND_NAMES, "qpos")])
         delta = np.zeros(3, dtype=np.float32) if prev_p is None else p - prev_p
         local_delta = r_world.T @ delta
         state = np.concatenate([rot6d_from_matrix(r_rel[None])[0], q, dq]).astype(np.float32)
@@ -497,7 +627,6 @@ def run(args) -> dict:
         prev_p = p
         if terminated or truncated:
             break
-    env.close()
     frames = {"state": np.stack(states), "action": np.stack(actions), "root_p": np.stack(root_ps),
               "root_q": np.stack(root_qs), "joint_q": np.stack(joint_qs), "joint_dq": np.stack(joint_dqs),
               "hand_q": np.stack(hand_qs), "source_states": np.stack(source_states),
@@ -510,6 +639,10 @@ def run(args) -> dict:
     if isaac_gpu is not None:
         report["isaac_gpu"] = isaac_gpu
     (output_root / "validation.json").write_text(json.dumps(report, indent=2) + "\n")
+    # Isaac Sim's close path may tear down Kit's Python runtime on some 4.5
+    # builds.  Persist the replay and validation first so a successful camera
+    # capture is never lost during renderer shutdown.
+    env.close()
     return report
 
 
@@ -522,6 +655,10 @@ def main() -> None:
     parser.add_argument("--sim-mode", choices=("mujoco_isaac", "mujoco"), default="mujoco_isaac",
                         help="MuJoCo physics only, or synchronized Isaac Sim HSSD rendering (default).")
     parser.add_argument("--max-stabilize-steps", type=int, default=600)
+    parser.add_argument("--physics-dt", type=float, default=0.005,
+                        help="Physics timestep passed to the SIMPLE task. BendPickMP requires 0.002.")
+    parser.add_argument("--max-frames", type=int, default=None,
+                        help="Optional limit for a quick renderer smoke test.")
     args = parser.parse_args()
     print(json.dumps(run(args), indent=2))
 

@@ -10,6 +10,7 @@ from .unifolm_loader import UnifoLMAdapter
 from .humanoid_everyday_loader import HumanoidEverydayAdapter
 from .hiw500_loader import HIW500Adapter
 from .realworld_loader import RealWorldAdapter
+from .simple_loader import SimpleReplayAdapter
 from .humanoidarena_legacy import *  # noqa: F401,F403
 
 ADAPTER_BY_SOURCE = {
@@ -18,6 +19,7 @@ ADAPTER_BY_SOURCE = {
     SOURCE_HIW500: HIW500Adapter,
     SOURCE_UNIFOLM: UnifoLMAdapter,
     SOURCE_REAL_WORLD: RealWorldAdapter,
+    SOURCE_SIMPLE: SimpleReplayAdapter,
 }
 
 
@@ -429,6 +431,7 @@ class MultiSourceG1Dataset(data.Dataset):
             "unifolm": SOURCE_UNIFOLM,
             "realworld": SOURCE_REAL_WORLD,
             "real_world": SOURCE_REAL_WORLD,
+            "simple": SOURCE_SIMPLE,
         }
         canonical = aliases.get(str(name).strip().lower())
         if canonical is None:
@@ -475,6 +478,7 @@ class MultiSourceG1Dataset(data.Dataset):
                 "unifolm",
                 "realworld",
                 "real_world",
+                "simple",
             }
             for key in selection
         )

@@ -483,6 +483,7 @@ class KimodoHumanoidArenaRuntime:
             action_history=int(main_config["action_history"]),
             load_text_encoder=False,
             controlnet_num_layers=int(model_config.get("controlnet_num_layers", 8)),
+            controlnet_scale=int(model_config.get("controlnet_scale", 1)),
             detach_root_control_for_body=bool(
                 model_config.get("detach_root_control_for_body", False)
             ),

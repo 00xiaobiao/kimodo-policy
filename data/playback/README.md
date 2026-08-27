@@ -1,42 +1,194 @@
-# SIMPLE MuJoCo replay + Arena export
-
-`replay_capture.py` replays one SIMPLE v2.1 parquet episode through the
-decoupled WBC controller, records measured MuJoCo state and rendered head
-images, and writes the HumanoidArena ref-pose schema (`state=64`, `action=40`)
-plus the raw source fields.  By default it uses `mujoco_isaac`: MuJoCo runs the
-fast physics/WBC loop while Isaac Sim renders the matching HSSD room.  Use
-`--sim-mode mujoco` only for a plain-MuJoCo diagnostic.
-
-The default episode is `G1WholebodyBendHandoverTeleop-v0/episode_000000` and
-expects SIMPLE assets under `/data/local-data/data/Humanoid/psi-data`.
+## Replay one episode
 
 ```bash
-cd /data/local-data/data/code/yunhengwang/kimodo-polocy/controlnet_v1.2/SIMPLE
-export SIMPLE_DATA_DIR=/data/local-data/data/Humanoid/psi-data
-export HF_ENDPOINT=https://hf-mirror.com
-export MUJOCO_GL=egl
-# Isaac Sim is installed in the shared IsaacLab 5.1 Python environment.  The
-# extra data-disk directory contains the Python 3.11 wheels that are not part
-# of that environment (pyarrow/transforms3d/yourdfpy).
-export ISAAC_PYTHON=/data/local-data/data/Humanoid/psi-data/isaac-python
-export SIMPLE_ISAAC_EXTRA_PYTHON="$ISAAC_PYTHON"
-export PYTHONPATH="$PWD/src:$PWD/third_party:$PWD/third_party/curobo/src:$PWD/third_party/unitree_sdk2_python:$PWD/.."
-export SIMPLE_ISAAC_GPU=6  # choose an idle physical H20; 4/5 are busy on this host
-# If the driver is healthy but CUDA/Vulkan ordinals disagree, use the UUID
-# instead of a numeric CUDA mask (the exporter still checks GPU Foundation).
-# export CUDA_VISIBLE_DEVICES=GPU-23560e59-f305-ec1f-ee9c-bc764b333751
-/home/CONNECT/yfang870/miniconda3/envs/env_isaaclab/bin/python ../data/playback/replay_capture.py --episode 0
+cd /ai/Yichi/yunhengwang/Kimodo-Policy/controlnet_v1.2
+
+PROJ=/ai/Yichi/yunhengwang/Kimodo-Policy/controlnet_v1.2
+SIMPLE=$PROJ/SIMPLE
+SP=$SIMPLE/.venv/lib/python3.10/site-packages
+ISO=/ai/Yichi/kimodo-policy/simpledata/pinocchio-iso/site-packages
+
+env -u CUDA_VISIBLE_DEVICES \
+  OMNI_KIT_ACCEPT_EULA=YES \
+  SIMPLE_DATA_DIR=/ai/Yichi/kimodo-policy/simpledata \
+  SIMPLE_ISAAC_GPU=0 \
+  SIMPLE_ISAAC_NO_CUDA_MASK=1 \
+  SIMPLE_ISAAC_ALLOW_ZERO_GPU_COUNT=1 \
+  SIMPLE_ISAAC_ACTIVE_GPU=0 \
+  SIMPLE_ISAAC_PHYSICS_GPU=0 \
+  SIMPLE_ISAAC_MAX_GPU_COUNT=1 \
+  SIMPLE_ISAAC_EXTRA_PYTHON=$ISO \
+  SIMPLE_ISAAC_PORTABLE_ROOT=/ai/Yichi/kimodo-policy/simpledata/isaac-cache/portable \
+  TORCH_CUDA_ARCH_LIST=8.6+PTX \
+  MUJOCO_GL=egl \
+  HF_ENDPOINT=https://hf-mirror.com \
+  TORCH_EXTENSIONS_DIR=/ai/Yichi/kimodo-policy/simpledata/torch-extensions \
+  WARP_CACHE_PATH=/ai/Yichi/kimodo-policy/simpledata/isaac-cache/warp \
+  XDG_CACHE_HOME=/ai/Yichi/kimodo-policy/simpledata/isaac-cache/xdg \
+  TMPDIR=/ai/Yichi/kimodo-policy/simpledata/isaac-cache/tmp \
+  PATH=$SIMPLE/.venv/bin:$PATH \
+  PYTHONPATH=$SP:$PROJ/src:$SIMPLE/src:$SIMPLE/third_party:$SIMPLE/third_party/curobo/src:$SIMPLE/third_party/unitree_sdk2_python:$ISO \
+  /ai/Yichi/taowen/isaac-sim/python.sh \
+  data/playback/replay_capture.py \
+  --sim-mode mujoco_isaac \
+  --env-id simple/G1WholebodyBendPickTeleop-v0 \
+  --source /ai/Yichi/kimodo-policy/simpledata/simple/G1WholebodyBendPickTeleop-v0 \
+  --episode 0 \
+  --output $PROJ/data/playback/output/test_pick_ep0_isaac
 ```
 
-Output is written to
-`data/playback/output/G1WholebodyBendHandoverTeleop-v0`.  The script validates
-canonical joint order, finite 64D/40D fields, measured-to-target tracking,
-video/frame alignment, and both observed and target 417D Kimodo motion
-representations.
+## Replay every episode in one task
 
-If Isaac Sim reports `GPU Foundation is not initialized` or
-`device_count=0`, no Isaac output is written. Kit can reach `app ready` while
-its RTX camera returns all-black frames; the exporter refuses those frames.
-Fix the host's Vulkan/CUDA mapping (or restart the node) before rerunning
-`mujoco_isaac`. Use `--sim-mode mujoco` to validate the state/action export
-independently.
+This launches one worker on each GPU listed in `GPUS`. Episodes are distributed
+across those workers, written to separate directories, and skipped when they
+already have a validation report. Re-run the same command to resume an
+interrupted batch. Update `GPUS` when server memory availability changes.
+
+```bash
+cd /ai/Yichi/yunhengwang/Kimodo-Policy/controlnet_v1.2
+
+PROJ=/ai/Yichi/yunhengwang/Kimodo-Policy/controlnet_v1.2
+SIMPLE=$PROJ/SIMPLE
+SP=$SIMPLE/.venv/lib/python3.10/site-packages
+ISO=/ai/Yichi/kimodo-policy/simpledata/pinocchio-iso/site-packages
+
+TASK=G1WholebodyBendPickTeleop-v0
+ENV_ID=simple/$TASK
+SOURCE=/ai/Yichi/kimodo-policy/simpledata/simple/$TASK
+OUTPUT_ROOT=$PROJ/data/playback/output/$TASK
+GPUS=(0 2 5 7)
+NUM_WORKERS=${#GPUS[@]}
+CACHE_BASE=/ai/Yichi/kimodo-policy/simpledata/isaac-cache/playback-workers
+PHYSICS_DT=0.005
+if [[ "$TASK" == "G1WholebodyBendPickMP-v0" ]]; then
+  PHYSICS_DT=0.002
+fi
+
+mapfile -t EPISODES < <(
+  python3 -c '
+import json
+import sys
+
+with open(sys.argv[1]) as episode_file:
+    for line in episode_file:
+        if line.strip():
+            print(json.loads(line)["episode_index"])
+' "$SOURCE/meta/episodes.jsonl"
+)
+
+mkdir -p "$OUTPUT_ROOT" "$CACHE_BASE"
+echo "Found ${#EPISODES[@]} episodes for $TASK; launching workers on GPUs: ${GPUS[*]}"
+
+run_worker() {
+  local GPU=$1
+  local SLOT=$2
+  local WORKER_CACHE=$CACHE_BASE/gpu_$GPU
+  local EPISODE OUTPUT ATTEMPT RUN_RC VALID_RC WORKER_STATUS=0
+
+  mkdir -p \
+    "$WORKER_CACHE/portable" \
+    "$WORKER_CACHE/warp" \
+    "$WORKER_CACHE/xdg" \
+    "$WORKER_CACHE/tmp"
+
+  echo "[gpu $GPU] worker started"
+
+  for EPISODE in "${EPISODES[@]}"; do
+    if (( EPISODE % NUM_WORKERS != SLOT )); then
+      continue
+    fi
+
+    OUTPUT=$(printf "%s/episode_%06d" "$OUTPUT_ROOT" "$EPISODE")
+
+    if [[ -s "$OUTPUT/validation.json" ]]; then
+      echo "[gpu $GPU] skip episode $EPISODE: already completed"
+      continue
+    fi
+
+    echo "[gpu $GPU] replay episode $EPISODE -> $OUTPUT"
+
+    VALID_RC=1
+    for ATTEMPT in 1 2 3; do
+      RUN_RC=0
+      echo "[gpu $GPU] episode $EPISODE attempt $ATTEMPT/3"
+      env \
+        -u CUDA_VISIBLE_DEVICES \
+        -u ALL_PROXY -u all_proxy \
+        HTTP_PROXY=http://127.0.0.1:17890 \
+        http_proxy=http://127.0.0.1:17890 \
+        HTTPS_PROXY=http://127.0.0.1:17890 \
+        https_proxy=http://127.0.0.1:17890 \
+        OMNI_KIT_ACCEPT_EULA=YES \
+        SIMPLE_DATA_DIR=/ai/Yichi/kimodo-policy/simpledata \
+        SIMPLE_ISAAC_GPU=$GPU \
+        SIMPLE_ISAAC_NO_CUDA_MASK=1 \
+        SIMPLE_ISAAC_ALLOW_ZERO_GPU_COUNT=1 \
+        SIMPLE_ISAAC_ACTIVE_GPU=$GPU \
+        SIMPLE_ISAAC_PHYSICS_GPU=$GPU \
+        SIMPLE_ISAAC_MAX_GPU_COUNT=1 \
+        SIMPLE_ISAAC_EXTRA_PYTHON=$ISO \
+        SIMPLE_ISAAC_PORTABLE_ROOT=$WORKER_CACHE/portable \
+        TORCH_CUDA_ARCH_LIST=8.6+PTX \
+        MUJOCO_GL=egl \
+        HF_ENDPOINT=https://hf-mirror.com \
+        TORCH_EXTENSIONS_DIR=/ai/Yichi/kimodo-policy/simpledata/torch-extensions \
+        WARP_CACHE_PATH=$WORKER_CACHE/warp \
+        XDG_CACHE_HOME=$WORKER_CACHE/xdg \
+        TMPDIR=$WORKER_CACHE/tmp \
+        PATH=$SIMPLE/.venv/bin:$PATH \
+        PYTHONPATH=$SP:$PROJ/src:$SIMPLE/src:$SIMPLE/third_party:$SIMPLE/third_party/curobo/src:$SIMPLE/third_party/unitree_sdk2_python:$ISO \
+        /ai/Yichi/taowen/isaac-sim/python.sh \
+        data/playback/replay_capture.py \
+        --sim-mode mujoco_isaac \
+        --env-id "$ENV_ID" \
+        --source "$SOURCE" \
+        --episode "$EPISODE" \
+        --physics-dt "$PHYSICS_DT" \
+        --output "$OUTPUT" || RUN_RC=$?
+
+      VALID_RC=0
+      python3 -c 'import json, sys; json.load(open(sys.argv[1]))' \
+        "$OUTPUT/validation.json" >/dev/null 2>&1 || VALID_RC=$?
+      if (( VALID_RC == 0 )); then
+        break
+      fi
+
+      echo "[gpu $GPU] episode $EPISODE attempt $ATTEMPT failed: rc=$RUN_RC or invalid validation.json" >&2
+      if (( ATTEMPT < 3 )); then
+        sleep 10
+      fi
+    done
+
+    if (( VALID_RC != 0 )); then
+      echo "[gpu $GPU] failed episode $EPISODE after 3 attempts" >&2
+      WORKER_STATUS=1
+      continue
+    fi
+  done
+
+  echo "[gpu $GPU] worker completed with status $WORKER_STATUS"
+  return "$WORKER_STATUS"
+}
+
+declare -a WORKER_PIDS=()
+
+for SLOT in "${!GPUS[@]}"; do
+  GPU=${GPUS[$SLOT]}
+  echo "[launch] GPU $GPU -> worker_gpu${GPU}.log"
+  run_worker "$GPU" "$SLOT" >> "$OUTPUT_ROOT/worker_gpu${GPU}.log" 2>&1 &
+  WORKER_PIDS[$SLOT]=$!
+done
+
+STATUS=0
+for SLOT in "${!GPUS[@]}"; do
+  GPU=${GPUS[$SLOT]}
+  if wait "${WORKER_PIDS[$SLOT]}"; then
+    echo "[complete] GPU $GPU worker"
+  else
+    echo "[failed] GPU $GPU worker; inspect worker_gpu${GPU}.log" >&2
+    STATUS=1
+  fi
+done
+
+exit "$STATUS"
+```
