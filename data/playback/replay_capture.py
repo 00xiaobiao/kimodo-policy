@@ -7,12 +7,14 @@ SIMPLE episodes: the camera image is rendered from the recorded HSSD room,
 instead of MuJoCo's plain fallback floor/table.  Passing ``--sim-mode mujoco``
 is still available as a lightweight diagnostic.
 
-The source SIMPLE archive contains a 32-D observation and 36-D WBC command, so
-the exporter samples the *measured* MuJoCo state after each replay step and
-writes the 64-D/40-D Arena protocol:
+The source SIMPLE archive contains a 32-D observation and 36-D WBC command. The
+exporter samples the *measured* MuJoCo state after each replay step, while the
+action root is reconstructed from the recorded reference command, and writes
+the 64-D/40-D Arena protocol:
 
     state = root_rot6d_relative_to_episode_heading + q29 + dq29
-    action = root_local_xy_delta + root_z + root_rot6d + q29 + hand_binary
+    action = reference_root_local_xy_delta + reference_root_z
+             + reference_root_rot6d + target_q29 + hand_binary
 
 The output is a normal LeRobot-like directory (one parquet file and one MP4
 for this prototype) and can be extended to shard multiple episodes.
@@ -93,6 +95,13 @@ RIGHT_HAND_NAMES = (
     "right_hand_middle_1_joint",
 )
 
+SOURCE_ACTION_DIM = 36
+SOURCE_BASE_HEIGHT_INDEX = 31
+SOURCE_LOCAL_XY_SLICE = slice(32, 34)
+SOURCE_TARGET_YAW_INDEX = 35
+REFERENCE_ROOT_SOURCE = "simple_synced_command_integrated"
+REFERENCE_ROOT_ORIENTATION = "yaw_only_target"
+
 
 class _WholebodyReplayObservationAdapter:
     """Expose the Sonic proprioception schema without changing G1Wholebody.
@@ -161,6 +170,10 @@ def _legacy_replay_action(action_cmd, robot):
     """Convert a WBC target into G1Wholebody's existing replay command."""
     from simple.core.action import ActionCmd
 
+    if action_cmd.type != "decoupled_wbc":
+        raise ValueError(
+            f"legacy replay expected a decoupled_wbc action, got {action_cmd.type!r}"
+        )
     target_q = np.asarray(action_cmd["target_q"], dtype=np.float32).reshape(29)
     target_qpos = {
         name: float(value)
@@ -175,6 +188,56 @@ def _legacy_replay_action(action_cmd, robot):
                 {name: float(value) for name, value in zip(names, np.asarray(values).reshape(7))}
             )
     return ActionCmd("replay_move_actuators", target_qpos=target_qpos)
+
+
+def configure_replay_boundary(robot):
+    """Select the observation/action bridge supported by the concrete robot.
+
+    ``G1Sonic`` natively exposes ``prepare_obs`` and consumes the
+    ``decoupled_wbc`` ActionCmd returned by ReplayDecoupledAgent. Older
+    G1Wholebody implementations predate that interface and instead need the
+    observation adapter plus ``replay_move_actuators`` conversion.
+    """
+    from simple.robots.g1_sonic import G1Sonic
+
+    if isinstance(robot, G1Sonic):
+        if not callable(getattr(robot, "prepare_obs", None)):
+            raise TypeError("G1Sonic replay requires robot.prepare_obs()")
+
+        def native_action(action_cmd):
+            if action_cmd.type != "decoupled_wbc":
+                raise ValueError(
+                    f"G1Sonic replay expected decoupled_wbc, got {action_cmd.type!r}"
+                )
+            return action_cmd
+
+        return robot, native_action, "g1_sonic:decoupled_wbc"
+
+    # Legacy G1Wholebody variants use plural/lowercase MuJoCo handle names.
+    # Accept newer aliases as well so archived MP tasks remain replayable.
+    if not hasattr(robot, "joints_names") and hasattr(robot, "joint_names"):
+        robot.joints_names = robot.joint_names
+    if not hasattr(robot, "mjdata") and hasattr(robot, "mjData"):
+        robot.mjdata = robot.mjData
+    if not hasattr(robot, "mjmodel") and hasattr(robot, "mjModel"):
+        robot.mjmodel = robot.mjModel
+
+    missing = [
+        name for name in ("joints_names", "mjdata", "mjmodel", "joints", "actuators")
+        if not hasattr(robot, name)
+    ]
+    if missing:
+        raise TypeError(
+            f"unsupported replay robot {type(robot).__module__}.{type(robot).__name__}; "
+            f"missing legacy attributes: {', '.join(missing)}"
+        )
+
+    def legacy_action(action_cmd):
+        return _legacy_replay_action(action_cmd, robot)
+
+    return _WholebodyReplayObservationAdapter(robot), legacy_action, (
+        f"{type(robot).__name__}:replay_move_actuators"
+    )
 
 
 def assert_isaac_gpu_ready(simulation_app) -> dict:
@@ -247,6 +310,136 @@ def fixed_list(values: np.ndarray, width: int, dtype=None) -> pa.FixedSizeListAr
 def rot6d_from_matrix(mats: np.ndarray) -> np.ndarray:
     # Arena stores row-major values of the first two matrix columns.
     return np.asarray(mats[:, :, :2].reshape(len(mats), 6), dtype=np.float32)
+
+
+def matrix_from_rot6d(rot6d: np.ndarray) -> np.ndarray:
+    """Decode Arena's row-major first-two-columns rotation representation."""
+    rot6d = np.asarray(rot6d, dtype=np.float64).reshape(-1, 6)
+    column0 = rot6d[:, (0, 2, 4)]
+    column1 = rot6d[:, (1, 3, 5)]
+    column0 /= np.linalg.norm(column0, axis=1, keepdims=True)
+    column1 -= np.sum(column0 * column1, axis=1, keepdims=True) * column0
+    column1 /= np.linalg.norm(column1, axis=1, keepdims=True)
+    column2 = np.cross(column0, column1)
+    return np.stack((column0, column1, column2), axis=-1)
+
+
+def reference_root_from_source_action(source_action: np.ndarray, fps: float) -> dict[str, np.ndarray]:
+    """Build an episode-local reference root from SIMPLE's synchronized command.
+
+    SIMPLE's processed 36-D action stores base height at index 31 and the
+    synchronized ``[vx, vy, turning_flag, target_yaw]`` navigation command at
+    indices 32:36.  This mirrors HumanoidArena's TWIST2 reference-pose
+    conversion: local XY velocity becomes a per-frame local displacement,
+    while target yaw defines the episode-local reference orientation.
+
+    The source does not contain a commanded pelvis roll/pitch, so the reference
+    root orientation is intentionally yaw-only.  ``root_p_relative`` and
+    ``root_q_relative`` are relative to the first reference pose; ``height`` is
+    kept absolute for Arena action[2].
+    """
+    source_action = np.asarray(source_action, dtype=np.float32)
+    if source_action.ndim != 2 or source_action.shape[1] != SOURCE_ACTION_DIM:
+        raise ValueError(
+            f"expected SIMPLE source action shape (T, {SOURCE_ACTION_DIM}), "
+            f"got {source_action.shape}"
+        )
+    if len(source_action) == 0:
+        raise ValueError("cannot construct a reference root for an empty episode")
+    if not np.isfinite(source_action).all():
+        raise ValueError("SIMPLE source action contains NaN or Inf")
+    fps = float(fps)
+    if not np.isfinite(fps) or fps <= 0:
+        raise ValueError(f"invalid reference-root fps: {fps}")
+
+    local_xy_delta = np.zeros((len(source_action), 2), dtype=np.float32)
+    if len(source_action) > 1:
+        local_xy_delta[1:] = source_action[1:, SOURCE_LOCAL_XY_SLICE] / fps
+
+    height = source_action[:, SOURCE_BASE_HEIGHT_INDEX].astype(np.float32, copy=True)
+    target_yaw = np.unwrap(
+        source_action[:, SOURCE_TARGET_YAW_INDEX].astype(np.float64)
+    )
+    target_yaw -= target_yaw[0]
+    root_rotations = Rotation.from_euler("z", target_yaw).as_matrix().astype(np.float32)
+    quaternion_xyzw = Rotation.from_matrix(root_rotations).as_quat().astype(np.float32)
+    root_q_relative = quaternion_xyzw[:, (3, 0, 1, 2)]
+
+    root_p_relative = np.zeros((len(source_action), 3), dtype=np.float32)
+    root_p_relative[:, 2] = height - height[0]
+    for frame_index in range(1, len(source_action)):
+        local_step = np.array(
+            [local_xy_delta[frame_index, 0], local_xy_delta[frame_index, 1], 0.0],
+            dtype=np.float32,
+        )
+        root_p_relative[frame_index, :2] = (
+            root_p_relative[frame_index - 1, :2]
+            + (root_rotations[frame_index] @ local_step)[:2]
+        )
+
+    return {
+        "local_xy_delta": local_xy_delta,
+        "height": height,
+        "rotation_matrices": root_rotations,
+        "root_p_relative": root_p_relative,
+        "root_q_relative": root_q_relative,
+    }
+
+
+def reference_protocol_metadata() -> dict:
+    """Return the complete V3.1 semantics used by replay exports."""
+    return {
+        "schema": "unitree_g1_gmt_refpose_v3_1",
+        "version": "3.1",
+        "action_dim": 40,
+        "action_layout": "root_xy_delta_z_rot6d_joints29_hands2",
+        "rotation_6d_layout": "row",
+        "action_semantics": "reference_pose_not_robot_current_residual",
+        "root_xy_delta_frame": "current_reference_base_frame",
+        "root_rotation_frame": "episode_reference_frame",
+        "fps": 50.0,
+        "control_dt": 0.02,
+        "source": "SIMPLE MuJoCo replay",
+        "reference_root_source": REFERENCE_ROOT_SOURCE,
+        "reference_root_orientation": REFERENCE_ROOT_ORIENTATION,
+        "measured_root_fields": ["observation.root_p", "observation.root_q"],
+    }
+
+
+def add_reference_features(features: dict) -> None:
+    """Declare the explicit audit/reference columns stored beside 64D/40D."""
+    features.update(
+        {
+            "observation.root_p": {
+                "dtype": "float32", "shape": [3], "names": ["x", "y", "z"]
+            },
+            "observation.root_q": {
+                "dtype": "float32", "shape": [4], "names": ["w", "x", "y", "z"]
+            },
+            "observation.joint_q": {
+                "dtype": "float32", "shape": [29], "names": list(CANONICAL_NAMES)
+            },
+            "observation.joint_dq": {
+                "dtype": "float32", "shape": [29], "names": list(CANONICAL_NAMES)
+            },
+            "observation.hand_q": {
+                "dtype": "float32", "shape": [14]
+            },
+            "action.target_joint_q": {
+                "dtype": "float32", "shape": [29], "names": list(CANONICAL_NAMES)
+            },
+            "action.reference_root_p": {
+                "dtype": "float32", "shape": [3], "names": ["x", "y", "z"],
+                "semantics": "episode_first_reference_pose_relative",
+            },
+            "action.reference_root_q": {
+                "dtype": "float32", "shape": [4], "names": ["w", "x", "y", "z"],
+                "semantics": "episode_first_reference_pose_relative_yaw_only",
+            },
+            "source.states": {"dtype": "float32", "shape": [32]},
+            "source.action": {"dtype": "float32", "shape": [36]},
+        }
+    )
 
 
 def root_matrix_from_qpos(qpos: np.ndarray) -> np.ndarray:
@@ -339,6 +532,8 @@ def write_output(
         "observation.joint_dq": fixed_list(frames["joint_dq"], 29),
         "observation.hand_q": fixed_list(frames["hand_q"], 14),
         "action.target_joint_q": fixed_list(frames["target_joint_q"], 29),
+        "action.reference_root_p": fixed_list(frames["reference_root_p"], 3),
+        "action.reference_root_q": fixed_list(frames["reference_root_q"], 4),
         "source.states": fixed_list(frames["source_states"], 32),
         "source.action": fixed_list(frames["source_action"], 36),
         "frame_index": pa.array(np.arange(n, dtype=np.int64)),
@@ -381,7 +576,7 @@ def write_output(
                             "success": bool(frames["success"][0])}) + "\n")
 
     info = {
-        "codebase_version": "simple-replay-arena-v0",
+        "codebase_version": "simple-replay-arena-v1-reference-root",
         "robot_type": "unitree_g1_refpose_v3_1",
         "total_episodes": 1,
         "total_frames": n,
@@ -391,7 +586,7 @@ def write_output(
         "fps": fps,
         "data_path": "data/chunk-{episode_chunk:03d}/file-{file_index:03d}.parquet",
         "video_path": "videos/{video_key}/chunk-{episode_chunk:03d}/file-{file_index:03d}.mp4",
-        "vla_protocol": {"schema": "unitree_g1_gmt_refpose_v3_1", "version": "3.1", "source": "SIMPLE MuJoCo replay"},
+        "vla_protocol": reference_protocol_metadata(),
         "features": {
             "observation.images.front": {"dtype": "video", "shape": [h, w, 3], "names": ["height", "width", "channel"]},
             "observation.state": {
@@ -410,10 +605,11 @@ def write_output(
             },
         },
     }
+    add_reference_features(info["features"])
     (output_root / "meta/info.json").write_text(json.dumps(info, indent=2) + "\n")
 
 
-def validate_output(output_root: Path, fps: int) -> dict:
+def validate_output(output_root: Path, fps: int, *, validate_root_motion: bool = True) -> dict:
     """Run Arena shape checks and construct the 417-D Kimodo representation."""
     table = pq.read_table(output_root / "data/chunk-000/file-000.parquet")
     state = np.asarray(table["observation.state"].combine_chunks().values).reshape(-1, 64).astype(np.float32)
@@ -422,11 +618,86 @@ def validate_output(output_root: Path, fps: int) -> dict:
     root_q = np.asarray(table["observation.root_q"].combine_chunks().values).reshape(-1, 4).astype(np.float32)
     joint_q = np.asarray(table["observation.joint_q"].combine_chunks().values).reshape(-1, 29).astype(np.float32)
     target_joint_q = np.asarray(table["action.target_joint_q"].combine_chunks().values).reshape(-1, 29).astype(np.float32)
+    reference_root_p = np.asarray(
+        table["action.reference_root_p"].combine_chunks().values
+    ).reshape(-1, 3).astype(np.float32)
+    reference_root_q = np.asarray(
+        table["action.reference_root_q"].combine_chunks().values
+    ).reshape(-1, 4).astype(np.float32)
+    source_action = np.asarray(table["source.action"].combine_chunks().values).reshape(-1, 36).astype(np.float32)
     assert state.shape[1:] == (64,) and action.shape[1:] == (40,)
-    assert np.isfinite(state).all() and np.isfinite(action).all()
+    assert all(
+        np.isfinite(values).all()
+        for values in (
+            state,
+            action,
+            root_p,
+            root_q,
+            joint_q,
+            target_joint_q,
+            reference_root_p,
+            reference_root_q,
+            source_action,
+        )
+    )
     assert np.unique(action[:, 38:40]).tolist() <= [0.0, 1.0]
     if len(action) > 1:
         assert np.max(np.linalg.norm(np.diff(root_p, axis=0), axis=1)) < 0.2, "root jump >20cm/frame"
+
+    expected_reference = reference_root_from_source_action(source_action, fps)
+    expected_root_action = np.concatenate(
+        (
+            expected_reference["local_xy_delta"],
+            expected_reference["height"][:, None],
+            rot6d_from_matrix(expected_reference["rotation_matrices"]),
+        ),
+        axis=1,
+    )
+    reference_action_error = float(np.max(np.abs(action[:, :9] - expected_root_action)))
+    reference_position_field_error = float(
+        np.max(np.abs(reference_root_p - expected_reference["root_p_relative"]))
+    )
+    reference_quaternion_field_error = float(
+        np.max(np.abs(reference_root_q - expected_reference["root_q_relative"]))
+    )
+    if reference_action_error > 1e-5:
+        raise ValueError(
+            f"action root differs from SIMPLE reference command by {reference_action_error:.3e}"
+        )
+    if reference_position_field_error > 1e-5 or reference_quaternion_field_error > 1e-5:
+        raise ValueError(
+            "explicit reference root fields differ from the source command: "
+            f"position={reference_position_field_error:.3e}, "
+            f"quaternion={reference_quaternion_field_error:.3e}"
+        )
+
+    action_root_rotations = matrix_from_rot6d(action[:, 3:9])
+    decoded_reference_p = np.zeros_like(reference_root_p)
+    decoded_reference_p[:, 2] = action[:, 2]
+    for frame_index in range(1, len(action)):
+        local_delta = np.zeros(3, dtype=np.float64)
+        local_delta[:2] = action[frame_index, :2]
+        rotation = action_root_rotations[frame_index]
+        delta_z = float(action[frame_index, 2] - action[frame_index - 1, 2])
+        if abs(rotation[2, 2]) <= 1e-8:
+            raise ValueError("reference root rotation cannot reconstruct the commanded height")
+        local_delta[2] = (
+            delta_z
+            - rotation[2, 0] * local_delta[0]
+            - rotation[2, 1] * local_delta[1]
+        ) / rotation[2, 2]
+        decoded_reference_p[frame_index, :2] = (
+            decoded_reference_p[frame_index - 1, :2]
+            + (rotation @ local_delta)[:2]
+        )
+    decoded_reference_p[:, 2] -= decoded_reference_p[0, 2]
+    reference_decode_error = float(
+        np.max(np.linalg.norm(decoded_reference_p - reference_root_p, axis=1))
+    )
+    if reference_decode_error > 1e-5:
+        raise ValueError(
+            f"Arena action decoder root differs from explicit reference by {reference_decode_error:.3e} m"
+        )
 
     # Feed both measured configuration and root trajectory through the same
     # decoder used by controlnet_v1.2's HumanoidArena adapter.
@@ -471,11 +742,56 @@ def validate_output(output_root: Path, fps: int) -> dict:
     )
     assert tuple(target_features.shape) == (1, len(action), 417), tuple(target_features.shape)
     tracking_error = target_joint_q - joint_q
+    root_steps = np.linalg.norm(np.diff(root_p, axis=0), axis=1) if len(root_p) > 1 else np.zeros(0)
+    planar_steps = np.linalg.norm(np.diff(root_p[:, :2], axis=0), axis=1) if len(root_p) > 1 else np.zeros(0)
+    tracking_rmse = float(np.sqrt(np.mean(tracking_error ** 2)))
+    root_step_max = float(np.max(root_steps)) if len(root_steps) else 0.0
+    root_path_length = float(np.sum(planar_steps))
+    source_xy_command_peak = float(np.max(np.linalg.norm(source_action[:, 32:34], axis=1)))
+    root_height_min = float(np.min(root_p[:, 2]))
+    reference_planar_steps = (
+        np.linalg.norm(np.diff(reference_root_p[:, :2], axis=0), axis=1)
+        if len(reference_root_p) > 1
+        else np.zeros(0)
+    )
+    reference_path_length = float(np.sum(reference_planar_steps))
+    reference_quaternion_norm_error = float(
+        np.max(np.abs(np.linalg.norm(reference_root_q, axis=1) - 1.0))
+    )
+
+    quality_errors = []
+    if tracking_rmse > 0.20:
+        quality_errors.append(f"joint tracking RMSE {tracking_rmse:.4f} rad exceeds 0.20")
+    # G1Sonic uses the free-joint root at qpos[:7], so its height and planar
+    # path are meaningful quality signals.  The archived G1Wholebody model
+    # uses a different qpos layout; keep exporting its historical root fields
+    # for compatibility, but do not reject an otherwise well-tracked legacy
+    # replay based on coordinates that are not the floating base.
+    if validate_root_motion:
+        if root_height_min < 0.35:
+            quality_errors.append(f"root height dropped to {root_height_min:.4f} m")
+        if source_xy_command_peak > 0.05 and root_path_length < 0.02:
+            quality_errors.append(
+                "non-zero navigation command produced less than 0.02 m planar root motion"
+            )
+
     return {"frames": int(len(state)), "state_dim": int(state.shape[1]), "action_dim": int(action.shape[1]),
             "kimodo_dim": int(features.shape[-1]), "target_kimodo_dim": int(target_features.shape[-1]),
-            "root_step_max_m": float(np.max(np.linalg.norm(np.diff(root_p, axis=0), axis=1))) if len(root_p) > 1 else 0.0,
-            "joint_tracking_rmse_rad": float(np.sqrt(np.mean(tracking_error ** 2))),
+            "root_step_max_m": root_step_max,
+            "root_planar_path_m": root_path_length,
+            "root_height_min_m": root_height_min,
+            "source_xy_command_peak": source_xy_command_peak,
+            "action_semantics": "reference_pose_not_robot_current_residual",
+            "reference_root_source": REFERENCE_ROOT_SOURCE,
+            "reference_root_orientation": REFERENCE_ROOT_ORIENTATION,
+            "reference_root_planar_path_m": reference_path_length,
+            "reference_root_decode_max_error_m": reference_decode_error,
+            "reference_root_action_max_error": reference_action_error,
+            "reference_root_quaternion_norm_max_error": reference_quaternion_norm_error,
+            "joint_tracking_rmse_rad": tracking_rmse,
             "joint_tracking_max_rad": float(np.max(np.abs(tracking_error))),
+            "quality_passed": not quality_errors,
+            "quality_errors": quality_errors,
             "canonical_joint_order": list(CANONICAL_NAMES)}
 
 
@@ -551,48 +867,73 @@ def run(args) -> dict:
     observation, info = env.reset(options={"state_dict": env_conf, "task_id": f"episode_{args.episode}"})
     robot = raw_env.task.robot
     agent = ReplayDecoupledAgent(robot, sonic_config)
-    # Keep the legacy G1Wholebody implementation untouched.  The adapter only
-    # supplies the observation method expected by ReplayDecoupledAgent; the
-    # command is converted back to its native replay action at env.step().
-    agent.robot = _WholebodyReplayObservationAdapter(robot)
+    replay_robot, adapt_action, replay_backend = configure_replay_boundary(robot)
+    agent.robot = replay_robot
+    print(
+        f"[replay] robot={type(robot).__module__}.{type(robot).__name__} "
+        f"backend={replay_backend}"
+    )
     agent.load_episode(episode)
     if hasattr(agent._wbc_policy, "lower_body_policy"):
         agent._wbc_policy.lower_body_policy.use_policy_action = True
 
     # Stabilize without recording the transient phase.  Sonic robots expose a
-    # latched ``stabilized`` property; the older G1Wholebody implementation
-    # does not, so use the floating-base velocity as a compatible fallback.
+    # latched ``stabilized`` property whose upstream threshold is intentionally
+    # extremely strict (1e-4 m/s).  That threshold is useful for interactive
+    # teleop, but can keep an offline replay in its warm-up loop for tens of
+    # minutes because tiny contact noise never reaches zero.  For replay we
+    # accept the same practical floating-base velocity criterion used by the
+    # legacy G1Wholebody path; the strict latch still wins whenever it fires.
     has_stabilized_flag = hasattr(robot, "stabilized")
     stabilized = False
     min_fallback_steps = min(args.max_stabilize_steps, 30)
+    replay_velocity_threshold = float(
+        os.environ.get("SIMPLE_REPLAY_STABILIZE_VEL_THRESHOLD", "0.05")
+    )
+    if not np.isfinite(replay_velocity_threshold) or replay_velocity_threshold <= 0:
+        raise ValueError(
+            "SIMPLE_REPLAY_STABILIZE_VEL_THRESHOLD must be a positive finite number"
+        )
     for stabilize_step in range(args.max_stabilize_steps):
         if has_stabilized_flag:
-            stabilized = bool(robot.stabilized)
+            strict_stabilized = bool(robot.stabilized)
+            qvel = np.asarray(mujoco_sim.mjData.qvel[:6], dtype=np.float32)
+            practical_stabilized = (
+                stabilize_step >= min_fallback_steps
+                and np.max(np.abs(qvel)) < replay_velocity_threshold
+            )
+            stabilized = strict_stabilized or practical_stabilized
         elif stabilize_step >= min_fallback_steps:
             qvel = np.asarray(mujoco_sim.mjData.qvel[:6], dtype=np.float32)
-            stabilized = bool(np.max(np.abs(qvel)) < 0.05)
+            stabilized = bool(np.max(np.abs(qvel)) < replay_velocity_threshold)
         if stabilized:
             break
-        stabilize_action = _legacy_replay_action(agent.get_stabilize_action(observation), robot)
+        stabilize_action = adapt_action(agent.get_stabilize_action(observation))
         observation, _, _, _, info = env.step(stabilize_action)
-    if has_stabilized_flag and not stabilized:
-        raise RuntimeError("robot did not stabilize; increase --max-stabilize-steps")
     if not stabilized:
-        print("[replay] G1Wholebody fallback stabilization threshold not reached; continuing")
+        print(
+            "[replay] practical stabilization threshold not reached; "
+            "continuing so validation can decide whether this replay is usable"
+        )
 
     states, actions, root_ps, root_qs, joint_qs, joint_dqs, hand_qs, target_joint_qs = [], [], [], [], [], [], [], []
+    reference_root_ps, reference_root_qs = [], []
     source_states, source_actions, dones, images = [], [], [], []
     success = []
-    prev_p = None
     first_heading = None
     body_name_to_index = {name: i for i, name in enumerate(BODY_NAMES)}
     frame_limit = len(episode) if args.max_frames is None else min(len(episode), max(1, args.max_frames))
+    source_action_matrix = np.stack(
+        [np.asarray(value, dtype=np.float32) for value in episode["action"].iloc[:frame_limit]],
+        axis=0,
+    )
+    reference_root = reference_root_from_source_action(source_action_matrix, 50)
     for i in range(frame_limit):
         action_cmd = agent.get_action(observation)
         target_q_body = np.asarray(action_cmd["target_q"], dtype=np.float32).reshape(29)
         target_q = target_q_body[[body_name_to_index[name] for name in CANONICAL_NAMES]]
         source_row = episode.iloc[i]
-        replay_action = _legacy_replay_action(action_cmd, robot)
+        replay_action = adapt_action(action_cmd)
         observation, _, terminated, truncated, info = env.step(replay_action)
         qpos = np.asarray(mujoco_sim.mjData.qpos[:7], dtype=np.float32).copy()
         p = qpos[:3].copy()
@@ -607,34 +948,49 @@ def run(args) -> dict:
         dq = joint_vector(mujoco_sim.mjData, CANONICAL_NAMES, "qvel")
         hq = np.concatenate([joint_vector(mujoco_sim.mjData, LEFT_HAND_NAMES, "qpos"),
                              joint_vector(mujoco_sim.mjData, RIGHT_HAND_NAMES, "qpos")])
-        delta = np.zeros(3, dtype=np.float32) if prev_p is None else p - prev_p
-        local_delta = r_world.T @ delta
+        source_command = source_action_matrix[i]
+        reference_rotation = reference_root["rotation_matrices"][i]
         state = np.concatenate([rot6d_from_matrix(r_rel[None])[0], q, dq]).astype(np.float32)
-        arena_action = np.concatenate([local_delta[:2], [p[2]], rot6d_from_matrix(r_rel[None])[0], target_q,
-                                        hand_binary(np.asarray(source_row["action"]))]).astype(np.float32)
+        arena_action = np.concatenate(
+            [
+                reference_root["local_xy_delta"][i],
+                [reference_root["height"][i]],
+                rot6d_from_matrix(reference_rotation[None])[0],
+                target_q,
+                hand_binary(source_command),
+            ]
+        ).astype(np.float32)
         states.append(state); actions.append(arena_action); root_ps.append(p); root_qs.append(qpos[3:7]);
         joint_qs.append(q); joint_dqs.append(dq); hand_qs.append(hq)
         # Keep the WBC target separately for auditing measured-vs-reference
         # tracking while exposing it in the protocol action[9:38].
         target_joint_qs.append(target_q)
+        reference_root_ps.append(reference_root["root_p_relative"][i])
+        reference_root_qs.append(reference_root["root_q_relative"][i])
         source_states.append(np.asarray(source_row["states"], dtype=np.float32))
-        source_actions.append(np.asarray(source_row["action"], dtype=np.float32))
+        source_actions.append(source_command)
         image = np.asarray(observation["head_stereo_left"], dtype=np.uint8).copy()
         if "isaac" in args.sim_mode:
             image = validate_camera_frame(image, i)
         images.append(image)
         dones.append(bool(terminated or truncated)); success.append(bool(getattr(raw_env, "_success", False)))
-        prev_p = p
         if terminated or truncated:
             break
     frames = {"state": np.stack(states), "action": np.stack(actions), "root_p": np.stack(root_ps),
               "root_q": np.stack(root_qs), "joint_q": np.stack(joint_qs), "joint_dq": np.stack(joint_dqs),
               "hand_q": np.stack(hand_qs), "source_states": np.stack(source_states),
               "target_joint_q": np.stack(target_joint_qs), "source_action": np.stack(source_actions),
+              "reference_root_p": np.stack(reference_root_ps),
+              "reference_root_q": np.stack(reference_root_qs),
               "done": np.asarray(dones), "success": np.asarray(success)}
     write_output(output_root, args.episode, task_text, env_conf, frames, images, 50)
-    report = validate_output(output_root, 50)
+    report = validate_output(
+        output_root,
+        50,
+        validate_root_motion=replay_backend.startswith("g1_sonic:"),
+    )
     report.update({"source": str(source_path), "output": str(output_root), "success": bool(success[-1]),
+                   "replay_backend": replay_backend,
                    "recorded_frames": len(states), "source_frames": len(episode)})
     if isaac_gpu is not None:
         report["isaac_gpu"] = isaac_gpu

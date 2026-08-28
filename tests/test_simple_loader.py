@@ -120,6 +120,27 @@ class SimpleReplayAdapterTest(unittest.TestCase):
 
             self.assertEqual(adapter.episodes, [])
 
+    def test_discovery_accepts_successful_source_prefix(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            episode_root, _, _ = self._write_episode(
+                root, "G1WholebodyCloseDoorTeleop-v0"
+            )
+            report_path = episode_root / "validation.json"
+            report = json.loads(report_path.read_text())
+            report["source_frames"] = report["recorded_frames"] + 3
+            report_path.write_text(json.dumps(report))
+
+            adapter = SimpleReplayAdapter(
+                root=root,
+                selection={"task": "G1WholebodyCloseDoorTeleop-v0"},
+                target_fps=30,
+                action_chunk=2,
+            )
+
+            self.assertEqual(len(adapter.episodes), 1)
+            self.assertEqual(adapter.episodes[0].source_length, 4)
+
     def test_load_episode_uses_replay_actions_for_observed_and_target_hands(self):
         adapter = SimpleReplayAdapter.__new__(SimpleReplayAdapter)
         state = np.zeros((4, 64), dtype=np.float32)

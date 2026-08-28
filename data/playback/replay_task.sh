@@ -73,6 +73,11 @@ if [[ "$TASK" == *MP* ]]; then
 else
   PHYSICS_DT="0.005"
 fi
+# The upstream Sonic latch uses a near-zero velocity threshold.  replay_capture
+# also applies a practical replay threshold, so a few hundred warm-up steps are
+# sufficient while avoiding multi-minute retries on noisy contacts.  Override
+# this when diagnosing a task with unusually long settling dynamics.
+MAX_STABILIZE_STEPS="${MAX_STABILIZE_STEPS:-300}"
 
 mapfile -t EPISODES < <(
   python3 -c '
@@ -85,6 +90,29 @@ with open(sys.argv[1]) as f:
 )
 
 mkdir -p "$OUTPUT_ROOT" "$CACHE_BASE"
+
+validation_ok() {
+  local report=$1
+  [[ -s "$report" ]] || return 1
+  python3 -c '
+import json, sys
+
+with open(sys.argv[1]) as f:
+    report = json.load(f)
+
+quality = report.get("quality_passed")
+if quality is False:
+    raise SystemExit(1)
+if quality is None:
+    # Backward compatibility for reports written before quality_passed was
+    # added. Historical good replays are below 0.08 rad; the silent
+    # no-control failure is around 1 rad.
+    rmse = report.get("joint_tracking_rmse_rad")
+    if rmse is None or float(rmse) > 0.20:
+        raise SystemExit(1)
+' "$report"
+}
+
 {
   echo "[master] task=$TASK"
   echo "[master] episodes=${#EPISODES[@]} gpus=${GPU_LIST[*]} physics_dt=$PHYSICS_DT"
@@ -107,7 +135,7 @@ run_worker() {
     fi
 
     output=$(printf "%s/episode_%06d" "$OUTPUT_ROOT" "$episode")
-    if [[ -s "$output/validation.json" ]]; then
+    if validation_ok "$output/validation.json"; then
       echo "[gpu $gpu] skip episode $episode: already completed"
       continue
     fi
@@ -152,9 +180,10 @@ run_worker() {
         --source "$SOURCE" \
         --episode "$episode" \
         --physics-dt "$PHYSICS_DT" \
+        --max-stabilize-steps "$MAX_STABILIZE_STEPS" \
         --output "$output" || run_rc=$?
 
-      if [[ -s "$output/validation.json" ]] && python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$output/validation.json" >/dev/null 2>&1; then
+      if validation_ok "$output/validation.json" >/dev/null 2>&1; then
         valid_rc=0
         break
       fi
@@ -199,4 +228,16 @@ exit "$status"
 
 
 # cd /ai/Yichi/yunhengwang/Kimodo-Policy/controlnet_v1.2
-# bash data/playback/replay_task.sh G1WholebodyBendPickMP-v0 "0 2 5 7"
+# TASK=你的任务名
+# bash data/playback/replay_task.sh "$TASK" "3 5 6 7"
+
+
+# G1WholebodyHandoverTeleop-v0
+# G1WholebodyLocomotionPickBetweenTablesTeleop-v0
+# G1WholebodyOpenFaucetTeleop-v0
+# G1WholebodyOpenOvenTeleop-v0
+# G1WholebodyOpenTrashCanTeleop-v0
+# G1WholebodyPickAndPlaceAndHugContainerTeleop-v0
+# G1WholebodyPushOfficeChairTeleop-v0
+# G1WholebodyTabletopGraspMP-v0
+# G1WholebodyXMoveBendPickTeleop-v0

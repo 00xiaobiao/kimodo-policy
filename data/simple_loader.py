@@ -128,7 +128,10 @@ class SimpleReplayAdapter(BaseSourceAdapter):
             ) from error
         if (
             frames <= 0
-            or source_frames != frames
+            # Replays stop when the task terminates successfully.  In that
+            # valid case the recorded dataset is a prefix of the source
+            # command episode, so source_frames may be larger than frames.
+            or source_frames < frames
             or recorded_frames != frames
             or (state_dim, action_dim, kimodo_dim, target_kimodo_dim)
             != (64, 40, 417, 417)

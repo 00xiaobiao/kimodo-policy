@@ -192,3 +192,26 @@ done
 
 exit "$STATUS"
 ```
+
+## Reference-root action semantics
+
+Replay exports keep the measured MuJoCo root under `observation.root_p` and
+`observation.root_q`.  The 40-D action root is a reference target reconstructed
+from SIMPLE's synchronized 36-D command:
+
+```text
+source.action[31]    -> reference root height
+source.action[32:34] -> reference local XY velocity
+source.action[35]    -> reference target yaw
+```
+
+At 50 FPS, action local XY displacement is velocity times `0.02`.  The target
+yaw is made episode-relative and stored as a yaw-only quaternion/rot6d because
+SIMPLE does not expose a commanded pelvis roll/pitch.  Explicit episode-relative
+targets are also stored as `action.reference_root_p` and
+`action.reference_root_q` (`wxyz`).
+
+New replay jobs write the reference-root action directly.  Historical outputs
+that were produced by the old measured-root exporter must be regenerated with
+the current replay exporter if they need a fresh capture; this project no
+longer ships a separate offline migration command.
