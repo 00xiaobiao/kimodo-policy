@@ -43,6 +43,24 @@ CACHE_BASE="${CACHE_BASE:-/ai/Yichi/kimodo-policy/simpledata/isaac-cache/playbac
 SESSION="${SESSION_NAME:-replay_${TASK//[^A-Za-z0-9_]/_}}"
 MASTER_LOG="${MASTER_LOG:-/tmp/${SESSION}.log}"
 
+# Hugging Face downloads work reliably via direct HTTPS on the 4090 host.
+# Keep proxy use opt-in so a broken local CONNECT proxy cannot make every
+# scene download look successful while leaving the archive missing.  Set
+# REPLAY_PROXY to an HTTP proxy URL when a proxy is required in another
+# environment.
+REPLAY_PROXY_ENV=()
+if [[ -n "${REPLAY_PROXY:-}" ]]; then
+  REPLAY_PROXY_ENV=(
+    "HTTP_PROXY=$REPLAY_PROXY"
+    "http_proxy=$REPLAY_PROXY"
+    "HTTPS_PROXY=$REPLAY_PROXY"
+    "https_proxy=$REPLAY_PROXY"
+  )
+else
+  # Explicitly clear inherited proxy variables for huggingface_hub/curl.
+  REPLAY_PROXY_ENV=(HTTP_PROXY= http_proxy= HTTPS_PROXY= https_proxy=)
+fi
+
 if [[ ! -f "$SOURCE/meta/episodes.jsonl" ]]; then
   echo "Missing dataset metadata: $SOURCE/meta/episodes.jsonl" >&2
   exit 1
@@ -150,10 +168,7 @@ run_worker() {
         -u CUDA_VISIBLE_DEVICES \
         -u ALL_PROXY \
         -u all_proxy \
-        HTTP_PROXY=http://127.0.0.1:17890 \
-        http_proxy=http://127.0.0.1:17890 \
-        HTTPS_PROXY=http://127.0.0.1:17890 \
-        https_proxy=http://127.0.0.1:17890 \
+        "${REPLAY_PROXY_ENV[@]}" \
         OMNI_KIT_ACCEPT_EULA=YES \
         SIMPLE_DATA_DIR=/ai/Yichi/kimodo-policy/simpledata \
         SIMPLE_ISAAC_GPU="$gpu" \
