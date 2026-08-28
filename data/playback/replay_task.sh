@@ -60,6 +60,10 @@ else
   # Explicitly clear inherited proxy variables for huggingface_hub/curl.
   REPLAY_PROXY_ENV=(HTTP_PROXY= http_proxy= HTTPS_PROXY= https_proxy=)
 fi
+# The shell used to launch a detached queue may export HF_ENDPOINT (for
+# example, a mirror that is unavailable from the 4090).  Use the direct
+# endpoint by default and allow an explicit override for other networks.
+REPLAY_HF_ENDPOINT="${REPLAY_HF_ENDPOINT:-https://huggingface.co}"
 
 if [[ ! -f "$SOURCE/meta/episodes.jsonl" ]]; then
   echo "Missing dataset metadata: $SOURCE/meta/episodes.jsonl" >&2
@@ -169,6 +173,7 @@ run_worker() {
         -u ALL_PROXY \
         -u all_proxy \
         "${REPLAY_PROXY_ENV[@]}" \
+        HF_ENDPOINT="$REPLAY_HF_ENDPOINT" \
         OMNI_KIT_ACCEPT_EULA=YES \
         SIMPLE_DATA_DIR=/ai/Yichi/kimodo-policy/simpledata \
         SIMPLE_ISAAC_GPU="$gpu" \
