@@ -173,7 +173,6 @@ run_worker() {
         -u ALL_PROXY \
         -u all_proxy \
         "${REPLAY_PROXY_ENV[@]}" \
-        HF_ENDPOINT="$REPLAY_HF_ENDPOINT" \
         OMNI_KIT_ACCEPT_EULA=YES \
         SIMPLE_DATA_DIR=/ai/Yichi/kimodo-policy/simpledata \
         SIMPLE_ISAAC_GPU="$gpu" \
@@ -186,7 +185,7 @@ run_worker() {
         SIMPLE_ISAAC_PORTABLE_ROOT="$worker_cache/portable" \
         TORCH_CUDA_ARCH_LIST=8.6+PTX \
         MUJOCO_GL=egl \
-        HF_ENDPOINT=https://hf-mirror.com \
+        HF_ENDPOINT="$REPLAY_HF_ENDPOINT" \
         TORCH_EXTENSIONS_DIR=/ai/Yichi/kimodo-policy/simpledata/torch-extensions \
         WARP_CACHE_PATH="$worker_cache/warp" \
         XDG_CACHE_HOME="$worker_cache/xdg" \
