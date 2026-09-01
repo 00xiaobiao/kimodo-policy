@@ -19,8 +19,8 @@ main:
   sampling:
     mode: "episode_uniform"
 
-  episode_cache_size: 700
-  cpu_workers_num: 24
+  episode_cache_size: 100
+  cpu_workers_num: 8
   precompute_text_embeddings: true
   wandb: "offline"
   wandb_project: "Kimodo-Policy"

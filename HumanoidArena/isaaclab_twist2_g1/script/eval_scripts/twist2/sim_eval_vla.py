@@ -11,13 +11,14 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from task_runtime_profiles import apply_task_runtime_profile
 
 ISAACLAB_ROOT = Path(__file__).resolve().parents[3]
 PROJECT_ROOT = str(ISAACLAB_ROOT)
 os.environ["PROJECT_ROOT"] = PROJECT_ROOT
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
+
+from task_runtime_profiles import apply_task_runtime_profile
 
 from isaaclab.app import AppLauncher
 
@@ -67,7 +68,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lerobot_server_verify_ssl", action="store_true", default=False)
     parser.add_argument("--lerobot_gripper_threshold", type=float, default=0.5)
     parser.add_argument("--robot_type", type=str, default="unitree_g1_refpose_v3_1")
-    parser.add_argument("--vla_max_root_delta_deg", type=float, default=0.0)
+    parser.add_argument(
+        "--vla_max_root_delta_deg",
+        type=float,
+        default=0.0,
+        help="Per-control-step root rotation clamp; 0 disables the safety clamp",
+    )
     parser.add_argument("--result_json", type=str, default="")
     parser.add_argument("--success_video_dir", type=str, default="")
     parser.add_argument("--failure_video_dir", type=str, default="")
@@ -108,6 +114,32 @@ def _should_log_reward_step(args, step_idx: int) -> bool:
     if every <= 0:
         return False
     return step_idx == 1 or step_idx % every == 0
+
+
+def _cuda_device_index(device: str) -> int | None:
+    token = str(device or "").strip().lower()
+    if token.isdigit():
+        return int(token)
+    if token.startswith("cuda:"):
+        gpu_idx = token.split(":", 1)[1]
+        if gpu_idx.isdigit():
+            return int(gpu_idx)
+    return None
+
+
+def _append_unique_kit_arg(args, kit_arg: str) -> None:
+    existing_kit_args = (getattr(args, "kit_args", "") or "").split()
+    if kit_arg not in existing_kit_args:
+        args.kit_args = " ".join([*existing_kit_args, kit_arg]).strip()
+
+
+def _configure_renderer_gpu(args) -> None:
+    """Keep Isaac Sim's renderer and physics device aligned with --device."""
+    gpu_idx = _cuda_device_index(getattr(args, "device", ""))
+    if gpu_idx is None:
+        return
+    _append_unique_kit_arg(args, f"--/renderer/activeGpu={gpu_idx}")
+    _append_unique_kit_arg(args, f"--/physics/cudaDevice={gpu_idx}")
 
 
 def _ensure_unique_multi_image_shm_name(args) -> str:
@@ -203,10 +235,14 @@ def _notify_action_provider_env_reset(action_provider):
     _disable_action_provider_internal_recording(action_provider)
 
 
-def _capture_front_camera_rgb(env):
+def _capture_front_camera_rgb(env, *, refresh: bool = False):
     try:
         if "front_camera" not in env.scene.keys():
             return None
+        # Refresh the render target before every recorded control step so the
+        # video contains consecutive observations rather than a cached frame.
+        if refresh:
+            env.sim.render()
         camera = env.scene["front_camera"]
         rgb = camera.data.output.get("rgb")
         if rgb is None:
@@ -626,7 +662,7 @@ def _run_episode_once(simulation_app, env, env_cfg, action_provider, controller,
         controller.start()
 
         if recorder is not None:
-            initial_frame = _capture_front_camera_rgb(env)
+            initial_frame = _capture_front_camera_rgb(env, refresh=True)
             if initial_frame is not None:
                 recorder.add_frame(initial_frame)
 
@@ -635,7 +671,7 @@ def _run_episode_once(simulation_app, env, env_cfg, action_provider, controller,
             step_idx += 1
 
             if recorder is not None:
-                frame = _capture_front_camera_rgb(env)
+                frame = _capture_front_camera_rgb(env, refresh=True)
                 if frame is not None:
                     recorder.add_frame(frame)
 
@@ -803,10 +839,8 @@ def main() -> int:
     _ensure_unique_multi_image_shm_name(args_cli)
     args_cli.enable_cameras = True
     args_cli.multi_gpu = False
-    disable_multi_gpu_arg = "--/renderer/multiGpu/enabled=False"
-    existing_kit_args = (getattr(args_cli, "kit_args", "") or "").split()
-    if disable_multi_gpu_arg not in existing_kit_args:
-        args_cli.kit_args = " ".join([*existing_kit_args, disable_multi_gpu_arg]).strip()
+    _append_unique_kit_arg(args_cli, "--/renderer/multiGpu/enabled=False")
+    _configure_renderer_gpu(args_cli)
     _normalize_control_routing(args_cli)
     apply_task_runtime_profile(args_cli)
     app_launcher = AppLauncher(args_cli)

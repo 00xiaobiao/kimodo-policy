@@ -14,6 +14,14 @@ from evaluation.humanoidarena_server import (
     _resolve_rtc_parameters,
     resample_hand_binary_chunk,
 )
+from evaluation import humanoidarena_server as arena_server
+from evaluation.simple_server import (
+    _make_simple_runtime_class,
+    _reset_episode_step_counters,
+    _resolve_future_root_boundary,
+)
+
+KimodoSimpleHumanoidArenaRuntime = _make_simple_runtime_class(arena_server)
 from motion.g1_reference import HumanoidArenaActionDecoder
 from motion.representation.kimodo_motionrep import KimodoMotionRep
 from skeleton.definitions import G1Skeleton34
@@ -142,8 +150,8 @@ def _payload():
     }
 
 
-def _runtime(codec):
-    runtime = KimodoHumanoidArenaRuntime.__new__(KimodoHumanoidArenaRuntime)
+def _runtime(codec, runtime_cls=KimodoHumanoidArenaRuntime):
+    runtime = runtime_cls.__new__(runtime_cls)
     runtime.deterministic_eval = False
     runtime.device = torch.device("cpu")
     runtime.dtype = torch.float32
@@ -216,6 +224,25 @@ def _assert_snapshot(test_case, runtime, expected):
 
 
 class ServerTransactionTest(unittest.TestCase):
+    def test_reset_episode_step_counters_clears_nested_timelimit(self):
+        class Wrapper:
+            def __init__(self, env=None, elapsed=None):
+                self.env = env
+                if elapsed is not None:
+                    self._elapsed_steps = elapsed
+
+        inner = Wrapper(elapsed=17)
+        outer = Wrapper(inner, elapsed=271)
+        _reset_episode_step_counters(outer)
+        self.assertEqual(outer._elapsed_steps, 0)
+        self.assertEqual(inner._elapsed_steps, 0)
+
+    def test_arena_runtime_has_no_simple_only_hooks(self):
+        self.assertFalse(
+            hasattr(KimodoHumanoidArenaRuntime, "_resolve_prediction_root_boundary")
+        )
+        self.assertFalse(hasattr(KimodoHumanoidArenaRuntime, "_after_action_encoded"))
+
     def test_rtc_parameters_clamp_to_unexecuted_tail(self):
         resolved = _resolve_rtc_parameters(
             True,
@@ -247,7 +274,7 @@ class ServerTransactionTest(unittest.TestCase):
                 ramp_power=1.0,
             )
 
-    def test_action_conversion_uses_current_diffusion_window_root_boundary(self):
+    def test_arena_action_conversion_preserves_history_root_boundary(self):
         codec = _FakeActionCodec()
         runtime = _runtime(codec)
 
@@ -255,6 +282,55 @@ class ServerTransactionTest(unittest.TestCase):
 
         torch.testing.assert_close(
             codec.received_previous_root, torch.tensor([9.0, 8.0, 7.0])
+        )
+
+    def test_simple_action_conversion_uses_future_root_extrapolation_boundary(self):
+        codec = _FakeActionCodec()
+        runtime = _runtime(codec, KimodoSimpleHumanoidArenaRuntime)
+        runtime.max_navigation_speed = 100.0
+        runtime.model = _FakePolicy()
+        runtime.infer(_payload())
+        torch.testing.assert_close(
+            codec.received_previous_root, torch.tensor([-0.2, -0.1, 0.0])
+        )
+
+    def test_simple_history_root_output_cannot_change_action_boundary(self):
+        codec = _FakeActionCodec()
+        runtime = _runtime(codec, KimodoSimpleHumanoidArenaRuntime)
+        runtime.max_navigation_speed = 100.0
+        runtime.model = _FakePolicy()
+        runtime.infer(_payload())
+        first_boundary = codec.received_previous_root.clone()
+        runtime.model = _FakePolicy()
+        runtime.model.predict_future = lambda **kwargs: {
+            "motion_features": torch.tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]]),
+            "local_rot_mats": torch.eye(3).reshape(1, 1, 3, 3).repeat(2, 1, 1, 1),
+            "root_positions": torch.tensor([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]),
+            "history_last_root_position": torch.tensor([1000.0, -1000.0, 500.0]),
+            "hand_binary": torch.tensor([[0.0, 1.0], [1.0, 0.0]]),
+        }
+        runtime.infer(_payload())
+        torch.testing.assert_close(codec.received_previous_root, first_boundary)
+
+    def test_simple_navigation_safety_failure_restores_runtime_state(self):
+        codec = _FakeActionCodec()
+        runtime = _runtime(codec, KimodoSimpleHumanoidArenaRuntime)
+        runtime.max_navigation_speed = 1.0
+        expected = _snapshot(runtime)
+
+        with self.assertRaisesRegex(ValueError, "navigation speed"):
+            runtime.infer(_payload())
+
+        _assert_snapshot(self, runtime, expected)
+
+    def test_future_root_boundary_extrapolates_first_velocity(self):
+        torch.testing.assert_close(
+            _resolve_future_root_boundary(torch.tensor([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]])),
+            torch.tensor([-0.2, -0.1, 0.0]),
+        )
+        torch.testing.assert_close(
+            _resolve_future_root_boundary(torch.tensor([[0.1, 0.2, 0.3]])),
+            torch.tensor([0.1, 0.2, 0.3]),
         )
 
     def test_observation_state_history_resamples_50hz_to_30hz(self):

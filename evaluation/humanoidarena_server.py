@@ -836,6 +836,30 @@ class KimodoHumanoidArenaRuntime:
                 # measured from the history endpoint generated in this same
                 # diffusion window, never from the previous window's gauge.
                 motion_previous_root_position = history_last_root_position
+                if _env_flag("KIMODO_SERVER_TRACE"):
+                    future0 = full_source_root_positions[0].reshape(3)
+                    print(
+                        "[KIMODO_SERVER_TRACE] "
+                        f"history_boundary={history_last_root_position.numpy().tolist()} "
+                        f"future0={future0.numpy().tolist()} "
+                        f"delta={(future0 - history_last_root_position).numpy().tolist()}",
+                        flush=True,
+                    )
+            # Optional diagnostic/fallback mode: action conversion starts from
+            # the first predicted root of the same window, eliminating a
+            # generated history/future boundary jump.  Keep the default path
+            # unchanged so this can be compared directly in evaluation.
+            if (
+                _env_flag("KIMODO_SERVER_ANCHOR_ROOT")
+                and full_source_root_positions.shape[0] > 0
+            ):
+                motion_previous_root_position = full_source_root_positions[0].reshape(3).clone()
+                if _env_flag("KIMODO_SERVER_TRACE"):
+                    print(
+                        "[KIMODO_SERVER_TRACE] anchor_root_previous="
+                        f"{motion_previous_root_position.numpy().tolist()}",
+                        flush=True,
+                    )
             future_features, source_local_rot_mats, source_root_positions = (
                 _select_execution_prefix(
                     future_features,
@@ -905,6 +929,13 @@ class KimodoHumanoidArenaRuntime:
             # Materialize the response before committing any recurrent state.  This
             # also keeps conversion failures transactional.
             action_chunk_numpy = action_chunk.detach().cpu().numpy().astype(np.float32)
+            if _env_flag("KIMODO_SERVER_TRACE") and action_chunk_numpy.shape[0] > 0:
+                print(
+                    "[KIMODO_SERVER_TRACE] "
+                    f"encoded_first_action={action_chunk_numpy[0, :9].tolist()} "
+                    f"encoded_max_xy_norm={float(np.linalg.norm(action_chunk_numpy[:, :2], axis=1).max()):.6f}",
+                    flush=True,
+                )
             next_previous_local_rot_mat = source_local_rot_mats[-1].clone()
             next_previous_root_position = source_root_positions[-1].clone()
             if self.deterministic_eval:
