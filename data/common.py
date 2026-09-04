@@ -1076,6 +1076,13 @@ class BaseSourceAdapter:
             mask[representation.slice_dict[feature_name]] = True
         return mask
 
+    @property
+    def terminal_hold_frames(self) -> int:
+        return 0
+
+    def _last_sample_cut(self, target_length: int) -> int:
+        return int(target_length) + self.terminal_hold_frames - self.action_chunk
+
     def _record(
         self,
         *,
@@ -1093,7 +1100,7 @@ class BaseSourceAdapter:
         target_length = int(
             round((source_length - 1) * self.target_fps / float(source_fps))
         ) + 1
-        last_cut = target_length - self.action_chunk
+        last_cut = self._last_sample_cut(target_length)
         if last_cut < 0:
             return
         if not data_path.is_file() or not video_path.is_file():
@@ -1176,6 +1183,26 @@ class BaseSourceAdapter:
             target_hand_valid, episode.source_fps, episode.target_fps
         )
 
+        terminal_hold_frames = self.terminal_hold_frames
+        if terminal_hold_frames:
+            def append_terminal_hold(values: torch.Tensor) -> torch.Tensor:
+                if values.shape[0] == 0:
+                    raise ValueError("Cannot append a terminal hold to an empty sequence")
+                repeated_shape = (terminal_hold_frames, *values.shape[1:])
+                return torch.cat(
+                    (values, values[-1:].expand(repeated_shape)),
+                    dim=0,
+                )
+
+            observed_local_rot = append_terminal_hold(observed_local_rot)
+            observed_root = append_terminal_hold(observed_root)
+            target_local_rot = append_terminal_hold(target_local_rot)
+            target_root = append_terminal_hold(target_root)
+            observed_hand = append_terminal_hold(observed_hand)
+            target_hand = append_terminal_hold(target_hand)
+            observed_hand_valid = append_terminal_hold(observed_hand_valid)
+            target_hand_valid = append_terminal_hold(target_hand_valid)
+
         representation = self._motion_representation()
         observed_motion = representation(
             observed_local_rot, observed_root, to_normalize=False
@@ -1183,7 +1210,15 @@ class BaseSourceAdapter:
         target_motion = representation(
             target_local_rot, target_root, to_normalize=False
         ).cpu()
-        expected_length = episode.target_length
+        if terminal_hold_frames:
+            terminal_start = episode.target_length
+            observed_motion[terminal_start:] = observed_motion[
+                terminal_start - 1 : terminal_start
+            ]
+            target_motion[terminal_start:] = target_motion[
+                terminal_start - 1 : terminal_start
+            ]
+        expected_length = episode.target_length + terminal_hold_frames
         if observed_motion_valid is None:
             observed_motion_valid = torch.ones_like(
                 observed_motion, dtype=torch.bool
@@ -1208,6 +1243,10 @@ class BaseSourceAdapter:
                     episode.source_fps,
                     episode.target_fps,
                 )
+                if terminal_hold_frames:
+                    observed_motion_valid = append_terminal_hold(
+                        observed_motion_valid
+                    )
             else:
                 raise ValueError(
                     "Observed motion feature mask must be one- or two-dimensional"

@@ -18,6 +18,10 @@ class SimpleReplayAdapter(BaseSourceAdapter):
     source_name = SOURCE_SIMPLE
 
     @property
+    def terminal_hold_frames(self) -> int:
+        return max(0, self.action_chunk - 1)
+
+    @property
     def hand_control_mode(self) -> str:
         mode = str(getattr(self, "selection", {}).get("hand_control_mode", "binary")).lower()
         if mode not in {"binary", "continuous"}:

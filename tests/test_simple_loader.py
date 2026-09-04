@@ -103,6 +103,8 @@ class SimpleReplayAdapterTest(unittest.TestCase):
             self.assertEqual(episode.task_id, "Simple::G1WholebodyBendPickTeleop-v0")
             self.assertEqual(episode.instruction, "Pick up the object.")
             self.assertEqual(episode.metadata, {"row_start": 0, "row_end": 4, "sample_stride": 1})
+            self.assertEqual(episode.target_length, 3)
+            self.assertEqual(episode.sample_count, 3)
 
     def test_discovery_skips_episode_without_completed_validation(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -240,6 +242,88 @@ class SimpleReplayAdapterTest(unittest.TestCase):
         np.testing.assert_allclose(finalize_args[6], expected_target)
         self.assertEqual(
             adapter._finalize_motion.call_args.kwargs["hand_resampling"], "linear"
+        )
+
+    def test_finalize_motion_appends_success_terminal_hold_before_representation(self):
+        adapter = SimpleReplayAdapter.__new__(SimpleReplayAdapter)
+        adapter.action_chunk = 3
+        adapter.target_fps = 30
+        representation = MagicMock()
+
+        def encode_motion(local_rotations, root_positions, to_normalize=False):
+            self.assertFalse(to_normalize)
+            encoded = torch.zeros(root_positions.shape[0], 417)
+            encoded[:, :3] = root_positions
+            encoded[:, 3] = torch.arange(root_positions.shape[0])
+            return encoded
+
+        representation.side_effect = encode_motion
+        adapter._motion_representation = MagicMock(return_value=representation)
+        episode = EpisodeRecord(
+            source=SOURCE_SIMPLE,
+            task_id="Simple::task",
+            task_name="task",
+            instruction="Pick up the object.",
+            episode_id="task:000000",
+            data_path=Path("episode.parquet"),
+            source_length=2,
+            source_fps=30,
+            target_fps=30,
+            video_path=Path("episode.mp4"),
+            video_from_timestamp=0,
+            first_cut=0,
+            sample_count=2,
+            metadata={"row_start": 0, "row_end": 2},
+        )
+        local_rotations = torch.eye(3).reshape(1, 1, 3, 3).repeat(2, 1, 1, 1)
+        observed_root = torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+        target_root = torch.tensor([[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]])
+        observed_hand = torch.tensor([[0.0, 0.0], [0.25, 0.5]])
+        target_hand = torch.tensor([[0.0, 0.0], [0.75, 1.0]])
+        hand_valid = torch.ones(2, 2, dtype=torch.bool)
+
+        result = adapter._finalize_motion(
+            episode,
+            local_rotations,
+            observed_root,
+            local_rotations,
+            target_root,
+            observed_hand,
+            target_hand,
+            hand_valid,
+            hand_valid,
+            observed_motion_valid=torch.ones(417, dtype=torch.bool),
+            target_motion_source="action",
+            hand_resampling="linear",
+        )
+
+        self.assertEqual(tuple(result["target_motion"].shape), (4, 417))
+        torch.testing.assert_close(
+            result["target_motion"][:, 0],
+            torch.tensor([0.0, 2.0, 2.0, 2.0]),
+        )
+        torch.testing.assert_close(
+            result["target_motion"][:, 3],
+            torch.tensor([0.0, 1.0, 1.0, 1.0]),
+        )
+        torch.testing.assert_close(
+            result["target_hand"],
+            torch.tensor(
+                [[0.0, 0.0], [0.75, 1.0], [0.75, 1.0], [0.75, 1.0]]
+            ),
+        )
+        self.assertTrue(result["target_hand_valid"].all())
+        target_representation_call = representation.call_args_list[1]
+        torch.testing.assert_close(
+            target_representation_call.args[1],
+            torch.tensor(
+                [
+                    [0.0, 0.0, 0.0],
+                    [2.0, 0.0, 0.0],
+                    [2.0, 0.0, 0.0],
+                    [2.0, 0.0, 0.0],
+                ]
+            ),
         )
 
 

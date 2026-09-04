@@ -80,7 +80,7 @@ class MultiSourceG1Dataset(data.Dataset):
                 )
             for episode in adapter.episodes:
                 episode.metadata["sample_stride"] = self.sample_stride
-                last_cut = episode.target_length - self.action_chunk
+                last_cut = adapter._last_sample_cut(episode.target_length)
                 episode.sample_count = last_cut // self.sample_stride + 1
                 existing = self._task_instructions.get(episode.task_id)
                 if existing is not None and existing != episode.instruction:

@@ -2,10 +2,81 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
+
+usage() {
+  cat <<'EOF'
+Train the 4-layer ControlNet continuous-hand experiment on one SIMPLE task.
+
+Usage:
+  bash scripts/experiments/simple_single_gbs64_20w_controlnet4_detach_true_mse_continuous_hand.sh [TASK]
+
+TASK defaults to G1WholebodyXMovePickTeleop-v0. The expected directory is
+${KIMODO_SIMPLE_ROOT:-/data/local-data/data/Humanoid/Simple}/TASK/episode_XXXXXX.
+EOF
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
 
 TASK="${1:-${KIMODO_SIMPLE_TASK:-G1WholebodyXMovePickTeleop-v0}}"
-export KIMODO_CONFIG="${KIMODO_CONFIG:-${SCRIPT_DIR}/simple_single_gbs64_20w_controlnet4_detach_true_mse_continuous_hand.yaml}"
-export KIMODO_SIMPLE_RUN_NAME="${KIMODO_SIMPLE_RUN_NAME:-simple_single_gbs64_20w_controlnet4_detach_true_mse_continuous_hand_${TASK}}"
-export KIMODO_SIMPLE_SAVE_ROOT="${KIMODO_SIMPLE_SAVE_ROOT:-log/experiments/${KIMODO_SIMPLE_RUN_NAME}/}"
+if [[ -z "${TASK}" || "${TASK}" == */* ]]; then
+  echo "TASK must be one SIMPLE task directory name, got: ${TASK}" >&2
+  exit 2
+fi
 
-exec bash "${SCRIPT_DIR}/simple_single_gbs64_20w_controlnet4_detach_true_mse.sh" "${TASK}"
+if [[ -n "${KIMODO_ENV:-}" ]]; then
+  ACCELERATE_BIN="${KIMODO_ENV}/bin/accelerate"
+else
+  ACCELERATE_BIN="$(command -v accelerate || true)"
+fi
+if [[ -z "${ACCELERATE_BIN}" || ! -x "${ACCELERATE_BIN}" ]]; then
+  echo "accelerate was not found; activate the training environment or set KIMODO_ENV=/path/to/env" >&2
+  exit 1
+fi
+
+CONFIG_PATH="${KIMODO_CONFIG:-${SCRIPT_DIR}/simple_single_gbs64_20w_controlnet4_detach_true_mse_continuous_hand.yaml}"
+if [[ ! -f "${CONFIG_PATH}" ]]; then
+  echo "Training config does not exist: ${CONFIG_PATH}" >&2
+  exit 2
+fi
+
+SIMPLE_ROOT="${KIMODO_SIMPLE_ROOT:-/data/local-data/data/Humanoid/Simple}"
+if [[ ! -d "${SIMPLE_ROOT}/${TASK}" ]]; then
+  echo "SIMPLE task directory does not exist: ${SIMPLE_ROOT}/${TASK}" >&2
+  exit 2
+fi
+
+GPU_LIST="${KIMODO_GPUS:-0,1,2,3}"
+IFS=',' read -r -a GPU_IDS <<< "${GPU_LIST}"
+NUM_PROCESSES="${#GPU_IDS[@]}"
+if (( NUM_PROCESSES < 1 )); then
+  echo "KIMODO_GPUS must contain at least one GPU index" >&2
+  exit 2
+fi
+
+RUN_NAME="simple_single_gbs64_20w_controlnet4_detach_true_mse_continuous_hand_${TASK}"
+export KIMODO_SIMPLE_TASK="${TASK}"
+export KIMODO_SIMPLE_ROOT="${SIMPLE_ROOT}"
+export KIMODO_SIMPLE_RUN_NAME="${KIMODO_SIMPLE_RUN_NAME:-${RUN_NAME}}"
+export KIMODO_SIMPLE_SAVE_ROOT="${KIMODO_SIMPLE_SAVE_ROOT:-log/experiments/${KIMODO_SIMPLE_RUN_NAME}/}"
+export CUDA_VISIBLE_DEVICES="${GPU_LIST}"
+export TOKENIZERS_PARALLELISM=false
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
+
+echo "SIMPLE task: ${TASK}"
+echo "SIMPLE root: ${SIMPLE_ROOT}"
+echo "GPUs: ${GPU_LIST}"
+echo "Config: ${CONFIG_PATH}"
+echo "Save root: ${KIMODO_SIMPLE_SAVE_ROOT}"
+
+cd "${PROJECT_ROOT}"
+exec "${ACCELERATE_BIN}" launch \
+  --multi_gpu \
+  --num_processes "${NUM_PROCESSES}" \
+  --mixed_precision bf16 \
+  --main_process_port "${KIMODO_MASTER_PORT:-29659}" \
+  train.py \
+  --config "${CONFIG_PATH}"
