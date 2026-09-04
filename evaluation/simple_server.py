@@ -34,11 +34,18 @@ from typing import Any
 
 import numpy as np
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SIMPLE_ROOT = PROJECT_ROOT / "SIMPLE"
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+from data.simple_hand import (
+    SIMPLE_LEFT_HAND_CLOSE,
+    SIMPLE_RIGHT_HAND_CLOSE,
+    project_hand_closure,
+)
+
+
+SIMPLE_ROOT = PROJECT_ROOT / "SIMPLE"
 
 # MuJoCo/SIMPLE use this order, while Kimodo's protocol uses the interleaved
 # canonical order.  Keeping the names here makes the adapter auditable and
@@ -77,25 +84,30 @@ RIGHT_HAND_NAMES = (
     "right_hand_middle_1_joint",
 )
 
-# SIMPLE's 36-D WBC command stores arms first, then left thumb/middle/index and
-# right hand, followed by waist roll/pitch/yaw, height and navigation.
+# SIMPLE's 36-D policy command uses named WBC order for each hand:
+# thumb_0, thumb_1, thumb_2, index_0, index_1, middle_0, middle_1.  The
+# MuJoCo observation/actuator order is thumb, middle, index and is converted at
+# the SIMPLE/WBC boundary below.
 LEFT_HAND_CLOSE = np.asarray(
     [0.3523, -0.0964, 0.2790, -0.5058, -1.1950, -0.5389, -0.9835],
     dtype=np.float32,
 )
 RIGHT_HAND_CLOSE = np.asarray(
-    [0.02331954, -0.02398408, -0.22170663, 0.25662386, 1.3371105, 0.3085137, 0.9805285],
+    # Dominant closed-hand target in the SIMPLE training demonstrations.
+    [-0.5, -0.7, -0.7, 1.5, 1.5, 0.6, 1.5],
     dtype=np.float32,
 )
 
 # Hand labels in the Kimodo checkpoint are discrete states, not velocities.
-# The SIMPLE WBC nevertheless needs the corresponding target to be present for
-# multiple 50 Hz control cycles.  These parameters implement a small
-# transition controller on the SIMPLE side only.  A two-frame confirmation is
-# about 67 ms at the checkpoint's 30 Hz prediction rate and filters isolated
-# diffusion threshold noise without delaying a real event appreciably.
-_SIMPLE_HAND_EVENT_CONFIRM_FRAMES = 2
-_SIMPLE_HAND_MIN_HOLD_SECONDS = 0.4
+# SIMPLE debounces and latches those events, then repeats the full joint target
+# while its position-controlled fingers complete the physical motion.  Closing
+# stays responsive, while opening needs agreement from two replans so one noisy
+# future chunk cannot immediately release a grasp.
+_SIMPLE_HAND_CLOSE_CONFIRM_FRAMES = 2
+_SIMPLE_HAND_OPEN_CONFIRM_FRAMES = 6
+_SIMPLE_HAND_OPEN_CONFIRM_REPLANS = 2
+_SIMPLE_HAND_MIN_CLOSE_SECONDS = 1.0
+_SIMPLE_HAND_MIN_OPEN_SECONDS = 0.4
 _SIMPLE_HAND_MAX_HOLD_SECONDS = 2.0
 _SIMPLE_HAND_OPEN_POSITION_TOL = 0.08
 _SIMPLE_HAND_VELOCITY_TOL = 0.20
@@ -234,9 +246,36 @@ def append_state_history(
     return state, first_heading
 
 
+def measured_hand_closure_from_proprio(proprio: dict[str, Any]) -> np.ndarray:
+    """Project one SIMPLE MuJoCo hand observation to left/right closure."""
+    if not isinstance(proprio, dict):
+        raise ValueError("SIMPLE proprio must be a dictionary")
+    try:
+        left = _mjcf_hand_to_wbc(proprio["left_hand_q"])
+        right = _mjcf_hand_to_wbc(proprio["right_hand_q"])
+    except KeyError as exc:
+        raise ValueError(f"SIMPLE proprio is missing {exc.args[0]!r}") from exc
+    hand_q = np.concatenate((left, right), axis=0).reshape(1, 14)
+    closure = project_hand_closure(hand_q, name="measured SIMPLE hand q")[0]
+    if closure.shape != (2,) or not np.isfinite(closure).all():
+        raise ValueError("measured SIMPLE hand closure must be finite with shape (2,)")
+    return closure.astype(np.float32, copy=False)
+
+
+def append_hand_closure_history(
+    hand_buffer: list[np.ndarray], proprio: dict[str, Any]
+) -> np.ndarray:
+    """Append one 50 Hz measured SIMPLE hand frame to a pending segment."""
+    closure = measured_hand_closure_from_proprio(proprio)
+    hand_buffer.append(closure)
+    return closure
+
+
 def arena_action_to_simple(
     action_chunk: np.ndarray,
     control_fps: float = 50.0,
+    *,
+    hand_control_mode: str = "binary",
 ) -> np.ndarray:
     """Convert Kimodo's 40-D reference action to SIMPLE's 36-D WBC command."""
     actions = np.asarray(action_chunk, dtype=np.float32)
@@ -246,6 +285,12 @@ def arena_action_to_simple(
         raise ValueError(f"expected Kimodo action shape (T, 40), got {actions.shape}")
     if not np.isfinite(actions).all():
         raise ValueError("Kimodo action contains NaN or Inf")
+    hand_control_mode = str(hand_control_mode).lower()
+    if hand_control_mode not in {"binary", "continuous"}:
+        raise ValueError(
+            "hand_control_mode must be 'binary' or 'continuous', "
+            f"got {hand_control_mode!r}"
+        )
 
     canonical_index = {name: i for i, name in enumerate(CANONICAL_NAMES)}
     body_index = {name: i for i, name in enumerate(BODY_NAMES)}
@@ -260,8 +305,13 @@ def arena_action_to_simple(
         source[frame, 29] = q_canonical[canonical_index["waist_pitch_joint"]]
         source[frame, 30] = q_canonical[canonical_index["waist_yaw_joint"]]
 
-        left_hand = LEFT_HAND_CLOSE if action[38] >= 0.5 else np.zeros(7, dtype=np.float32)
-        right_hand = RIGHT_HAND_CLOSE if action[39] >= 0.5 else np.zeros(7, dtype=np.float32)
+        if hand_control_mode == "binary":
+            left_hand = LEFT_HAND_CLOSE if action[38] >= 0.5 else np.zeros(7, dtype=np.float32)
+            right_hand = RIGHT_HAND_CLOSE if action[39] >= 0.5 else np.zeros(7, dtype=np.float32)
+        else:
+            closure = np.clip(action[38:40], 0.0, 1.0)
+            left_hand = closure[0] * SIMPLE_LEFT_HAND_CLOSE
+            right_hand = closure[1] * SIMPLE_RIGHT_HAND_CLOSE
         source[frame, 0:3] = left_hand[:3]
         source[frame, 3:5] = left_hand[5:7]
         source[frame, 5:7] = left_hand[3:5]
@@ -519,8 +569,22 @@ class _SimpleRuntimeMixin:
                 "max_navigation_speed must be finite and positive, got "
                 f"{self.max_navigation_speed}"
             )
+        checkpoint_config = json.loads(
+            (Path(args.checkpoint).expanduser().resolve() / "config.json").read_text()
+        )
+        self.simple_hand_control_mode = str(
+            checkpoint_config.get("model", {}).get("hand_control_mode", "binary")
+        ).lower()
+        if self.simple_hand_control_mode not in {"binary", "continuous"}:
+            raise ValueError(
+                "Checkpoint model.hand_control_mode must be 'binary' or 'continuous', "
+                f"got {self.simple_hand_control_mode!r}"
+            )
         self._init_simple_hand_fsm()
         super().__init__(args)
+        # The shared Arena runtime intentionally defaults to binary. Only this
+        # SIMPLE wrapper promotes an explicitly marked checkpoint to continuous.
+        self.model.config.hand_control_mode = self.simple_hand_control_mode
 
     def _init_simple_hand_fsm(self) -> None:
         """Initialize the SIMPLE-only per-hand transition controller.
@@ -528,7 +592,9 @@ class _SimpleRuntimeMixin:
         The method is deliberately lazy-safe: several transaction tests build
         the runtime with ``__new__`` and therefore bypass ``__init__``.
         """
-        self.simple_hand_fsm_enabled = True
+        self.simple_hand_fsm_enabled = (
+            getattr(self, "simple_hand_control_mode", "binary") == "binary"
+        )
         self.simple_hand_state = np.zeros(2, dtype=bool)
         self.simple_hand_phase = ["stable_open", "stable_open"]
         self.simple_hand_hold_steps = np.zeros(2, dtype=np.int64)
@@ -536,8 +602,19 @@ class _SimpleRuntimeMixin:
         self.simple_hand_stable_votes = np.zeros(2, dtype=np.int64)
         self.simple_hand_candidate_state = np.zeros(2, dtype=bool)
         self.simple_hand_candidate_count = np.zeros(2, dtype=np.int64)
+        self.simple_hand_open_votes = np.zeros(2, dtype=np.int64)
+        self.simple_hand_pending_state = np.zeros(2, dtype=bool)
+        self.simple_hand_pending_steps = np.full(2, -1, dtype=np.int64)
         self.simple_hand_last_chunk_steps = 0
         self.simple_hand_transition_indices = np.full(2, -1, dtype=np.int64)
+        # Continuous SIMPLE checkpoints condition on measured hand closure.
+        # Keep the raw 50 Hz stream separately from the model's predicted hand
+        # history so the two signals cannot be confused.
+        self.simple_observed_hand_closure_history = np.empty((0, 2), dtype=np.float32)
+        # Continuous hand commands are queued independently from the body
+        # prefix.  This preserves a predicted close/open event that lies in
+        # the unexecuted tail when the body is replanned every 0.5 seconds.
+        self.simple_continuous_hand_queue = np.empty((0, 2), dtype=np.float32)
 
     def _ensure_simple_hand_fsm(self) -> None:
         if not hasattr(self, "simple_hand_fsm_enabled"):
@@ -558,10 +635,20 @@ class _SimpleRuntimeMixin:
             self.simple_hand_candidate_state = np.zeros(2, dtype=bool)
         if not hasattr(self, "simple_hand_candidate_count"):
             self.simple_hand_candidate_count = np.zeros(2, dtype=np.int64)
+        if not hasattr(self, "simple_hand_open_votes"):
+            self.simple_hand_open_votes = np.zeros(2, dtype=np.int64)
+        if not hasattr(self, "simple_hand_pending_state"):
+            self.simple_hand_pending_state = self.simple_hand_state.copy()
+        if not hasattr(self, "simple_hand_pending_steps"):
+            self.simple_hand_pending_steps = np.full(2, -1, dtype=np.int64)
         if not hasattr(self, "simple_hand_last_chunk_steps"):
             self.simple_hand_last_chunk_steps = 0
         if not hasattr(self, "simple_hand_transition_indices"):
             self.simple_hand_transition_indices = np.full(2, -1, dtype=np.int64)
+        if not hasattr(self, "simple_observed_hand_closure_history"):
+            self.simple_observed_hand_closure_history = np.empty((0, 2), dtype=np.float32)
+        if not hasattr(self, "simple_continuous_hand_queue"):
+            self.simple_continuous_hand_queue = np.empty((0, 2), dtype=np.float32)
 
     def _simple_hand_target_pose(self, side: int, closed: bool) -> np.ndarray:
         if not closed:
@@ -651,23 +738,37 @@ class _SimpleRuntimeMixin:
                 self.simple_hand_stable_votes[side] = 0
                 self.simple_hand_candidate_count[side] = 0
 
-    def _resolve_simple_hand_prefix(self, source_hand: Any) -> tuple[Any, np.ndarray]:
-        """Apply event locking to the executed source-rate hand prefix.
+    def _resolve_simple_hand_prefix(
+        self, source_hand: Any, detection_hand: Any | None = None
+    ) -> tuple[Any, np.ndarray]:
+        """Debounce hand events and schedule future close events by model time.
 
-        Only this prefix is inspected.  Predictions in the unexecuted tail of
-        a 50-frame diffusion chunk must never trigger a current close/open
-        action.
+        A confirmed close in the unexecuted prediction tail becomes a pending
+        event with a source-frame countdown.  Each executed prefix consumes
+        that countdown, so replanning cannot move the event earlier or defer it
+        forever.  Opening needs agreement from consecutive replans whose full
+        prediction windows no longer contain a confirmed close segment.
         """
         import torch
 
         hand = torch.as_tensor(source_hand, dtype=torch.float32).cpu()
         if hand.ndim != 2 or hand.shape[1] != 2:
             raise ValueError(f"Expected source hand prefix [T,2], got {tuple(hand.shape)}")
+        detection = hand if detection_hand is None else torch.as_tensor(
+            detection_hand, dtype=torch.float32
+        ).cpu()
+        if (
+            detection.ndim != 2
+            or detection.shape[1] != 2
+            or detection.shape[0] < hand.shape[0]
+        ):
+            raise ValueError(
+                "Expected complete hand prediction [T,2] with T >= executed prefix, "
+                f"got {tuple(detection.shape)} for prefix {tuple(hand.shape)}"
+            )
         effective = torch.zeros_like(hand)
         transitions = np.full(2, -1, dtype=np.int64)
-        confirm = _SIMPLE_HAND_EVENT_CONFIRM_FRAMES
         control_fps = max(float(getattr(self, "control_fps", 50.0)), 1.0)
-        min_hold = max(1, int(round(_SIMPLE_HAND_MIN_HOLD_SECONDS * control_fps)))
         for side in range(2):
             phase = self.simple_hand_phase[side]
             current = bool(self.simple_hand_state[side])
@@ -675,10 +776,46 @@ class _SimpleRuntimeMixin:
                 effective[:, side] = float(current)
                 continue
 
+            pending_steps = int(self.simple_hand_pending_steps[side])
+            if pending_steps >= 0:
+                pending_state = bool(self.simple_hand_pending_state[side])
+                if pending_state == current:
+                    self.simple_hand_pending_steps[side] = -1
+                elif pending_steps >= hand.shape[0]:
+                    self.simple_hand_pending_steps[side] = pending_steps - hand.shape[0]
+                    effective[:, side] = float(current)
+                    continue
+                else:
+                    transition_idx = pending_steps
+                    new_state = pending_state
+                    self.simple_hand_pending_steps[side] = -1
+                    self.simple_hand_state[side] = new_state
+                    self.simple_hand_phase[side] = "closing" if new_state else "opening"
+                    min_seconds = (
+                        _SIMPLE_HAND_MIN_CLOSE_SECONDS
+                        if new_state
+                        else _SIMPLE_HAND_MIN_OPEN_SECONDS
+                    )
+                    self.simple_hand_hold_steps[side] = max(
+                        1, int(round(min_seconds * control_fps))
+                    )
+                    self.simple_hand_elapsed_steps[side] = 0
+                    self.simple_hand_stable_votes[side] = 0
+                    self.simple_hand_candidate_count[side] = 0
+                    transitions[side] = transition_idx
+                    effective[:transition_idx, side] = float(current)
+                    effective[transition_idx:, side] = float(new_state)
+                    continue
+
             candidate_count = int(self.simple_hand_candidate_count[side])
             candidate_state = bool(self.simple_hand_candidate_state[side])
             transition_idx = -1
             new_state = current
+            confirm = (
+                _SIMPLE_HAND_CLOSE_CONFIRM_FRAMES
+                if not current
+                else _SIMPLE_HAND_OPEN_CONFIRM_FRAMES
+            )
             for frame_idx, value in enumerate(hand[:, side].tolist()):
                 sample = bool(float(value) >= 0.5)
                 if sample == current:
@@ -696,11 +833,47 @@ class _SimpleRuntimeMixin:
                     break
 
             if transition_idx >= 0:
+                if not new_state:
+                    # A prefix-only open prediction is not enough to release.
+                    # Diffusion chunks often briefly flip open before returning
+                    # to close later in the same horizon.  Treat isolated close
+                    # samples as noise, but preserve the grasp whenever the
+                    # complete prediction still has a confirmed close segment.
+                    detection_close_run = 0
+                    detection_has_close = False
+                    for value in detection[:, side].tolist():
+                        if float(value) >= 0.5:
+                            detection_close_run += 1
+                            if detection_close_run >= _SIMPLE_HAND_CLOSE_CONFIRM_FRAMES:
+                                detection_has_close = True
+                                break
+                        else:
+                            detection_close_run = 0
+                    if detection_has_close:
+                        self.simple_hand_open_votes[side] = 0
+                        self.simple_hand_candidate_state[side] = current
+                        self.simple_hand_candidate_count[side] = 0
+                        effective[:, side] = float(current)
+                        continue
+                    self.simple_hand_open_votes[side] += 1
+                    if self.simple_hand_open_votes[side] < _SIMPLE_HAND_OPEN_CONFIRM_REPLANS:
+                        self.simple_hand_candidate_state[side] = current
+                        self.simple_hand_candidate_count[side] = 0
+                        effective[:, side] = float(current)
+                        continue
+                self.simple_hand_open_votes[side] = 0
                 self.simple_hand_state[side] = new_state
                 self.simple_hand_phase[side] = (
                     "closing" if new_state else "opening"
                 )
-                self.simple_hand_hold_steps[side] = min_hold
+                min_seconds = (
+                    _SIMPLE_HAND_MIN_CLOSE_SECONDS
+                    if new_state
+                    else _SIMPLE_HAND_MIN_OPEN_SECONDS
+                )
+                self.simple_hand_hold_steps[side] = max(
+                    1, int(round(min_seconds * control_fps))
+                )
                 self.simple_hand_elapsed_steps[side] = 0
                 self.simple_hand_stable_votes[side] = 0
                 self.simple_hand_candidate_count[side] = 0
@@ -708,9 +881,33 @@ class _SimpleRuntimeMixin:
                 effective[:transition_idx, side] = float(current)
                 effective[transition_idx:, side] = float(new_state)
             else:
+                if candidate_count == 0:
+                    self.simple_hand_open_votes[side] = 0
                 self.simple_hand_candidate_state[side] = candidate_state
                 self.simple_hand_candidate_count[side] = candidate_count
                 effective[:, side] = float(current)
+
+                # Only close events are committed from an unexecuted tail.
+                # Releasing an object remains based on observed/executed model
+                # time and the stronger two-replan confirmation above.
+                if not current and detection.shape[0] > hand.shape[0]:
+                    run = 0
+                    future_transition = -1
+                    for frame_idx, value in enumerate(detection[:, side].tolist()):
+                        if float(value) >= 0.5:
+                            run += 1
+                            if run >= _SIMPLE_HAND_CLOSE_CONFIRM_FRAMES:
+                                future_transition = (
+                                    frame_idx - _SIMPLE_HAND_CLOSE_CONFIRM_FRAMES + 1
+                                )
+                                break
+                        else:
+                            run = 0
+                    if future_transition >= 0:
+                        self.simple_hand_pending_state[side] = True
+                        self.simple_hand_pending_steps[side] = (
+                            max(0, future_transition - hand.shape[0])
+                        )
         self.simple_hand_transition_indices = transitions
         return effective, transitions
 
@@ -754,8 +951,21 @@ class _SimpleRuntimeMixin:
             "simple_hand_stable_votes": runtime.simple_hand_stable_votes.copy(),
             "simple_hand_candidate_state": runtime.simple_hand_candidate_state.copy(),
             "simple_hand_candidate_count": runtime.simple_hand_candidate_count.copy(),
+            "simple_hand_open_votes": runtime.simple_hand_open_votes.copy(),
+            "simple_hand_pending_state": runtime.simple_hand_pending_state.copy(),
+            "simple_hand_pending_steps": runtime.simple_hand_pending_steps.copy(),
             "simple_hand_last_chunk_steps": int(runtime.simple_hand_last_chunk_steps),
             "simple_hand_transition_indices": runtime.simple_hand_transition_indices.copy(),
+            "simple_observed_hand_closure_history": np.array(
+                runtime.simple_observed_hand_closure_history,
+                dtype=np.float32,
+                copy=True,
+            ),
+            "simple_continuous_hand_queue": np.array(
+                runtime.simple_continuous_hand_queue,
+                dtype=np.float32,
+                copy=True,
+            ),
         }
 
     def _restore_state(self, snapshot: dict[str, object]) -> None:
@@ -776,12 +986,96 @@ class _SimpleRuntimeMixin:
         self.simple_hand_stable_votes = snapshot["simple_hand_stable_votes"].copy()
         self.simple_hand_candidate_state = snapshot["simple_hand_candidate_state"].copy()
         self.simple_hand_candidate_count = snapshot["simple_hand_candidate_count"].copy()
+        self.simple_hand_open_votes = snapshot["simple_hand_open_votes"].copy()
+        self.simple_hand_pending_state = snapshot["simple_hand_pending_state"].copy()
+        self.simple_hand_pending_steps = snapshot["simple_hand_pending_steps"].copy()
         self.simple_hand_last_chunk_steps = int(snapshot["simple_hand_last_chunk_steps"])
         self.simple_hand_transition_indices = snapshot["simple_hand_transition_indices"].copy()
+        self.simple_observed_hand_closure_history = np.array(
+            snapshot["simple_observed_hand_closure_history"],
+            dtype=np.float32,
+            copy=True,
+        )
+        self.simple_continuous_hand_queue = np.array(
+            snapshot["simple_continuous_hand_queue"],
+            dtype=np.float32,
+            copy=True,
+        )
 
     def reset(self, seed: int | None = None) -> None:
         super().reset(seed)
         self._init_simple_hand_fsm()
+
+    def _prepare_simple_observed_hand_history(
+        self, payload: dict[str, Any], snapshot: dict[str, object]
+    ) -> tuple[Any | None, np.ndarray | None, np.ndarray | None]:
+        """Build the continuous hand condition from measured SIMPLE frames."""
+        if getattr(self, "simple_hand_control_mode", "binary") != "continuous":
+            return None, None, None
+        observation = payload.get("observation") or {}
+        segment_value = observation.get("hand_closure_history")
+        if segment_value is None:
+            hand_observation = payload.get("hand_observation")
+            if not isinstance(hand_observation, dict):
+                return None, None, None
+            latest = measured_hand_closure_from_proprio(hand_observation)
+            segment = latest.reshape(1, 2)
+        else:
+            segment = np.asarray(segment_value, dtype=np.float32)
+            if segment.ndim == 1:
+                segment = segment.reshape(1, -1)
+            if segment.ndim != 2 or segment.shape[1] != 2 or segment.shape[0] == 0:
+                raise ValueError(
+                    "observation.hand_closure_history must have shape [T, 2]"
+                )
+            if not np.isfinite(segment).all() or (
+                (segment < -1e-6) | (segment > 1.0 + 1e-6)
+            ).any():
+                raise ValueError(
+                    "observation.hand_closure_history must be finite and within [0, 1]"
+                )
+            segment = np.clip(segment, 0.0, 1.0).astype(np.float32, copy=False)
+            latest = segment[-1].copy()
+            state_segment = observation.get("state_history")
+            if state_segment is not None:
+                states = np.asarray(state_segment)
+                state_frames = (
+                    1
+                    if states.ndim == 1
+                    else int(states.shape[0])
+                    if states.ndim == 2
+                    else -1
+                )
+                if state_frames != segment.shape[0]:
+                    raise ValueError(
+                        "state_history and hand_closure_history must contain the same number of frames"
+                    )
+
+        previous = np.asarray(
+            snapshot["simple_observed_hand_closure_history"], dtype=np.float32
+        )
+        if previous.ndim != 2 or previous.shape[1] != 2:
+            raise RuntimeError(
+                "internal SIMPLE observed hand history must have shape [T, 2]"
+            )
+        combined = np.concatenate((previous, segment), axis=0)
+        from motion.g1_reference import resample_hand_continuous
+        import torch
+
+        resampled = resample_hand_continuous(
+            combined,
+            source_fps=float(self.control_fps),
+            target_fps=float(self.model.fps),
+        )
+        condition = resampled[:-1]
+        action_history = int(getattr(self.model.config, "action_history", 0))
+        condition = condition[-action_history:] if action_history > 0 else condition[:0]
+        measured_history = torch.as_tensor(
+            condition,
+            dtype=torch.float32,
+            device=self.history_hand.device,
+        ).unsqueeze(0)
+        return measured_history, combined.astype(np.float32, copy=False), latest
 
     def infer(self, payload: dict) -> np.ndarray:
         """Run inference with SIMPLE's root-boundary policy and diagnostics.
@@ -802,7 +1096,10 @@ class _SimpleRuntimeMixin:
             # would bypass the event controller below.  The hand branch is a
             # discrete state machine, so always let it start from the current
             # recurrent state and apply its own prefix override.
-            if getattr(self, "simple_hand_fsm_enabled", False):
+            if (
+                getattr(self, "simple_hand_fsm_enabled", False)
+                or getattr(self, "simple_hand_control_mode", "binary") == "continuous"
+            ):
                 kwargs = dict(kwargs)
                 kwargs["rtc_hand_reference"] = None
             output = original_predict_future(*args, **kwargs)
@@ -824,6 +1121,11 @@ class _SimpleRuntimeMixin:
                 captured["hand_binary"] = (
                     torch.as_tensor(hand_binary).detach().float().cpu()
                 )
+            hand_closure = output.get("hand_closure")
+            if hand_closure is not None:
+                captured["hand_closure"] = (
+                    torch.as_tensor(hand_closure).detach().float().cpu()
+                )
             hand_clean = output.get("hand_clean")
             if hand_clean is not None:
                 captured["hand_clean"] = (
@@ -835,6 +1137,12 @@ class _SimpleRuntimeMixin:
                     torch.as_tensor(local_rot_mats).detach().float().cpu()
                 )
             adapted = dict(output)
+            if getattr(self, "simple_hand_control_mode", "binary") == "continuous":
+                # The unchanged Arena runtime assumes every hand history is
+                # binary and would otherwise resample measured closure as a
+                # binary previous state. SIMPLE rebuilds this response from
+                # ``hand_closure`` below instead.
+                adapted.pop("hand_binary", None)
             adapted["history_last_root_position"] = boundary
             return adapted
 
@@ -843,10 +1151,22 @@ class _SimpleRuntimeMixin:
         # own lock; restore it in ``finally`` even when prediction fails.
         self.model.predict_future = predict_future_for_simple
         snapshot = self._snapshot_state(self)
-        self._advance_simple_hand_phase(payload.get("hand_observation"))
-        previous_local_rot_mat = snapshot["previous_local_rot_mat"]
-        state_history_segment = payload.get("observation", {}).get("state_history")
         try:
+            self._advance_simple_hand_phase(payload.get("hand_observation"))
+            (
+                measured_hand_history,
+                next_observed_hand_history,
+                measured_hand_latest,
+            ) = self._prepare_simple_observed_hand_history(payload, snapshot)
+            if measured_hand_history is not None:
+                # The unchanged Arena runtime reads ``self.history_hand`` when
+                # preparing model inputs. Substitute the measured condition
+                # only for this SIMPLE continuous transaction.
+                self.history_hand = measured_hand_history
+            previous_local_rot_mat = snapshot["previous_local_rot_mat"]
+            state_history_segment = payload.get("observation", {}).get(
+                "state_history"
+            )
             action_chunk = super().infer(payload)
         except Exception:
             # ``_advance_simple_hand_phase`` is part of the same transaction as
@@ -858,6 +1178,7 @@ class _SimpleRuntimeMixin:
 
         hand_transition_indices = np.full(2, -1, dtype=np.int64)
         full_hand_binary = captured.get("hand_binary")
+        full_hand_closure = captured.get("hand_closure")
         try:
             if (
                 getattr(self, "simple_hand_fsm_enabled", False)
@@ -868,7 +1189,7 @@ class _SimpleRuntimeMixin:
                 if full_hand_binary.ndim == 2 and full_hand_binary.shape[-1] == 2:
                     source_hand = full_hand_binary[: self.execution_frames].float().cpu()
                     effective_hand, hand_transition_indices = self._resolve_simple_hand_prefix(
-                        source_hand
+                        source_hand, detection_hand=full_hand_binary
                     )
                     previous_hand = (
                         snapshot["history_hand"][0, -1].detach().float().cpu()
@@ -902,6 +1223,128 @@ class _SimpleRuntimeMixin:
                     # Do not let the base runtime's raw hand tail re-enter through
                     # RTC on the next replan.  Motion RTC remains untouched.
                     self.rtc_hand_tail = None
+            elif getattr(self, "simple_hand_control_mode", "binary") == "continuous":
+                if full_hand_closure is None:
+                    raise RuntimeError(
+                        "Continuous SIMPLE checkpoint did not return hand_closure"
+                    )
+                if full_hand_closure.ndim == 3 and full_hand_closure.shape[0] == 1:
+                    full_hand_closure = full_hand_closure[0]
+                if full_hand_closure.ndim != 2 or full_hand_closure.shape[-1] != 2:
+                    raise ValueError(
+                        "Expected continuous hand prediction [T,2], got "
+                        f"{tuple(full_hand_closure.shape)}"
+                    )
+                source_hand = full_hand_closure[: self.execution_frames].clamp(
+                    0.0, 1.0
+                ).float().cpu()
+                previous_hand = (
+                    torch.as_tensor(measured_hand_latest, dtype=torch.float32)
+                    if measured_hand_latest is not None
+                    else (
+                        snapshot["history_hand"][0, -1].detach().float().cpu()
+                        if snapshot["history_hand"].shape[1] > 0
+                        else torch.zeros(2, dtype=torch.float32)
+                    )
+                )
+                from motion.g1_reference import resample_hand_continuous_chunk
+
+                # Keep the current prefix timing identical to the body path.
+                prefix_control_hand = resample_hand_continuous_chunk(
+                    source_hand,
+                    source_fps=float(self.model.fps),
+                    target_fps=float(self.control_fps),
+                    previous_hand_closure=previous_hand,
+                )
+                action_chunk = np.asarray(action_chunk, dtype=np.float32).copy()
+                if prefix_control_hand.shape[0] != action_chunk.shape[0]:
+                    raise RuntimeError(
+                        "SIMPLE continuous hand controller produced a chunk with a "
+                        f"different length: {prefix_control_hand.shape[0]} vs {action_chunk.shape[0]}"
+                    )
+                queued = np.asarray(
+                    self.simple_continuous_hand_queue, dtype=np.float32
+                )
+                if queued.ndim != 2 or queued.shape[1] != 2:
+                    raise RuntimeError(
+                        "internal SIMPLE continuous hand queue must have shape [T, 2]"
+                    )
+                # The queued horizon has priority over a fresh prediction.
+                # Commit one complete hand horizon at a time; otherwise every
+                # body replan can push the same future close event back beyond
+                # the executed prefix indefinitely.
+                action_frames = int(action_chunk.shape[0])
+                combined_control = queued
+                if combined_control.shape[0] < action_frames:
+                    queued_frames = int(combined_control.shape[0])
+                    if combined_control.shape[0] > 0:
+                        prefix_control_hand = resample_hand_continuous_chunk(
+                            source_hand,
+                            source_fps=float(self.model.fps),
+                            target_fps=float(self.control_fps),
+                            previous_hand_closure=torch.as_tensor(
+                                combined_control[-1], dtype=torch.float32
+                            ),
+                        )
+                    fresh_control = prefix_control_hand.numpy()
+                    remaining_source = full_hand_closure[
+                        self.execution_frames :
+                    ].clamp(0.0, 1.0).float().cpu()
+                    if remaining_source.shape[0] > 0:
+                        tail_anchor = torch.as_tensor(
+                            fresh_control[-1], dtype=torch.float32
+                        )
+                        tail_control_hand = resample_hand_continuous_chunk(
+                            remaining_source,
+                            source_fps=float(self.model.fps),
+                            target_fps=float(self.control_fps),
+                            previous_hand_closure=tail_anchor,
+                        )
+                        fresh_control = np.concatenate(
+                            (fresh_control, tail_control_hand.numpy()), axis=0
+                        )
+                    # The queued commands already cover the first part of the
+                    # current prediction horizon.  Append the fresh plan at
+                    # the matching control timestamp, not again from t=0.
+                    fresh_control = fresh_control[
+                        min(queued_frames, fresh_control.shape[0]) :
+                    ]
+                    combined_control = np.concatenate(
+                        (combined_control, fresh_control), axis=0
+                    )
+                if combined_control.shape[0] < action_frames:
+                    # This is only possible for a malformed/custom test policy;
+                    # hold the final finite target instead of changing chunk
+                    # length or emitting an invalid action.
+                    if combined_control.shape[0] == 0:
+                        combined_control = np.repeat(
+                            previous_hand.numpy().reshape(1, 2), action_frames, axis=0
+                        )
+                    else:
+                        combined_control = np.pad(
+                            combined_control,
+                            ((0, action_frames - combined_control.shape[0]), (0, 0)),
+                            mode="edge",
+                        )
+                control_hand = combined_control[:action_frames]
+                next_hand_queue = combined_control[action_frames:]
+                action_chunk[:, 38:40] = control_hand
+                self.simple_continuous_hand_queue = np.array(
+                    next_hand_queue, dtype=np.float32, copy=True
+                )
+                if measured_hand_history is not None:
+                    # Keep model conditioning tied to measured closure. The
+                    # predicted source chunk is used only for this response.
+                    self.history_hand = measured_hand_history
+                    self.rtc_hand_tail = None
+                else:
+                    self.history_hand = torch.cat(
+                        (
+                            snapshot["history_hand"],
+                            source_hand.to(snapshot["history_hand"].device).unsqueeze(0),
+                        ),
+                        dim=1,
+                    )[:, -self.model.config.action_history :]
         except Exception:
             self._restore_state(snapshot)
             raise
@@ -941,6 +1384,7 @@ class _SimpleRuntimeMixin:
             )
         height_values = source_root_positions[:, 1].float()
         source_hand_binary = captured.get("hand_binary")
+        source_hand_closure = captured.get("hand_closure")
         source_hand_clean = captured.get("hand_clean")
         hand_diag = ""
         if source_hand_binary is not None:
@@ -965,19 +1409,48 @@ class _SimpleRuntimeMixin:
                     f" model_hand_clean_max="
                     f"{clean.max(dim=0).values.tolist()}"
                 )
+        if (
+            getattr(self, "simple_hand_control_mode", "binary") == "continuous"
+            and source_hand_closure is not None
+        ):
+            closure = source_hand_closure
+            if closure.ndim == 3 and closure.shape[0] == 1:
+                closure = closure[0]
+            if closure.ndim == 2 and closure.shape[-1] == 2:
+                hand_diag += (
+                    f" model_hand_closure_mean={closure.mean(dim=0).tolist()}"
+                    f" model_hand_closure_min={closure.min(dim=0).values.tolist()}"
+                    f" model_hand_closure_max={closure.max(dim=0).values.tolist()}"
+                )
         encoded_hand = action_chunk_tensor[:, 38:40]
         if encoded_hand.numel():
             hand_diag += (
-                f" control_hand_active="
-                f"{encoded_hand.sum(dim=0).to(torch.int64).tolist()}"
+                f" control_hand_active={(encoded_hand >= 0.5).sum(dim=0).to(torch.int64).tolist()}"
                 f"/{encoded_hand.shape[0]}"
+                f" control_hand_closure_first={encoded_hand[0].tolist()}"
+                f" control_hand_closure_last={encoded_hand[-1].tolist()}"
             )
+            if (
+                getattr(self, "simple_hand_control_mode", "binary") == "continuous"
+                and hasattr(self, "simple_continuous_hand_queue")
+            ):
+                hand_diag += (
+                    f" control_hand_closure_mean={encoded_hand.mean(dim=0).tolist()}"
+                    f" continuous_hand_queue={self.simple_continuous_hand_queue.shape[0]}"
+                )
+                if measured_hand_latest is not None:
+                    hand_diag += (
+                        " measured_hand_closure="
+                        f"{np.asarray(measured_hand_latest).tolist()}"
+                    )
         if getattr(self, "simple_hand_fsm_enabled", False):
             hand_diag += (
                 f" hand_state={self.simple_hand_state.astype(int).tolist()}"
                 f" hand_phase={list(self.simple_hand_phase)}"
                 f" hand_transition_idx={hand_transition_indices.tolist()}"
                 f" hand_hold_steps={self.simple_hand_hold_steps.tolist()}"
+                f" hand_open_votes={self.simple_hand_open_votes.tolist()}"
+                f" hand_pending_steps={self.simple_hand_pending_steps.tolist()}"
             )
         if state_history_segment is None:
             state_segment_frames = 0
@@ -998,6 +1471,12 @@ class _SimpleRuntimeMixin:
             # This chunk is now committed and will have elapsed by the next
             # replan, where ``_advance_simple_hand_phase`` consumes it.
             self.simple_hand_last_chunk_steps = int(action_chunk.shape[0])
+        if next_observed_hand_history is not None:
+            # Publish the raw measured stream only after all action safety and
+            # boundary checks above have succeeded.
+            self.simple_observed_hand_closure_history = np.array(
+                next_observed_hand_history, dtype=np.float32, copy=True
+            )
         return action_chunk
 
 
@@ -1066,6 +1545,7 @@ class KimodoSimpleRuntime:
         image: np.ndarray,
         state_history: np.ndarray,
         hand_observation: dict[str, Any] | None = None,
+        hand_closure_history: np.ndarray | None = None,
     ) -> np.ndarray:
         image = np.ascontiguousarray(image, dtype=np.uint8)
         state_history = np.asarray(state_history, dtype=np.float32)
@@ -1095,6 +1575,28 @@ class KimodoSimpleRuntime:
                 for key, value in hand_observation.items()
                 if value is not None
             }
+        if hand_closure_history is not None:
+            hand_closure_history = np.asarray(hand_closure_history, dtype=np.float32)
+            if hand_closure_history.ndim == 1:
+                hand_closure_history = hand_closure_history.reshape(1, -1)
+            if (
+                hand_closure_history.ndim != 2
+                or hand_closure_history.shape[1] != 2
+                or hand_closure_history.shape[0] != state_history.shape[0]
+            ):
+                raise ValueError(
+                    "hand_closure_history must have shape (T, 2) matching state_history"
+                )
+            if not np.isfinite(hand_closure_history).all() or (
+                (hand_closure_history < -1e-6)
+                | (hand_closure_history > 1.0 + 1e-6)
+            ).any():
+                raise ValueError(
+                    "hand_closure_history must be finite and within [0, 1]"
+                )
+            payload["observation"]["hand_closure_history"] = np.clip(
+                hand_closure_history, 0.0, 1.0
+            ).tolist()
         with self.lock:
             return np.asarray(self.runtime.infer(payload), dtype=np.float32)
 
@@ -1237,7 +1739,11 @@ def serve(args: argparse.Namespace) -> None:
                         payload.get("instruction", ""), service_runtime
                     )
                     actions40 = service_runtime.infer40(task, image, state_history)
-                    actions36 = arena_action_to_simple(actions40, args.control_fps)
+                    actions36 = arena_action_to_simple(
+                        actions40,
+                        args.control_fps,
+                        hand_control_mode=service_runtime.runtime.simple_hand_control_mode,
+                    )
                     self._json(200, {"action": actions36, "err": 0.0, "traj_image": np.zeros((1, 1, 3), dtype=np.uint8)})
                     return
                 self._json(404, {"error": "not found"})
@@ -1258,9 +1764,16 @@ class _EpisodeContext:
     observation: dict[str, Any] | None = None
     info: dict[str, Any] | None = None
     state_buffer: list[np.ndarray] = field(default_factory=list)
+    hand_closure_buffer: list[np.ndarray] = field(default_factory=list)
 
 
-def _make_action_from_40(action: np.ndarray, robot: Any, current_height: float) -> Any:
+def _make_action_from_40(
+    action: np.ndarray,
+    robot: Any,
+    current_height: float,
+    *,
+    hand_control_mode: str = "binary",
+) -> Any:
     """Fallback command for non-Sonic G1Wholebody environments."""
     from simple.core.action import ActionCmd
 
@@ -1268,8 +1781,18 @@ def _make_action_from_40(action: np.ndarray, robot: Any, current_height: float) 
     canonical_index = {name: i for i, name in enumerate(CANONICAL_NAMES)}
     q = action[9:38]
     target_qpos = {name: float(q[canonical_index[name]]) for name in CANONICAL_NAMES}
-    left = LEFT_HAND_CLOSE if action[38] >= 0.5 else np.zeros(7, dtype=np.float32)
-    right = RIGHT_HAND_CLOSE if action[39] >= 0.5 else np.zeros(7, dtype=np.float32)
+    if hand_control_mode == "binary":
+        left = LEFT_HAND_CLOSE if action[38] >= 0.5 else np.zeros(7, dtype=np.float32)
+        right = RIGHT_HAND_CLOSE if action[39] >= 0.5 else np.zeros(7, dtype=np.float32)
+    elif hand_control_mode == "continuous":
+        closure = np.clip(action[38:40], 0.0, 1.0)
+        left = closure[0] * SIMPLE_LEFT_HAND_CLOSE
+        right = closure[1] * SIMPLE_RIGHT_HAND_CLOSE
+    else:
+        raise ValueError(
+            "hand_control_mode must be 'binary' or 'continuous', "
+            f"got {hand_control_mode!r}"
+        )
     target_qpos.update(dict(zip(LEFT_HAND_NAMES, left)))
     target_qpos.update(dict(zip(RIGHT_HAND_NAMES, right)))
     yaw = float(np.arctan2(action[5], action[3]))
@@ -1421,15 +1944,57 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
                                 action_cmd.parameters[key] = _wbc_hand_to_mjcf(value)
                         return action_cmd
 
+                    def _trace_wbc_arm(self, action_cmd):
+                        """Print final WBC arm targets when explicitly requested."""
+                        if os.environ.get("SIMPLE_WBC_TRACE", "0").lower() not in {
+                            "1", "true", "yes", "on"
+                        }:
+                            return
+                        step = int(getattr(self, "_global_step_idx", 0))
+                        if step % 25 != 0:
+                            return
+                        names = (
+                            "right_shoulder_pitch_joint",
+                            "right_shoulder_roll_joint",
+                            "right_shoulder_yaw_joint",
+                            "right_elbow_joint",
+                            "right_wrist_roll_joint",
+                            "right_wrist_pitch_joint",
+                            "right_wrist_yaw_joint",
+                        )
+                        body_names = tuple(BODY_NAMES)
+                        target = np.asarray(action_cmd["target_q"], dtype=np.float32).reshape(-1)
+                        current = np.asarray(getattr(self, "_last_qpos", []), dtype=np.float32).reshape(-1)
+                        body_indices = tuple(self._dwbc_robot_model.get_body_actuated_joint_indices())
+                        target_by_name = {
+                            name: float(
+                                target[body_indices.index(self._dwbc_robot_model.joint_to_dof_index[name])]
+                            )
+                            for name in names
+                            if name in self._dwbc_robot_model.joint_to_dof_index
+                        }
+                        current_by_name = {
+                            name: float(current[self.robot.joint_names.index(name)])
+                            for name in names
+                            if current.size == len(self.robot.joint_names) and name in self.robot.joint_names
+                        }
+                        print(
+                            "[wbc_arm_trace] "
+                            f"step={step} "
+                            f"target={np.round([target_by_name.get(n, np.nan) for n in names], 3).tolist()} "
+                            f"current={np.round([current_by_name.get(n, np.nan) for n in names], 3).tolist()}",
+                            flush=True,
+                        )
+
                     def get_stabilize_action(self, observation):
                         return self._to_mjcf_action(
                             super().get_stabilize_action(observation)
                         )
 
                     def get_action(self, observation, *args, **kwargs):
-                        return self._to_mjcf_action(
-                            super().get_action(observation, *args, **kwargs)
-                        )
+                        action_cmd = super().get_action(observation, *args, **kwargs)
+                        self._trace_wbc_arm(action_cmd)
+                        return self._to_mjcf_action(action_cmd)
 
                 class LocalClient:
                     def query_action(self, *unused, **kwargs):
@@ -1441,7 +2006,16 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
                                 proprio,
                                 context.first_heading,
                             )
+                            if runtime.runtime.simple_hand_control_mode == "continuous":
+                                append_hand_closure_history(
+                                    context.hand_closure_buffer, proprio
+                                )
                         state_history = np.stack(context.state_buffer, axis=0)
+                        hand_closure_history = (
+                            np.stack(context.hand_closure_buffer, axis=0)
+                            if runtime.runtime.simple_hand_control_mode == "continuous"
+                            else None
+                        )
                         image = _simple_image(context.observation)
                         hand_observation = {
                             key: proprio.get(key)
@@ -1457,13 +2031,17 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
                             image,
                             state_history,
                             hand_observation=hand_observation,
+                            hand_closure_history=hand_closure_history,
                         )
                         # The segment has been consumed by the runtime. Future
                         # 50 Hz frames are collected after each env.step.
                         context.state_buffer.clear()
+                        if hand_closure_history is not None:
+                            context.hand_closure_buffer.clear()
                         actions36 = arena_action_to_simple(
                             actions40,
                             args.control_fps,
+                            hand_control_mode=runtime.runtime.simple_hand_control_mode,
                         )
                         return actions36, 0.0, None
 
@@ -1551,7 +2129,12 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
                     image = _simple_image(observation)
                     predicted = runtime.infer40(task_name, image, state)
                     current_height = float(np.asarray(proprio["floating_base_pose"])[2])
-                    action = _make_action_from_40(predicted[0], robot, current_height)
+                    action = _make_action_from_40(
+                        predicted[0],
+                        robot,
+                        current_height,
+                        hand_control_mode=runtime.runtime.simple_hand_control_mode,
+                    )
                 observation, reward, terminated, truncated, info = video_env.step(action)
                 if terminated:
                     termination_reason = (
@@ -1571,6 +2154,10 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
                         info["proprio"],
                         context.first_heading,
                     )
+                    if runtime.runtime.simple_hand_control_mode == "continuous":
+                        append_hand_closure_history(
+                            context.hand_closure_buffer, info["proprio"]
+                        )
                 steps += 1
                 if steps >= episode_limit and not terminated:
                     truncated = True

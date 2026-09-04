@@ -1,203 +1,118 @@
-## Replay one episode
+# SIMPLE expert-aligned export
+
+The default capture mode is `expert_aligned`. It exports the recorded expert
+trajectory without rerunning WBC or contact physics:
+
+- `observation.leg_joints` plus `observation.arm_joints` are reordered into the
+  canonical 29-DoF body pose.
+- The realized expert body/hand pose is used for both observation and training
+  target, so controller tracking drift is not learned as ground truth.
+- The original expert MP4 is copied byte-for-byte and its frame count, FPS, and
+  SHA256 are validated.
+- The original processed `states`, `action`, and measured joint columns are
+  retained under `source.*` for audit.
+
+The processed SIMPLE dataset does not contain measured floating-base or object
+poses. Root XY/yaw is therefore reconstructed from the synchronized navigation
+command and is explicitly marked `command_reconstructed_not_measured` in
+metadata. Exact physical re-simulation of contacts is not possible from this
+processed dataset alone.
+
+## Export one episode
 
 ```bash
 cd /ai/Yichi/yunhengwang/Kimodo-Policy/controlnet_v1.2
 
-PROJ=/ai/Yichi/yunhengwang/Kimodo-Policy/controlnet_v1.2
-SIMPLE=$PROJ/SIMPLE
-SP=$SIMPLE/.venv/lib/python3.10/site-packages
-ISO=/ai/Yichi/kimodo-policy/simpledata/pinocchio-iso/site-packages
-
-env -u CUDA_VISIBLE_DEVICES \
-  OMNI_KIT_ACCEPT_EULA=YES \
-  SIMPLE_DATA_DIR=/ai/Yichi/kimodo-policy/simpledata \
-  SIMPLE_ISAAC_GPU=0 \
-  SIMPLE_ISAAC_NO_CUDA_MASK=1 \
-  SIMPLE_ISAAC_ALLOW_ZERO_GPU_COUNT=1 \
-  SIMPLE_ISAAC_ACTIVE_GPU=0 \
-  SIMPLE_ISAAC_PHYSICS_GPU=0 \
-  SIMPLE_ISAAC_MAX_GPU_COUNT=1 \
-  SIMPLE_ISAAC_EXTRA_PYTHON=$ISO \
-  SIMPLE_ISAAC_PORTABLE_ROOT=/ai/Yichi/kimodo-policy/simpledata/isaac-cache/portable \
-  TORCH_CUDA_ARCH_LIST=8.6+PTX \
-  MUJOCO_GL=egl \
-  HF_ENDPOINT=https://hf-mirror.com \
-  TORCH_EXTENSIONS_DIR=/ai/Yichi/kimodo-policy/simpledata/torch-extensions \
-  WARP_CACHE_PATH=/ai/Yichi/kimodo-policy/simpledata/isaac-cache/warp \
-  XDG_CACHE_HOME=/ai/Yichi/kimodo-policy/simpledata/isaac-cache/xdg \
-  TMPDIR=/ai/Yichi/kimodo-policy/simpledata/isaac-cache/tmp \
-  PATH=$SIMPLE/.venv/bin:$PATH \
-  PYTHONPATH=$SP:$PROJ/src:$SIMPLE/src:$SIMPLE/third_party:$SIMPLE/third_party/curobo/src:$SIMPLE/third_party/unitree_sdk2_python:$ISO \
-  /ai/Yichi/taowen/isaac-sim/python.sh \
-  data/playback/replay_capture.py \
-  --sim-mode mujoco_isaac \
-  --env-id simple/G1WholebodyBendPickTeleop-v0 \
-  --source /ai/Yichi/kimodo-policy/simpledata/simple/G1WholebodyBendPickTeleop-v0 \
-  --episode 0 \
-  --output $PROJ/data/playback/output/test_pick_ep0_isaac
-```
-
-## Replay every episode in one task
-
-This launches one worker on each GPU listed in `GPUS`. Episodes are distributed
-across those workers, written to separate directories, and skipped when they
-already have a validation report. Re-run the same command to resume an
-interrupted batch. Update `GPUS` when server memory availability changes.
-
-```bash
-cd /ai/Yichi/yunhengwang/Kimodo-Policy/controlnet_v1.2
-
-PROJ=/ai/Yichi/yunhengwang/Kimodo-Policy/controlnet_v1.2
-SIMPLE=$PROJ/SIMPLE
-SP=$SIMPLE/.venv/lib/python3.10/site-packages
-ISO=/ai/Yichi/kimodo-policy/simpledata/pinocchio-iso/site-packages
-
-TASK=G1WholebodyBendPickTeleop-v0
-ENV_ID=simple/$TASK
+TASK=G1WholebodyXMovePickTeleop-v0
 SOURCE=/ai/Yichi/kimodo-policy/simpledata/simple/$TASK
-OUTPUT_ROOT=$PROJ/data/playback/output/$TASK
-GPUS=(0 2 5 7)
-NUM_WORKERS=${#GPUS[@]}
-CACHE_BASE=/ai/Yichi/kimodo-policy/simpledata/isaac-cache/playback-workers
-PHYSICS_DT=0.005
-if [[ "$TASK" == "G1WholebodyBendPickMP-v0" ]]; then
-  PHYSICS_DT=0.002
-fi
+OUTPUT=data/playback/output/$TASK/episode_000000
 
-mapfile -t EPISODES < <(
-  python3 -c '
-import json
-import sys
-
-with open(sys.argv[1]) as episode_file:
-    for line in episode_file:
-        if line.strip():
-            print(json.loads(line)["episode_index"])
-' "$SOURCE/meta/episodes.jsonl"
-)
-
-mkdir -p "$OUTPUT_ROOT" "$CACHE_BASE"
-echo "Found ${#EPISODES[@]} episodes for $TASK; launching workers on GPUs: ${GPUS[*]}"
-
-run_worker() {
-  local GPU=$1
-  local SLOT=$2
-  local WORKER_CACHE=$CACHE_BASE/gpu_$GPU
-  local EPISODE OUTPUT ATTEMPT RUN_RC VALID_RC WORKER_STATUS=0
-
-  mkdir -p \
-    "$WORKER_CACHE/portable" \
-    "$WORKER_CACHE/warp" \
-    "$WORKER_CACHE/xdg" \
-    "$WORKER_CACHE/tmp"
-
-  echo "[gpu $GPU] worker started"
-
-  for EPISODE in "${EPISODES[@]}"; do
-    if (( EPISODE % NUM_WORKERS != SLOT )); then
-      continue
-    fi
-
-    OUTPUT=$(printf "%s/episode_%06d" "$OUTPUT_ROOT" "$EPISODE")
-
-    if [[ -s "$OUTPUT/validation.json" ]]; then
-      echo "[gpu $GPU] skip episode $EPISODE: already completed"
-      continue
-    fi
-
-    echo "[gpu $GPU] replay episode $EPISODE -> $OUTPUT"
-
-    VALID_RC=1
-    for ATTEMPT in 1 2 3; do
-      RUN_RC=0
-      echo "[gpu $GPU] episode $EPISODE attempt $ATTEMPT/3"
-      env \
-        -u CUDA_VISIBLE_DEVICES \
-        -u ALL_PROXY -u all_proxy \
-        HTTP_PROXY=http://127.0.0.1:17890 \
-        http_proxy=http://127.0.0.1:17890 \
-        HTTPS_PROXY=http://127.0.0.1:17890 \
-        https_proxy=http://127.0.0.1:17890 \
-        OMNI_KIT_ACCEPT_EULA=YES \
-        SIMPLE_DATA_DIR=/ai/Yichi/kimodo-policy/simpledata \
-        SIMPLE_ISAAC_GPU=$GPU \
-        SIMPLE_ISAAC_NO_CUDA_MASK=1 \
-        SIMPLE_ISAAC_ALLOW_ZERO_GPU_COUNT=1 \
-        SIMPLE_ISAAC_ACTIVE_GPU=$GPU \
-        SIMPLE_ISAAC_PHYSICS_GPU=$GPU \
-        SIMPLE_ISAAC_MAX_GPU_COUNT=1 \
-        SIMPLE_ISAAC_EXTRA_PYTHON=$ISO \
-        SIMPLE_ISAAC_PORTABLE_ROOT=$WORKER_CACHE/portable \
-        TORCH_CUDA_ARCH_LIST=8.6+PTX \
-        MUJOCO_GL=egl \
-        HF_ENDPOINT=https://hf-mirror.com \
-        TORCH_EXTENSIONS_DIR=/ai/Yichi/kimodo-policy/simpledata/torch-extensions \
-        WARP_CACHE_PATH=$WORKER_CACHE/warp \
-        XDG_CACHE_HOME=$WORKER_CACHE/xdg \
-        TMPDIR=$WORKER_CACHE/tmp \
-        PATH=$SIMPLE/.venv/bin:$PATH \
-        PYTHONPATH=$SP:$PROJ/src:$SIMPLE/src:$SIMPLE/third_party:$SIMPLE/third_party/curobo/src:$SIMPLE/third_party/unitree_sdk2_python:$ISO \
-        /ai/Yichi/taowen/isaac-sim/python.sh \
-        data/playback/replay_capture.py \
-        --sim-mode mujoco_isaac \
-        --env-id "$ENV_ID" \
-        --source "$SOURCE" \
-        --episode "$EPISODE" \
-        --physics-dt "$PHYSICS_DT" \
-        --output "$OUTPUT" || RUN_RC=$?
-
-      VALID_RC=0
-      python3 -c 'import json, sys; json.load(open(sys.argv[1]))' \
-        "$OUTPUT/validation.json" >/dev/null 2>&1 || VALID_RC=$?
-      if (( VALID_RC == 0 )); then
-        break
-      fi
-
-      echo "[gpu $GPU] episode $EPISODE attempt $ATTEMPT failed: rc=$RUN_RC or invalid validation.json" >&2
-      if (( ATTEMPT < 3 )); then
-        sleep 10
-      fi
-    done
-
-    if (( VALID_RC != 0 )); then
-      echo "[gpu $GPU] failed episode $EPISODE after 3 attempts" >&2
-      WORKER_STATUS=1
-      continue
-    fi
-  done
-
-  echo "[gpu $GPU] worker completed with status $WORKER_STATUS"
-  return "$WORKER_STATUS"
-}
-
-declare -a WORKER_PIDS=()
-
-for SLOT in "${!GPUS[@]}"; do
-  GPU=${GPUS[$SLOT]}
-  echo "[launch] GPU $GPU -> worker_gpu${GPU}.log"
-  run_worker "$GPU" "$SLOT" >> "$OUTPUT_ROOT/worker_gpu${GPU}.log" 2>&1 &
-  WORKER_PIDS[$SLOT]=$!
-done
-
-STATUS=0
-for SLOT in "${!GPUS[@]}"; do
-  GPU=${GPUS[$SLOT]}
-  if wait "${WORKER_PIDS[$SLOT]}"; then
-    echo "[complete] GPU $GPU worker"
-  else
-    echo "[failed] GPU $GPU worker; inspect worker_gpu${GPU}.log" >&2
-    STATUS=1
-  fi
-done
-
-exit "$STATUS"
+PYTHONPATH="$PWD:$PWD/SIMPLE/src" \
+  SIMPLE/.venv/bin/python \
+  data/playback/replay_capture.py \
+  --capture-mode expert_aligned \
+  --env-id "simple/$TASK" \
+  --source "$SOURCE" \
+  --episode 0 \
+  --output "$OUTPUT"
 ```
 
-## Reference-root action semantics
+`--env-id` is retained for CLI compatibility but no environment is created in
+`expert_aligned` mode.
 
-Replay exports keep the measured MuJoCo root under `observation.root_p` and
-`observation.root_q`.  The 40-D action root is a reference target reconstructed
-from SIMPLE's synchronized 36-D command:
+## Export every episode
+
+The batch helper defaults to expert-aligned export, resumes completed outputs,
+and starts a detached tmux session:
+
+```bash
+cd /ai/Yichi/yunhengwang/Kimodo-Policy/controlnet_v1.2
+CAPTURE_MODE=expert_aligned \
+  bash data/playback/replay_task.sh G1WholebodyXMovePickTeleop-v0 "4"
+```
+
+The GPU list controls worker allocation for compatibility with physics replay.
+Expert-aligned export itself does not use the GPU. Useful status commands are:
+
+```bash
+tmux ls
+tmux attach -t replay_G1WholebodyXMovePickTeleop_v0
+tail -f /tmp/replay_G1WholebodyXMovePickTeleop_v0.log
+```
+
+An existing episode is skipped only when `validation.json` has the requested
+`capture_mode`, `quality_passed: true`, and, for expert-aligned output,
+`expert_alignment_passed: true`. Historical physics replays are therefore not
+mistaken for completed expert-aligned exports.
+
+## Physics replay diagnostics
+
+Use `physics_replay` only when the goal is to inspect controller or simulator
+behavior. This mode reruns WBC against live MuJoCo proprioception and can render
+through Isaac Sim, so contact-sensitive outcomes are not expected to match the
+recorded expert episode exactly.
+
+```bash
+cd /ai/Yichi/yunhengwang/Kimodo-Policy/controlnet_v1.2
+CAPTURE_MODE=physics_replay \
+  bash data/playback/replay_task.sh G1WholebodyXMovePickTeleop-v0 "4"
+```
+
+For a single physics replay, use the Isaac Python environment and cache setup
+from `replay_task.sh`, then pass `--capture-mode physics_replay` and either
+`--sim-mode mujoco_isaac` or `--sim-mode mujoco`.
+
+## Output contract
+
+The exported training protocol remains 64-D state and 40-D action:
+
+```text
+observation.state = root_rot6d + expert_q29 + finite_difference_dq29
+action            = reference_root_xy_delta + reference_root_height
+                    + reference_root_rot6d + expert_q29 + hand_binary
+```
+
+Continuous hand training reads:
+
+```text
+observation.hand_q       recorded expert hand joints (14-D)
+observation.hand_closure projection of recorded expert hand joints (2-D)
+action.target_hand_q     recorded expert hand joints (14-D)
+action.hand_closure      projection of recorded expert hand joints (2-D)
+```
+
+The raw command remains available as `source.action`; it is not substituted for
+the realized expert joint target because it has no lower-body joint target and
+contains controller tracking error for the upper body.
+
+`validation.json` records zero-error body/hand alignment metrics and a source
+video SHA256 match. `success` is `null` for expert-aligned output because the
+processed source does not store a task-success flag. `next.done` is preserved
+verbatim but is only an episode termination signal, not proof of success.
+
+## Reference-root semantics
+
+The 40-D action root is reconstructed from the synchronized 36-D source command:
 
 ```text
 source.action[31]    -> reference root height
@@ -205,13 +120,8 @@ source.action[32:34] -> reference local XY velocity
 source.action[35]    -> reference target yaw
 ```
 
-At 50 FPS, action local XY displacement is velocity times `0.02`.  The target
-yaw is made episode-relative and stored as a yaw-only quaternion/rot6d because
-SIMPLE does not expose a commanded pelvis roll/pitch.  Explicit episode-relative
+At 50 FPS, local XY displacement is velocity multiplied by `0.02`. Target yaw
+is episode-relative and stored as a yaw-only quaternion/rot6d because the
+processed source exposes no measured pelvis roll/pitch. Explicit reconstructed
 targets are also stored as `action.reference_root_p` and
 `action.reference_root_q` (`wxyz`).
-
-New replay jobs write the reference-root action directly.  Historical outputs
-that were produced by the old measured-root exporter must be regenerated with
-the current replay exporter if they need a fresh capture; this project no
-longer ships a separate offline migration command.

@@ -30,6 +30,7 @@ from motion.g1_reference import (
     HumanoidArenaActionDecoder,
     UNITREE_G1_JOINT_NAMES_29,
     resample_hand_binary,
+    resample_hand_continuous,
     resample_motion,
     rot6d_row_to_matrix,
 )
@@ -1139,6 +1140,7 @@ class BaseSourceAdapter:
         target_hand_valid: np.ndarray | torch.Tensor,
         observed_motion_valid: np.ndarray | torch.Tensor | None = None,
         target_motion_source: str = "action",
+        hand_resampling: str = "binary",
     ) -> dict[str, torch.Tensor | str]:
         observed_local_rot, observed_root = resample_motion(
             observed_local_rot,
@@ -1152,10 +1154,19 @@ class BaseSourceAdapter:
             episode.source_fps,
             episode.target_fps,
         )
-        observed_hand = resample_hand_binary(
+        if hand_resampling == "binary":
+            hand_resampler = resample_hand_binary
+        elif hand_resampling == "linear":
+            hand_resampler = resample_hand_continuous
+        else:
+            raise ValueError(
+                "hand_resampling must be 'binary' or 'linear', "
+                f"got {hand_resampling!r}"
+            )
+        observed_hand = hand_resampler(
             observed_hand, episode.source_fps, episode.target_fps
         )
-        target_hand = resample_hand_binary(
+        target_hand = hand_resampler(
             target_hand, episode.source_fps, episode.target_fps
         )
         observed_hand_valid = _resample_binary_mask(

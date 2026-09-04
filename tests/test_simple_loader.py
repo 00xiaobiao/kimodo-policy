@@ -10,6 +10,7 @@ import pyarrow.parquet as pq
 import torch
 
 from data.common import EpisodeRecord, SOURCE_SIMPLE
+from data.simple_hand import SIMPLE_RIGHT_HAND_CLOSE
 from data.simple_loader import SimpleReplayAdapter
 
 
@@ -184,6 +185,62 @@ class SimpleReplayAdapterTest(unittest.TestCase):
         np.testing.assert_array_equal(finalize_args[6], action[:, 38:40])
         np.testing.assert_array_equal(finalize_args[7], np.ones((4, 2), dtype=bool))
         np.testing.assert_array_equal(finalize_args[8], np.ones((4, 2), dtype=bool))
+
+    def test_load_episode_continuous_uses_measured_history_and_source_target(self):
+        adapter = SimpleReplayAdapter.__new__(SimpleReplayAdapter)
+        adapter.selection = {"hand_control_mode": "continuous"}
+        state = np.zeros((4, 64), dtype=np.float32)
+        state[:, :6] = np.asarray([1, 0, 0, 0, 1, 0], dtype=np.float32)
+        action = np.zeros((4, 40), dtype=np.float32)
+        source_action = np.zeros((4, 36), dtype=np.float32)
+        source_action[:, 7:14] = 0.75 * SIMPLE_RIGHT_HAND_CLOSE
+        hand_q = np.zeros((4, 14), dtype=np.float32)
+        hand_q[:, 7:14] = 0.25 * SIMPLE_RIGHT_HAND_CLOSE
+        adapter.reader = MagicMock()
+        adapter.reader.read.return_value = {
+            "observation.state": state,
+            "action": action,
+            "observation.hand_q": hand_q,
+            "source.action": source_action,
+        }
+        decoded = {
+            "local_rot_mats": torch.eye(3).reshape(1, 1, 3, 3).repeat(4, 1, 1, 1),
+            "root_positions": torch.zeros(4, 3),
+        }
+        decoder = MagicMock()
+        decoder.decode_joint_configuration_pose.return_value = decoded
+        decoder.decode_action_pose.return_value = decoded
+        adapter._decoder = MagicMock(return_value=decoder)
+        adapter._motion_feature_mask = MagicMock(return_value=torch.ones(417, dtype=torch.bool))
+        adapter._finalize_motion = MagicMock(return_value={"loaded": True})
+        episode = EpisodeRecord(
+            source=SOURCE_SIMPLE,
+            task_id="Simple::task",
+            task_name="task",
+            instruction="Pick up the object.",
+            episode_id="task:000000",
+            data_path=Path("episode.parquet"),
+            source_length=4,
+            source_fps=50,
+            target_fps=30,
+            video_path=Path("episode.mp4"),
+            video_from_timestamp=0,
+            first_cut=0,
+            sample_count=1,
+            metadata={"row_start": 0, "row_end": 4},
+        )
+
+        result = adapter.load_episode(episode)
+
+        self.assertEqual(result, {"loaded": True})
+        finalize_args = adapter._finalize_motion.call_args.args
+        expected_observed = np.tile(np.asarray([0.0, 0.25], dtype=np.float32), (4, 1))
+        expected_target = np.tile(np.asarray([0.0, 0.75], dtype=np.float32), (4, 1))
+        np.testing.assert_allclose(finalize_args[5], expected_observed)
+        np.testing.assert_allclose(finalize_args[6], expected_target)
+        self.assertEqual(
+            adapter._finalize_motion.call_args.kwargs["hand_resampling"], "linear"
+        )
 
 
 if __name__ == "__main__":

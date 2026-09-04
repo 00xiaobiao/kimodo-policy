@@ -28,6 +28,12 @@ def _masked_all_binary(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor
     return torch.logical_or(is_binary, ~mask).all()
 
 
+def _masked_all_unit_interval(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    mask = torch.broadcast_to(mask, values.shape)
+    in_range = (values >= -1e-6) & (values <= 1.0 + 1e-6)
+    return torch.logical_or(in_range, ~mask).all()
+
+
 def _masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     mask = torch.broadcast_to(mask, values.shape)
     masked_values = torch.where(mask, values, torch.zeros_like(values))
@@ -80,6 +86,7 @@ class KimodoPolicyConfig:
     # of KimodoPolicyConfig remains compatible.
     control_fusion_mode: str = "both"
     controlnet_scale: int = 1
+    hand_control_mode: str = "binary"  # "binary" or SIMPLE-only "continuous"
 
 
 class KimodoPolicy(nn.Module):
@@ -102,9 +109,19 @@ class KimodoPolicy(nn.Module):
         "fk": "fk_loss",
     }
 
+    def _hand_control_mode(self) -> str:
+        mode = str(getattr(self.config, "hand_control_mode", "binary")).lower()
+        if mode not in {"binary", "continuous"}:
+            raise ValueError(
+                "hand_control_mode must be 'binary' or 'continuous', "
+                f"got {mode!r}"
+            )
+        return mode
+
     def __init__(self, config: KimodoPolicyConfig = None):
         super().__init__()
         self.config = config or KimodoPolicyConfig()
+        self._hand_control_mode()
         config = self.config
         self.fps = config.fps
         checkpoint_path = os.path.abspath(
@@ -550,7 +567,7 @@ class KimodoPolicy(nn.Module):
         gt_mask: torch.Tensor,   # [B, T] bool, T = action_history + action_chunk
         condition_motion: Optional[torch.Tensor] = None,
         condition_motion_mask: Optional[torch.Tensor] = None,
-        gt_hand: Optional[torch.Tensor] = None, # [B, T, 2], binary open/closed state
+        gt_hand: Optional[torch.Tensor] = None, # [B, T, 2], binary or continuous closure
         gt_hand_mask: Optional[torch.Tensor] = None, # [B, T, 2], valid hand supervision
         text_feat: Optional[torch.Tensor] = None,
         text_length: Optional[torch.Tensor] = None,
@@ -613,8 +630,14 @@ class KimodoPolicy(nn.Module):
                 gt_hand_mask = gt_hand_mask & gt_mask.unsqueeze(-1)
             if not _masked_all_finite(gt_hand, gt_hand_mask):
                 raise ValueError("gt_hand contains NaN or Inf")
-            if not _masked_all_binary(gt_hand, gt_hand_mask):
-                raise ValueError("gt_hand must contain only binary 0/1 values")
+            hand_control_mode = self._hand_control_mode()
+            if hand_control_mode == "binary":
+                if not _masked_all_binary(gt_hand, gt_hand_mask):
+                    raise ValueError("gt_hand must contain only binary 0/1 values")
+            elif not _masked_all_unit_interval(gt_hand, gt_hand_mask):
+                raise ValueError(
+                    "continuous gt_hand must contain values within [0, 1]"
+                )
         # 1. 标准化完整 motion
         x_start_full = self.representation.normalize(gt_motion)  # [B, T, 417]
         normalized_condition = self.representation.normalize(condition_motion)
@@ -736,8 +759,16 @@ class KimodoPolicy(nn.Module):
             current_hand, current_hand_valid = self._last_valid_hand_state_and_mask(
                 gt_hand[:, :H], history_mask, gt_hand_mask[:, :H]
             )
-            current_hand = current_hand * 2.0 - 1.0
-            clean_hand = gt_hand[:, H:] * 2.0 - 1.0
+            # The hand head always receives the current state in the legacy
+            # [-1, 1] representation.  Continuous SIMPLE training uses a
+            # signed closure residual in [-1, 1] as the denoising target:
+            # target_future - current_measured_state.
+            current_hand_closure = current_hand
+            current_hand = current_hand_closure * 2.0 - 1.0
+            if hand_control_mode == "continuous":
+                clean_hand = gt_hand[:, H:] - current_hand_closure.unsqueeze(1)
+            else:
+                clean_hand = gt_hand[:, H:] * 2.0 - 1.0
             noisy_hand = self.diffusion.q_sample(
                 clean_hand,
                 t,
@@ -763,12 +794,30 @@ class KimodoPolicy(nn.Module):
             hand_state_loss = (
                 hand_state_error * hand_valid.float()
             ).sum() / hand_valid.sum().clamp_min(1)
-            predicted_sequence = torch.cat(
-                (current_hand.unsqueeze(1), predicted_clean_hand), dim=1
-            )
-            target_sequence = torch.cat(
-                (current_hand.unsqueeze(1), clean_hand), dim=1
-            )
+            if hand_control_mode == "continuous":
+                # Convert residual predictions back to closure before taking
+                # temporal differences.  This keeps the transition loss in a
+                # physically meaningful space and avoids comparing a closure
+                # value with a delta value at the prepended current token.
+                predicted_future_closure = (
+                    current_hand_closure.unsqueeze(1) + predicted_clean_hand
+                ).clamp(0.0, 1.0)
+                target_future_closure = gt_hand[:, H:]
+                predicted_sequence = torch.cat(
+                    (current_hand_closure.unsqueeze(1), predicted_future_closure),
+                    dim=1,
+                )
+                target_sequence = torch.cat(
+                    (current_hand_closure.unsqueeze(1), target_future_closure),
+                    dim=1,
+                )
+            else:
+                predicted_sequence = torch.cat(
+                    (current_hand.unsqueeze(1), predicted_clean_hand), dim=1
+                )
+                target_sequence = torch.cat(
+                    (current_hand.unsqueeze(1), clean_hand), dim=1
+                )
             hand_transition_error = nn.functional.l1_loss(
                 predicted_sequence[:, 1:].float() - predicted_sequence[:, :-1].float(),
                 target_sequence[:, 1:].float() - target_sequence[:, :-1].float(),
@@ -956,7 +1005,8 @@ class KimodoPolicy(nn.Module):
             history_feature_mask = (
                 history_feature_mask & history_mask.unsqueeze(-1)
             )
-        current_hand_binary = None
+        current_hand_state = None
+        hand_control_mode = self._hand_control_mode()
         if self.hand_head is not None:
             if hand_history is None:
                 hand_history = torch.zeros(
@@ -982,15 +1032,21 @@ class KimodoPolicy(nn.Module):
                         f"{(batch_size, provided_history_length, 2)}, got "
                         f"{tuple(hand_history.shape)}"
                     )
-            current_hand_binary = self._last_valid_hand_state(
+            current_hand_state = self._last_valid_hand_state(
                 hand_history, history_mask
             )
-            if not torch.isfinite(current_hand_binary).all():
+            if not torch.isfinite(current_hand_state).all():
                 raise ValueError("hand_history contains NaN or Inf")
-            if not torch.logical_or(
-                current_hand_binary == 0, current_hand_binary == 1
-            ).all():
-                raise ValueError("hand_history must contain only binary 0/1 values")
+            hand_control_mode = self._hand_control_mode()
+            if hand_control_mode == "binary":
+                if not torch.logical_or(
+                    current_hand_state == 0, current_hand_state == 1
+                ).all():
+                    raise ValueError("hand_history must contain only binary 0/1 values")
+            elif ((current_hand_state < -1e-6) | (current_hand_state > 1.0 + 1e-6)).any():
+                raise ValueError(
+                    "continuous hand_history must contain values within [0, 1]"
+                )
         if provided_history_length < history_length:
             left_padding = history_length - provided_history_length
             padded_history = torch.zeros(
@@ -1093,7 +1149,7 @@ class KimodoPolicy(nn.Module):
         current_hand = None
         hand_future_mask = None
         if self.hand_head is not None:
-            current_hand = current_hand_binary.to(dtype=denoiser_dtype) * 2.0 - 1.0
+            current_hand = current_hand_state.to(dtype=denoiser_dtype) * 2.0 - 1.0
             noisy_hand = torch.randn(
                 batch_size,
                 self.config.action_chunk,
@@ -1256,8 +1312,22 @@ class KimodoPolicy(nn.Module):
         if self.hand_head is not None:
             hand_clean = noisy_hand.clamp(-1.0, 1.0)
             output["hand_clean"] = hand_clean
-            output["hand_probability"] = ((hand_clean + 1.0) * 0.5).clamp(0.0, 1.0)
-            output["hand_binary"] = (hand_clean >= 0).to(dtype=hand_clean.dtype)
+            if hand_control_mode == "continuous":
+                # ``hand_clean`` is a signed closure delta in this mode.  The
+                # public closure output remains in the historical [0, 1]
+                # space so downstream SIMPLE/WBC code does not change.
+                hand_delta = hand_clean
+                hand_closure = (
+                    current_hand_state.unsqueeze(1) + hand_delta
+                ).clamp(0.0, 1.0)
+                output["hand_delta"] = hand_delta
+            else:
+                hand_closure = ((hand_clean + 1.0) * 0.5).clamp(0.0, 1.0)
+            output["hand_closure"] = hand_closure
+            # Kept as a compatibility alias for diagnostic consumers of old
+            # checkpoints. In binary mode it is the model's close probability.
+            output["hand_probability"] = hand_closure
+            output["hand_binary"] = (hand_closure >= 0.5).to(dtype=hand_clean.dtype)
         if squeeze_batch and batch_size == 1:
             output = {
                 key: value[0] if torch.is_tensor(value) and value.ndim > 0 and value.shape[0] == 1 else value

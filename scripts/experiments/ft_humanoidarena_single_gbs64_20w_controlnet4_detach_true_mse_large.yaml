@@ -1,30 +1,31 @@
 main:
   batch_size: 16
   max_steps: 200000
-  save_steps: 100000
+  save_steps: 200000
   action_chunk: 50
   action_history: 100
   sample_stride: 1
   seed: 42
-  save_root: "${oc.env:KIMODO_SIMPLE_SAVE_ROOT,log/experiments/simple_single_gbs64_20w_controlnet4_detach_true_mse/}"
+  save_root: "${oc.env:KIMODO_FT_SAVE_ROOT,log/experiments/ft_humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse_large/}"
   dtype: "bf16"
 
   dataset_roots:
-    Simple: "${oc.env:KIMODO_SIMPLE_ROOT,/data/local-data/data/Humanoid/Simple}"
+    HumanoidArena: "${oc.env:HUMANOID_ARENA_ROOT,/data/local-data/data/Humanoid/HumanoidArena_dataset_v3_1}"
 
   dataset_selection:
-    Simple:
-      task: "${oc.env:KIMODO_SIMPLE_TASK,G1WholebodyBendPickTeleop-v0}"
+    HumanoidArena:
+      task: "${oc.env:KIMODO_ARENA_TASK}"
+      backend: "${oc.env:KIMODO_ARENA_BACKEND,sonic}"
 
   sampling:
     mode: "episode_uniform"
 
-  episode_cache_size: 100
-  cpu_workers_num: 8
+  episode_cache_size: 700
+  cpu_workers_num: 24
   precompute_text_embeddings: true
   wandb: "offline"
   wandb_project: "Kimodo-Policy"
-  wandb_run_name: "${oc.env:KIMODO_SIMPLE_RUN_NAME,simple_single_gbs64_20w_controlnet4_detach_true_mse}"
+  wandb_run_name: "${oc.env:KIMODO_FT_RUN_NAME,ft_humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse_large}"
   gradient:
     grad_clip_norm: 1.0
     hand_grad_clip_norm: 1.0
@@ -37,10 +38,11 @@ model:
   dinov3_checkpoint: null
   text_feature_dim: 4096
   controlnet_num_layers: 4
+  controlnet_scale: 2
   detach_root_control_for_body: true
   control_fusion_mode: "both"
   hand_hidden_dim: 256
-  hand_num_layers: 4
+  hand_num_layers: 8
   hand_num_heads: 4
   hand_ffn_dim: 1024
   hand_init_seed: 3407

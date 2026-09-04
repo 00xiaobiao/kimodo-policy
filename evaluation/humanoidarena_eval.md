@@ -77,6 +77,7 @@ tmux new -s football_twist2_formal
 cd /ai/Yichi/yunhengwang/Kimodo-Policy/controlnet_v1.2
 export CONDA_BASE=/ai/Yichi/0_Systems/miniconda3
 export KIMODO_SERVER_PYTHON="$CONDA_BASE/envs/lerobot/bin/python"
+export VLA_MAX_ROOT_DELTA_DEG=26.0
 
 bash evaluation/humanoidarena_eval_signal_task_twist2.sh \
   --project /ai/Yichi/yunhengwang/Kimodo-Policy/controlnet_v1.2 \

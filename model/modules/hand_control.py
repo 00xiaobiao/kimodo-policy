@@ -11,7 +11,7 @@ from .backbone import PositionalEncoding, TimestepEmbedder
 
 
 class HandTokenDiffusionDenoiser(nn.Module):
-    """Predict clean future hand states from four separate token groups."""
+    """Predict clean future binary states or continuous closure residuals."""
 
     def __init__(
         self,

@@ -106,6 +106,18 @@ class _FakeHandHead(nn.Module):
         return torch.zeros_like(noisy_future_hand)
 
 
+class _FixedHandHead(_FakeHandHead):
+    def __init__(self, delta):
+        super().__init__()
+        self.delta = torch.as_tensor(delta, dtype=torch.float32)
+
+    def forward(self, noisy_future_hand, **kwargs):
+        self.timesteps.append(kwargs["timesteps"].detach().clone())
+        return self.delta.to(
+            device=noisy_future_hand.device, dtype=noisy_future_hand.dtype
+        ).expand_as(noisy_future_hand)
+
+
 class _RecordingSampler(nn.Module):
     def __init__(self):
         super().__init__()
@@ -415,6 +427,96 @@ class HandSynchronizedDiffusionTest(unittest.TestCase):
         self.assertTrue(torch.equal(first["hand_clean"], second["hand_clean"]))
         self.assertFalse(torch.equal(first["motion_features"], different["motion_features"]))
         self.assertFalse(torch.equal(first["hand_clean"], different["hand_clean"]))
+
+    def test_continuous_hand_history_is_accepted_and_exposed_as_closure(self):
+        policy = _build_test_policy(_KeepNoiseSampler())
+        policy.config.hand_control_mode = "continuous"
+
+        output = policy.predict_future(
+            instruction="Pick up the object.",
+            egoview=torch.zeros(1, 3, 2, 2),
+            history_motion=torch.zeros(1, 2, 4),
+            hand_history=torch.tensor([[[0.0, 0.25], [0.5, 1.0]]]),
+            diffusion_steps=1,
+            squeeze_batch=False,
+            text_feat=torch.zeros(1, 1, 6),
+        )
+
+        self.assertIn("hand_closure", output)
+        self.assertTrue(torch.all((output["hand_closure"] >= 0) & (output["hand_closure"] <= 1)))
+
+    def test_continuous_hand_prediction_is_reconstructed_from_measured_state(self):
+        policy = _build_test_policy(_RecordingSampler())
+        policy.config.hand_control_mode = "continuous"
+        policy.config.action_chunk = 3
+        policy.hand_head = _FixedHandHead([0.1, -0.2])
+
+        output = policy.predict_future(
+            instruction="Pick up the object.",
+            egoview=torch.zeros(1, 3, 2, 2),
+            history_motion=torch.zeros(1, 2, 4),
+            hand_history=torch.tensor([[[0.2, 0.8], [0.25, 0.75]]]),
+            diffusion_steps=1,
+            squeeze_batch=False,
+            text_feat=torch.zeros(1, 1, 6),
+        )
+
+        torch.testing.assert_close(
+            output["hand_delta"], torch.tensor([[[0.1, -0.2]]]).expand(1, 3, 2)
+        )
+        torch.testing.assert_close(
+            output["hand_closure"], torch.tensor([[[0.35, 0.55]]]).expand(1, 3, 2)
+        )
+        torch.testing.assert_close(
+            output["hand_binary"], torch.tensor([[[0.0, 1.0]]]).expand(1, 3, 2)
+        )
+
+    def test_binary_hand_history_still_rejects_intermediate_values(self):
+        policy = _build_test_policy(_KeepNoiseSampler())
+
+        with self.assertRaisesRegex(ValueError, "binary 0/1"):
+            policy.predict_future(
+                instruction="Pick up the object.",
+                egoview=torch.zeros(1, 3, 2, 2),
+                history_motion=torch.zeros(1, 2, 4),
+                hand_history=torch.full((1, 2, 2), 0.5),
+                diffusion_steps=1,
+                squeeze_batch=False,
+                text_feat=torch.zeros(1, 1, 6),
+            )
+
+    def test_continuous_training_accepts_intermediate_targets(self):
+        policy = _build_test_policy(_KeepNoiseSampler())
+        policy.config.hand_control_mode = "continuous"
+        policy.config.root_loss_weight = 1.0
+        policy.config.body_loss_weight = 1.0
+        policy.config.hand_loss_weight = 1.0
+        policy.config.hand_transition_loss_weight = 0.2
+        output = policy.training_kimodo_policy_controlnet(
+            instruction=["Pick up the object."],
+            egoview=torch.zeros(1, 3, 2, 2),
+            gt_motion=torch.zeros(1, 5, 4),
+            gt_mask=torch.ones(1, 5, dtype=torch.bool),
+            gt_hand=torch.tensor(
+                [[[0.0, 0.0], [0.1, 0.3], [0.4, 0.7], [0.8, 1.0], [1.0, 1.0]]]
+            ),
+            text_feat=torch.zeros(1, 1, 6),
+        )
+        self.assertTrue(torch.isfinite(output["loss"]))
+
+    def test_binary_training_still_rejects_intermediate_targets(self):
+        policy = _build_test_policy(_KeepNoiseSampler())
+        policy.config.root_loss_weight = 1.0
+        policy.config.body_loss_weight = 1.0
+        with self.assertRaisesRegex(ValueError, "binary 0/1"):
+            policy.training_kimodo_policy_controlnet(
+                instruction=["Pick up the object."],
+                egoview=torch.zeros(1, 3, 2, 2),
+                gt_motion=torch.zeros(1, 5, 4),
+                gt_mask=torch.ones(1, 5, dtype=torch.bool),
+                gt_hand=torch.full((1, 5, 2), 0.5),
+                text_feat=torch.zeros(1, 1, 6),
+            )
 
 
 if __name__ == "__main__":

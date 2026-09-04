@@ -266,6 +266,83 @@ def resample_hand_binary_chunk(
     return extended[source_indices][1:]
 
 
+def _validate_hand_continuous(
+    hand_closure: np.ndarray | torch.Tensor,
+) -> torch.Tensor:
+    hand_closure = torch.as_tensor(hand_closure, dtype=torch.float32)
+    if hand_closure.ndim != 2 or hand_closure.shape[-1] != 2:
+        raise ValueError(
+            f"Expected hand_closure shape (T, 2), got {tuple(hand_closure.shape)}"
+        )
+    if hand_closure.shape[0] == 0:
+        raise ValueError("Cannot resample an empty hand closure sequence")
+    if not torch.isfinite(hand_closure).all():
+        raise ValueError("Hand closure contains NaN or Inf")
+    if ((hand_closure < -1e-6) | (hand_closure > 1.0 + 1e-6)).any():
+        raise ValueError("Hand closure must be within [0, 1]")
+    return hand_closure.clamp(0.0, 1.0)
+
+
+def resample_hand_continuous(
+    hand_closure: np.ndarray | torch.Tensor,
+    source_fps: float,
+    target_fps: float,
+) -> torch.Tensor:
+    """Linearly resample continuous left/right SIMPLE hand closure."""
+    hand_closure = _validate_hand_continuous(hand_closure)
+    if abs(float(source_fps) - float(target_fps)) < 1e-6:
+        return hand_closure
+    source_frames = hand_closure.shape[0]
+    target_frames = int(
+        round((source_frames - 1) * float(target_fps) / float(source_fps))
+    ) + 1
+    source_positions = (
+        torch.arange(
+            target_frames, device=hand_closure.device, dtype=torch.float32
+        )
+        * float(source_fps)
+        / float(target_fps)
+    ).clamp(max=source_frames - 1)
+    lower = source_positions.floor().long()
+    upper = (lower + 1).clamp(max=source_frames - 1)
+    alpha = (source_positions - lower.float()).unsqueeze(-1)
+    return (1.0 - alpha) * hand_closure[lower] + alpha * hand_closure[upper]
+
+
+def resample_hand_continuous_chunk(
+    hand_closure: np.ndarray | torch.Tensor,
+    source_fps: float,
+    target_fps: float,
+    previous_hand_closure: np.ndarray | torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Linearly resample a predicted closure chunk from its executed boundary."""
+    hand_closure = _validate_hand_continuous(hand_closure)
+    if previous_hand_closure is None:
+        previous_hand_closure = hand_closure[0]
+    previous = torch.as_tensor(
+        previous_hand_closure,
+        device=hand_closure.device,
+        dtype=hand_closure.dtype,
+    ).reshape(1, 2)
+    previous = _validate_hand_continuous(previous)
+    extended = torch.cat((previous, hand_closure), dim=0)
+    target_intervals = max(
+        1,
+        int(round(hand_closure.shape[0] * float(target_fps) / float(source_fps))),
+    )
+    source_positions = torch.linspace(
+        0,
+        hand_closure.shape[0],
+        target_intervals + 1,
+        device=hand_closure.device,
+        dtype=torch.float32,
+    )[1:]
+    lower = source_positions.floor().long()
+    upper = (lower + 1).clamp(max=hand_closure.shape[0])
+    alpha = (source_positions - lower.float()).unsqueeze(-1)
+    return (1.0 - alpha) * extended[lower] + alpha * extended[upper]
+
+
 class HumanoidArenaActionDecoder:
     """Decode HumanoidArena V3.1 40D reference actions into Kimodo G1 motion."""
 

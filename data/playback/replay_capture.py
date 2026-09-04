@@ -1,30 +1,35 @@
 #!/usr/bin/env python3
-"""Replay one SIMPLE LeRobot episode and export an Arena/Kimodo-compatible set.
+"""Export one SIMPLE episode as an Arena/Kimodo-compatible dataset.
 
-The default ``mujoco_isaac`` mode keeps MuJoCo as the fast physics/WBC engine
-and drives Isaac Sim as the synchronized renderer.  This is important for
-SIMPLE episodes: the camera image is rendered from the recorded HSSD room,
-instead of MuJoCo's plain fallback floor/table.  Passing ``--sim-mode mujoco``
-is still available as a lightweight diagnostic.
+The default ``expert_aligned`` mode preserves the successful demonstration:
+recorded expert proprioception becomes the observed and target joint pose, and
+the original expert MP4 is copied without re-encoding.  This avoids the WBC and
+contact drift inherent in rerunning an under-specified processed trajectory.
+The optional ``physics_replay`` mode keeps MuJoCo/Isaac replay for diagnostics,
+but it is not treated as exact expert reproduction.
 
-The source SIMPLE archive contains a 32-D observation and 36-D WBC command. The
-exporter samples the *measured* MuJoCo state after each replay step, while the
-action root is reconstructed from the recorded reference command, and writes
-the 64-D/40-D Arena protocol:
+The source SIMPLE archive contains 32-D state features, a 36-D WBC command, and
+separate measured body/hand joint observations.  The exporter reconstructs the
+root reference from the recorded navigation command and writes the 64-D/40-D
+Arena protocol:
 
     state = root_rot6d_relative_to_episode_heading + q29 + dq29
     action = reference_root_local_xy_delta + reference_root_z
              + reference_root_rot6d + target_q29 + hand_binary
 
-The output is a normal LeRobot-like directory (one parquet file and one MP4
-for this prototype) and can be extended to shard multiple episodes.
+The processed source does not contain measured floating-base or object poses.
+Those cannot be reproduced exactly; metadata marks root fields as command-
+reconstructed in expert-aligned output.  Each output directory contains one
+episode parquet and one MP4.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -49,9 +54,14 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from scipy.spatial.transform import Rotation
 
-
 HERE = Path(__file__).resolve()
 PROJECT_ROOT = HERE.parents[2]  # controlnet_v1.2
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from data.simple_hand import project_hand_closure
+
+
 SIMPLE_ROOT = PROJECT_ROOT / "SIMPLE"
 DATA_ROOT = Path("/data/local-data/data/Humanoid/psi-data")
 TORCH_EXTENSIONS_ROOT = DATA_ROOT / "torch-extensions"
@@ -101,6 +111,9 @@ SOURCE_LOCAL_XY_SLICE = slice(32, 34)
 SOURCE_TARGET_YAW_INDEX = 35
 REFERENCE_ROOT_SOURCE = "simple_synced_command_integrated"
 REFERENCE_ROOT_ORIENTATION = "yaw_only_target"
+CAPTURE_MODE_EXPERT_ALIGNED = "expert_aligned"
+CAPTURE_MODE_PHYSICS_REPLAY = "physics_replay"
+CAPTURE_MODES = (CAPTURE_MODE_EXPERT_ALIGNED, CAPTURE_MODE_PHYSICS_REPLAY)
 
 
 class _WholebodyReplayObservationAdapter:
@@ -386,8 +399,13 @@ def reference_root_from_source_action(source_action: np.ndarray, fps: float) -> 
     }
 
 
-def reference_protocol_metadata() -> dict:
+def reference_protocol_metadata(
+    capture_mode: str = CAPTURE_MODE_PHYSICS_REPLAY,
+) -> dict:
     """Return the complete V3.1 semantics used by replay exports."""
+    if capture_mode not in CAPTURE_MODES:
+        raise ValueError(f"unsupported capture mode: {capture_mode}")
+    expert_aligned = capture_mode == CAPTURE_MODE_EXPERT_ALIGNED
     return {
         "schema": "unitree_g1_gmt_refpose_v3_1",
         "version": "3.1",
@@ -399,34 +417,119 @@ def reference_protocol_metadata() -> dict:
         "root_rotation_frame": "episode_reference_frame",
         "fps": 50.0,
         "control_dt": 0.02,
-        "source": "SIMPLE MuJoCo replay",
+        "source": (
+            "SIMPLE recorded expert trajectory"
+            if expert_aligned
+            else "SIMPLE MuJoCo physics replay"
+        ),
+        "capture_mode": capture_mode,
         "reference_root_source": REFERENCE_ROOT_SOURCE,
         "reference_root_orientation": REFERENCE_ROOT_ORIENTATION,
-        "measured_root_fields": ["observation.root_p", "observation.root_q"],
+        "observation_root_source": (
+            "command_reconstructed_not_measured"
+            if expert_aligned
+            else "replayed_mujoco_measured"
+        ),
+        "observation_joint_source": (
+            "recorded_expert_proprioception"
+            if expert_aligned
+            else "replayed_mujoco_measured"
+        ),
+        "target_joint_source": (
+            "recorded_expert_proprioception"
+            if expert_aligned
+            else "rerun_decoupled_wbc"
+        ),
+        "task_success_source": (
+            "unavailable_in_processed_source"
+            if expert_aligned
+            else "replayed_environment"
+        ),
+        "measured_root_fields": (
+            []
+            if expert_aligned
+            else ["observation.root_p", "observation.root_q"]
+        ),
     }
 
 
-def add_reference_features(features: dict) -> None:
+def add_reference_features(
+    features: dict,
+    capture_mode: str = CAPTURE_MODE_PHYSICS_REPLAY,
+) -> None:
     """Declare the explicit audit/reference columns stored beside 64D/40D."""
+    expert_aligned = capture_mode == CAPTURE_MODE_EXPERT_ALIGNED
     features.update(
         {
             "observation.root_p": {
-                "dtype": "float32", "shape": [3], "names": ["x", "y", "z"]
+                "dtype": "float32", "shape": [3], "names": ["x", "y", "z"],
+                "semantics": (
+                    "command_reconstructed_xy_and_commanded_absolute_height"
+                    if expert_aligned
+                    else "replayed_mujoco_measured"
+                ),
             },
             "observation.root_q": {
-                "dtype": "float32", "shape": [4], "names": ["w", "x", "y", "z"]
+                "dtype": "float32", "shape": [4], "names": ["w", "x", "y", "z"],
+                "semantics": (
+                    "command_reconstructed_episode_relative_yaw_only"
+                    if expert_aligned
+                    else "replayed_mujoco_measured"
+                ),
             },
             "observation.joint_q": {
-                "dtype": "float32", "shape": [29], "names": list(CANONICAL_NAMES)
+                "dtype": "float32", "shape": [29], "names": list(CANONICAL_NAMES),
+                "semantics": (
+                    "recorded_expert_proprioception"
+                    if expert_aligned
+                    else "replayed_mujoco_measured"
+                ),
             },
             "observation.joint_dq": {
-                "dtype": "float32", "shape": [29], "names": list(CANONICAL_NAMES)
+                "dtype": "float32", "shape": [29], "names": list(CANONICAL_NAMES),
+                "semantics": (
+                    "finite_difference_of_recorded_expert_joint_q"
+                    if expert_aligned
+                    else "replayed_mujoco_measured"
+                ),
             },
             "observation.hand_q": {
-                "dtype": "float32", "shape": [14]
+                "dtype": "float32", "shape": [14],
+                "semantics": (
+                    "recorded_expert_proprioception_in_thumb_index_middle_order"
+                    if expert_aligned
+                    else "replayed_mujoco_measured_in_thumb_index_middle_order"
+                ),
+            },
+            "observation.hand_closure": {
+                "dtype": "float32", "shape": [2],
+                "names": ["left", "right"],
+                "semantics": "observation_hand_q_projected_onto_simple_close_pose",
             },
             "action.target_joint_q": {
-                "dtype": "float32", "shape": [29], "names": list(CANONICAL_NAMES)
+                "dtype": "float32", "shape": [29], "names": list(CANONICAL_NAMES),
+                "semantics": (
+                    "recorded_expert_proprioception"
+                    if expert_aligned
+                    else "rerun_decoupled_wbc_target"
+                ),
+            },
+            "action.target_hand_q": {
+                "dtype": "float32", "shape": [14],
+                "semantics": (
+                    "recorded_expert_proprioception_in_thumb_index_middle_order"
+                    if expert_aligned
+                    else "rerun_decoupled_wbc_target_in_thumb_index_middle_order"
+                ),
+            },
+            "action.hand_closure": {
+                "dtype": "float32", "shape": [2],
+                "names": ["left", "right"],
+                "semantics": (
+                    "recorded_expert_hand_q_projected_onto_simple_close_pose"
+                    if expert_aligned
+                    else "commanded_hand_target_projected_onto_simple_close_pose"
+                ),
             },
             "action.reference_root_p": {
                 "dtype": "float32", "shape": [3], "names": ["x", "y", "z"],
@@ -476,6 +579,114 @@ def load_episode(source_root: Path, episode_index: int):
     return table.to_pandas(), files[0]
 
 
+def source_video_path(source_root: Path, episode_index: int) -> Path:
+    """Resolve the original expert MP4 for one processed SIMPLE episode."""
+    candidates = sorted(
+        (source_root / "videos").glob(
+            f"chunk-*/egocentric/episode_{episode_index:06d}.mp4"
+        )
+    )
+    if not candidates:
+        raise FileNotFoundError(
+            f"expert video for episode {episode_index} not found below {source_root / 'videos'}"
+        )
+    return candidates[0]
+
+
+def _source_matrix(episode, column: str, width: int) -> np.ndarray:
+    values = np.stack(
+        [np.asarray(value, dtype=np.float32).reshape(width) for value in episode[column]],
+        axis=0,
+    )
+    if not np.isfinite(values).all():
+        raise ValueError(f"source column {column} contains NaN or Inf")
+    return values
+
+
+def expert_aligned_frames(episode, *, fps: float = 50.0) -> dict[str, np.ndarray]:
+    """Build export arrays directly from recorded expert proprioception.
+
+    The processed archive intentionally has no measured floating-base/object
+    trajectory.  Body joints are therefore copied from the recorded leg/arm
+    observations.  The training target is the same realized expert trajectory;
+    the original 36-D command is retained separately for audit and root-command
+    reconstruction.  No controller, contact solver, or environment step is
+    involved here.
+    """
+    leg = _source_matrix(episode, "observation.leg_joints", 15)
+    arm = _source_matrix(episode, "observation.arm_joints", 14)
+    hand = _source_matrix(episode, "observation.hand_joints", 14)
+    source_action = _source_matrix(episode, "action", SOURCE_ACTION_DIM)
+    n = len(source_action)
+    if not (len(leg) == len(arm) == len(hand) == n):
+        raise ValueError("expert observation/action columns have different lengths")
+
+    body_source = np.concatenate((leg[:, :12], leg[:, 12:15], arm), axis=1)
+    body_name_to_index = {name: i for i, name in enumerate(BODY_NAMES)}
+    canonical_indices = [body_name_to_index[name] for name in CANONICAL_NAMES]
+    body = body_source[:, canonical_indices].astype(np.float32, copy=False)
+
+    # The action has no lower-body joint targets.  Mixing its upper-body
+    # commands with recorded legs would also introduce controller tracking
+    # error.  Use the realized expert pose for the full body/hand target and
+    # retain source.action unchanged for command-level audit.
+    target_body = body.copy()
+    target_hand = hand.copy()
+
+    # The processed archive has no qvel.  A one-sided finite difference keeps
+    # the frame alignment explicit and avoids silently importing simulator qvel.
+    joint_dq = np.zeros_like(body)
+    if n > 1:
+        joint_dq[:-1] = np.diff(body, axis=0) * float(fps)
+        joint_dq[-1] = joint_dq[-2]
+    reference = reference_root_from_source_action(source_action, fps)
+    reference_root_p = reference["root_p_relative"].copy()
+    root_p = reference_root_p.copy()
+    root_p[:, 2] = reference["height"]
+    root_q = reference["root_q_relative"].copy()
+    state = np.concatenate(
+        (np.tile(rot6d_from_matrix(np.eye(3, dtype=np.float32)[None]), (n, 1)), body, joint_dq),
+        axis=1,
+    ).astype(np.float32)
+    # Use the command-reconstructed reference heading for the state root.  It
+    # is the only root orientation available in the processed expert archive.
+    state[:, :6] = rot6d_from_matrix(reference["rotation_matrices"])
+    measured_closure = project_hand_closure(hand, name="expert observation hand q")
+    arena_action = np.concatenate(
+        (
+            reference["local_xy_delta"],
+            reference["height"][:, None],
+            rot6d_from_matrix(reference["rotation_matrices"]),
+            target_body,
+            np.stack([hand_binary(command) for command in source_action], axis=0),
+        ),
+        axis=1,
+    ).astype(np.float32)
+    target_closure = measured_closure.copy()
+    return {
+        "state": state,
+        "action": arena_action,
+        "root_p": root_p,
+        "root_q": root_q,
+        "joint_q": body,
+        "joint_dq": joint_dq,
+        "hand_q": hand,
+        "hand_closure": measured_closure,
+        "target_joint_q": target_body,
+        "target_hand_q": target_hand,
+        "action_hand_closure": target_closure,
+        "reference_root_p": reference_root_p,
+        "reference_root_q": root_q,
+        "source_states": _source_matrix(episode, "states", 32),
+        "source_action": source_action,
+        "source_leg_joints": leg,
+        "source_arm_joints": arm,
+        "source_hand_joints": hand,
+        "done": np.asarray(episode["next.done"], dtype=bool),
+        "success": None,
+    }
+
+
 def load_env_config(source_root: Path, episode_index: int) -> dict:
     path = source_root / "meta/episodes.jsonl"
     with path.open() as f:
@@ -487,6 +698,19 @@ def load_env_config(source_root: Path, episode_index: int) -> dict:
                     raise ValueError(f"episode {episode_index} has no environment_config")
                 return json.loads(raw)
     raise KeyError(f"episode {episode_index} missing from {path}")
+
+
+def load_task_text(source_root: Path, episode) -> str:
+    task_index = int(np.asarray(episode["task_index"])[0])
+    path = source_root / "meta/tasks.jsonl"
+    with path.open() as stream:
+        for line in stream:
+            if not line.strip():
+                continue
+            item = json.loads(line)
+            if int(item.get("task_index", -1)) == task_index:
+                return str(item["task"])
+    raise KeyError(f"task index {task_index} missing from {path}")
 
 
 def make_wbc_config():
@@ -506,6 +730,33 @@ def make_wbc_config():
     return sonic_config
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _video_metadata(path: Path) -> dict[str, float | int]:
+    capture = cv2.VideoCapture(str(path))
+    if not capture.isOpened():
+        raise RuntimeError(f"cannot open video: {path}")
+    try:
+        count = int(round(float(capture.get(cv2.CAP_PROP_FRAME_COUNT))))
+        width = int(round(float(capture.get(cv2.CAP_PROP_FRAME_WIDTH))))
+        height = int(round(float(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))))
+        fps = float(capture.get(cv2.CAP_PROP_FPS))
+    finally:
+        capture.release()
+    if count <= 0 or width <= 0 or height <= 0 or not np.isfinite(fps) or fps <= 0:
+        raise RuntimeError(
+            f"video metadata is invalid for {path}: "
+            f"frames={count}, size={width}x{height}, fps={fps}"
+        )
+    return {"frames": count, "width": width, "height": height, "fps": fps}
+
+
 def write_output(
     output_root: Path,
     episode_index: int,
@@ -514,7 +765,12 @@ def write_output(
     frames: dict[str, np.ndarray],
     images: list[np.ndarray],
     fps: int,
+    *,
+    capture_mode: str = CAPTURE_MODE_PHYSICS_REPLAY,
+    source_video: Path | None = None,
 ) -> None:
+    if capture_mode not in CAPTURE_MODES:
+        raise ValueError(f"unsupported capture mode: {capture_mode}")
     data_dir = output_root / "data/chunk-000"
     video_dir = output_root / "videos/observation.images.front/chunk-000"
     episode_meta_dir = output_root / "meta/episodes"
@@ -531,7 +787,10 @@ def write_output(
         "observation.joint_q": fixed_list(frames["joint_q"], 29),
         "observation.joint_dq": fixed_list(frames["joint_dq"], 29),
         "observation.hand_q": fixed_list(frames["hand_q"], 14),
+        "observation.hand_closure": fixed_list(frames["hand_closure"], 2),
         "action.target_joint_q": fixed_list(frames["target_joint_q"], 29),
+        "action.target_hand_q": fixed_list(frames["target_hand_q"], 14),
+        "action.hand_closure": fixed_list(frames["action_hand_closure"], 2),
         "action.reference_root_p": fixed_list(frames["reference_root_p"], 3),
         "action.reference_root_q": fixed_list(frames["reference_root_q"], 4),
         "source.states": fixed_list(frames["source_states"], 32),
@@ -542,18 +801,65 @@ def write_output(
         "next.done": pa.array(np.asarray(frames["done"], dtype=bool)),
         "task_index": pa.array(np.zeros(n, dtype=np.int64)),
     }
+    optional_source_columns = {
+        "source.observation.leg_joints": ("source_leg_joints", 15),
+        "source.observation.arm_joints": ("source_arm_joints", 14),
+        "source.observation.hand_joints": ("source_hand_joints", 14),
+    }
+    for column, (frame_key, width) in optional_source_columns.items():
+        if frame_key in frames:
+            columns[column] = fixed_list(frames[frame_key], width)
     pq.write_table(pa.table(columns), parquet_path)
 
     video_path = video_dir / "file-000.mp4"
-    h, w = images[0].shape[:2]
-    writer = cv2.VideoWriter(str(video_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
-    if not writer.isOpened():
-        raise RuntimeError(f"cannot open video writer: {video_path}")
-    try:
-        for image in images:
-            writer.write(cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR))
-    finally:
-        writer.release()
+    if capture_mode == CAPTURE_MODE_EXPERT_ALIGNED:
+        if source_video is None or not source_video.is_file():
+            raise FileNotFoundError(
+                "expert_aligned export requires the source expert video: "
+                f"{source_video}"
+            )
+        shutil.copyfile(source_video, video_path)
+        video_metadata = _video_metadata(video_path)
+        video_frame_count = int(video_metadata["frames"])
+        if video_frame_count != n:
+            raise ValueError(
+                f"expert video frame count {video_frame_count} differs from parquet frames {n}: "
+                f"{source_video}"
+            )
+        if abs(float(video_metadata["fps"]) - float(fps)) > 0.01:
+            raise ValueError(
+                f"expert video fps {video_metadata['fps']} differs from dataset fps {fps}: "
+                f"{source_video}"
+            )
+        video_height = int(video_metadata["height"])
+        video_width = int(video_metadata["width"])
+        video_fps = float(video_metadata["fps"])
+        source_video_sha256 = _sha256_file(source_video)
+        video_sha256 = _sha256_file(video_path)
+        if video_sha256 != source_video_sha256:
+            raise RuntimeError("copied expert video differs from its source")
+    else:
+        if not images:
+            raise ValueError("physics_replay export cannot write an empty image list")
+        h, w = images[0].shape[:2]
+        writer = cv2.VideoWriter(str(video_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+        if not writer.isOpened():
+            raise RuntimeError(f"cannot open video writer: {video_path}")
+        try:
+            for image in images:
+                writer.write(cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR))
+        finally:
+            writer.release()
+        video_metadata = _video_metadata(video_path)
+        video_frame_count = int(video_metadata["frames"])
+        if video_frame_count != n:
+            raise ValueError(
+                f"encoded replay video frames {video_frame_count} differs from parquet frames {n}"
+            )
+        video_height, video_width = h, w
+        video_fps = float(video_metadata["fps"])
+        source_video_sha256 = None
+        video_sha256 = _sha256_file(video_path)
 
     tasks_table = pa.table({"task_index": pa.array([0], type=pa.int64()), "task": pa.array([task_text])})
     pq.write_table(tasks_table, output_root / "meta/tasks.parquet")
@@ -573,10 +879,14 @@ def write_output(
     with (output_root / "meta/episodes.jsonl").open("w") as f:
         f.write(json.dumps({"episode_index": episode_index, "length": n,
                             "environment_config": json.dumps(env_conf),
-                            "success": bool(frames["success"][0])}) + "\n")
+                            "success": (
+                                None
+                                if frames.get("success") is None
+                                else bool(np.asarray(frames["success"]).reshape(-1)[-1])
+                            )}) + "\n")
 
     info = {
-        "codebase_version": "simple-replay-arena-v1-reference-root",
+        "codebase_version": "simple-replay-arena-v2-expert-aligned",
         "robot_type": "unitree_g1_refpose_v3_1",
         "total_episodes": 1,
         "total_frames": n,
@@ -584,11 +894,17 @@ def write_output(
         "total_videos": 1,
         "total_chunks": 1,
         "fps": fps,
+        "capture_mode": capture_mode,
+        "source_video": str(source_video) if source_video is not None else None,
+        "source_video_sha256": source_video_sha256,
+        "video_sha256": video_sha256,
+        "video_frame_count": video_frame_count,
+        "video_fps": video_fps,
         "data_path": "data/chunk-{episode_chunk:03d}/file-{file_index:03d}.parquet",
         "video_path": "videos/{video_key}/chunk-{episode_chunk:03d}/file-{file_index:03d}.mp4",
-        "vla_protocol": reference_protocol_metadata(),
+        "vla_protocol": reference_protocol_metadata(capture_mode),
         "features": {
-            "observation.images.front": {"dtype": "video", "shape": [h, w, 3], "names": ["height", "width", "channel"]},
+            "observation.images.front": {"dtype": "video", "shape": [video_height, video_width, 3], "names": ["height", "width", "channel"]},
             "observation.state": {
                 "dtype": "float32", "shape": [64],
                 "names": [f"state.root_heading_canonical_rot6d.{i}" for i in range(6)]
@@ -605,12 +921,35 @@ def write_output(
             },
         },
     }
-    add_reference_features(info["features"])
+    add_reference_features(info["features"], capture_mode)
+    if capture_mode == CAPTURE_MODE_EXPERT_ALIGNED:
+        info["features"].update(
+            {
+                "source.observation.leg_joints": {
+                    "dtype": "float32", "shape": [15],
+                    "semantics": "verbatim_processed_simple_source",
+                },
+                "source.observation.arm_joints": {
+                    "dtype": "float32", "shape": [14],
+                    "semantics": "verbatim_processed_simple_source",
+                },
+                "source.observation.hand_joints": {
+                    "dtype": "float32", "shape": [14],
+                    "semantics": "verbatim_processed_simple_source",
+                },
+            }
+        )
     (output_root / "meta/info.json").write_text(json.dumps(info, indent=2) + "\n")
 
 
 def validate_output(output_root: Path, fps: int, *, validate_root_motion: bool = True) -> dict:
     """Run Arena shape checks and construct the 417-D Kimodo representation."""
+    info = json.loads((output_root / "meta/info.json").read_text())
+    capture_mode = info.get("capture_mode", CAPTURE_MODE_PHYSICS_REPLAY)
+    if capture_mode not in CAPTURE_MODES:
+        raise ValueError(f"unsupported capture mode in output metadata: {capture_mode}")
+    video_path = output_root / "videos/observation.images.front/chunk-000/file-000.mp4"
+    video_metadata = _video_metadata(video_path)
     table = pq.read_table(output_root / "data/chunk-000/file-000.parquet")
     state = np.asarray(table["observation.state"].combine_chunks().values).reshape(-1, 64).astype(np.float32)
     action = np.asarray(table["action"].combine_chunks().values).reshape(-1, 40).astype(np.float32)
@@ -626,6 +965,14 @@ def validate_output(output_root: Path, fps: int, *, validate_root_motion: bool =
     ).reshape(-1, 4).astype(np.float32)
     source_action = np.asarray(table["source.action"].combine_chunks().values).reshape(-1, 36).astype(np.float32)
     assert state.shape[1:] == (64,) and action.shape[1:] == (40,)
+    if int(video_metadata["frames"]) != len(state):
+        raise ValueError(
+            f"video frames {video_metadata['frames']} differ from parquet frames {len(state)}"
+        )
+    if abs(float(video_metadata["fps"]) - float(fps)) > 0.01:
+        raise ValueError(
+            f"video fps {video_metadata['fps']} differs from dataset fps {fps}"
+        )
     assert all(
         np.isfinite(values).all()
         for values in (
@@ -640,8 +987,44 @@ def validate_output(output_root: Path, fps: int, *, validate_root_motion: bool =
             source_action,
         )
     )
+    optional_hand_columns = {
+        "observation.hand_closure",
+        "action.target_hand_q",
+        "action.hand_closure",
+    }
+    available_columns = set(table.column_names)
+    if optional_hand_columns <= available_columns:
+        for column in optional_hand_columns:
+            width = 14 if column == "action.target_hand_q" else 2
+            values = np.asarray(table[column].combine_chunks().values).reshape(-1, width).astype(np.float32)
+            if not np.isfinite(values).all():
+                raise ValueError(f"{column} contains NaN or Inf")
+        target_hand_q = np.asarray(
+            table["action.target_hand_q"].combine_chunks().values
+        ).reshape(-1, 14).astype(np.float32)
+        target_closure = np.asarray(
+            table["action.hand_closure"].combine_chunks().values
+        ).reshape(-1, 2).astype(np.float32)
+        measured_closure = np.asarray(
+            table["observation.hand_closure"].combine_chunks().values
+        ).reshape(-1, 2).astype(np.float32)
+        expected_target_closure = project_hand_closure(target_hand_q)
+        if not np.allclose(target_closure, expected_target_closure, atol=1e-5):
+            raise ValueError("action.hand_closure does not match action.target_hand_q")
+        if ((target_closure < 0) | (target_closure > 1)).any() or ((measured_closure < 0) | (measured_closure > 1)).any():
+            raise ValueError("SIMPLE hand closure columns must be within [0, 1]")
     assert np.unique(action[:, 38:40]).tolist() <= [0.0, 1.0]
-    if len(action) > 1:
+    state_joint_error = float(np.max(np.abs(state[:, 6:35] - joint_q)))
+    action_joint_error = float(np.max(np.abs(action[:, 9:38] - target_joint_q)))
+    if state_joint_error > 1e-7 or action_joint_error > 1e-7:
+        raise ValueError(
+            "protocol joint fields disagree with their audit columns: "
+            f"state={state_joint_error:.3e}, action={action_joint_error:.3e}"
+        )
+    # Expert-aligned root_p contains the recorded command height.  Some MP
+    # episodes intentionally switch that command by more than 20 cm in one
+    # frame; this is not a measured physics jump and must remain byte-exact.
+    if len(action) > 1 and capture_mode != CAPTURE_MODE_EXPERT_ALIGNED:
         assert np.max(np.linalg.norm(np.diff(root_p, axis=0), axis=1)) < 0.2, "root jump >20cm/frame"
 
     expected_reference = reference_root_from_source_action(source_action, fps)
@@ -760,7 +1143,11 @@ def validate_output(output_root: Path, fps: int, *, validate_root_motion: bool =
     )
 
     quality_errors = []
-    if tracking_rmse > 0.20:
+    if capture_mode == CAPTURE_MODE_EXPERT_ALIGNED and tracking_rmse > 1e-7:
+        quality_errors.append(
+            f"expert-aligned joint tracking RMSE {tracking_rmse:.4e} rad is not zero"
+        )
+    elif tracking_rmse > 0.20:
         quality_errors.append(f"joint tracking RMSE {tracking_rmse:.4f} rad exceeds 0.20")
     # G1Sonic uses the free-joint root at qpos[:7], so its height and planar
     # path are meaningful quality signals.  The archived G1Wholebody model
@@ -776,6 +1163,9 @@ def validate_output(output_root: Path, fps: int, *, validate_root_motion: bool =
             )
 
     return {"frames": int(len(state)), "state_dim": int(state.shape[1]), "action_dim": int(action.shape[1]),
+            "capture_mode": capture_mode,
+            "video_frames": int(video_metadata["frames"]),
+            "video_fps": float(video_metadata["fps"]),
             "kimodo_dim": int(features.shape[-1]), "target_kimodo_dim": int(target_features.shape[-1]),
             "root_step_max_m": root_step_max,
             "root_planar_path_m": root_path_length,
@@ -790,12 +1180,128 @@ def validate_output(output_root: Path, fps: int, *, validate_root_motion: bool =
             "reference_root_quaternion_norm_max_error": reference_quaternion_norm_error,
             "joint_tracking_rmse_rad": tracking_rmse,
             "joint_tracking_max_rad": float(np.max(np.abs(tracking_error))),
+            "state_joint_audit_max_error_rad": state_joint_error,
+            "action_joint_audit_max_error_rad": action_joint_error,
             "quality_passed": not quality_errors,
             "quality_errors": quality_errors,
             "canonical_joint_order": list(CANONICAL_NAMES)}
 
 
-def run(args) -> dict:
+def validate_expert_alignment(
+    output_root: Path,
+    episode,
+    source_video: Path,
+    *,
+    fps: float,
+) -> dict:
+    """Require byte-identical source fields and video in expert-aligned mode."""
+    expected = expert_aligned_frames(episode, fps=fps)
+    table = pq.read_table(output_root / "data/chunk-000/file-000.parquet")
+    columns = {
+        "observation.state": ("state", 64),
+        "action": ("action", 40),
+        "observation.root_p": ("root_p", 3),
+        "observation.root_q": ("root_q", 4),
+        "observation.joint_q": ("joint_q", 29),
+        "observation.joint_dq": ("joint_dq", 29),
+        "observation.hand_q": ("hand_q", 14),
+        "observation.hand_closure": ("hand_closure", 2),
+        "action.target_joint_q": ("target_joint_q", 29),
+        "action.target_hand_q": ("target_hand_q", 14),
+        "action.hand_closure": ("action_hand_closure", 2),
+        "action.reference_root_p": ("reference_root_p", 3),
+        "action.reference_root_q": ("reference_root_q", 4),
+        "source.states": ("source_states", 32),
+        "source.action": ("source_action", 36),
+        "source.observation.leg_joints": ("source_leg_joints", 15),
+        "source.observation.arm_joints": ("source_arm_joints", 14),
+        "source.observation.hand_joints": ("source_hand_joints", 14),
+    }
+    errors = {}
+    mismatched = []
+    for column, (frame_key, width) in columns.items():
+        actual = np.asarray(table[column].combine_chunks().values).reshape(-1, width)
+        wanted = np.asarray(expected[frame_key], dtype=np.float32)
+        error = float(np.max(np.abs(actual - wanted)))
+        errors[f"{column}_max_error"] = error
+        if not np.array_equal(actual, wanted):
+            mismatched.append(column)
+    actual_done = table["next.done"].to_numpy(zero_copy_only=False).astype(bool)
+    if not np.array_equal(actual_done, expected["done"]):
+        mismatched.append("next.done")
+
+    output_video = output_root / "videos/observation.images.front/chunk-000/file-000.mp4"
+    source_hash = _sha256_file(source_video)
+    output_hash = _sha256_file(output_video)
+    if source_hash != output_hash:
+        mismatched.append("observation.images.front")
+    if mismatched:
+        raise ValueError(
+            "expert-aligned output differs from the recorded expert source: "
+            + ", ".join(mismatched)
+        )
+    return {
+        "expert_alignment_passed": True,
+        "expert_alignment_max_error": max(errors.values()),
+        "expert_body_q_max_error_rad": errors["observation.joint_q_max_error"],
+        "expert_hand_q_max_error_rad": errors["observation.hand_q_max_error"],
+        "expert_target_body_q_max_error_rad": errors["action.target_joint_q_max_error"],
+        "expert_target_hand_q_max_error_rad": errors["action.target_hand_q_max_error"],
+        "expert_video_sha256_match": True,
+        "source_video_sha256": source_hash,
+    }
+
+
+def run_expert_aligned(args) -> dict:
+    source_root = Path(args.source).resolve()
+    output_root = Path(args.output).resolve()
+    episode, source_path = load_episode(source_root, args.episode)
+    if args.max_frames is not None and args.max_frames < len(episode):
+        raise ValueError(
+            "--max-frames is only supported by physics_replay; expert_aligned "
+            "must preserve the complete source video and parquet timeline"
+        )
+    env_conf = load_env_config(source_root, args.episode)
+    task_text = load_task_text(source_root, episode)
+    source_info = json.loads((source_root / "meta/info.json").read_text())
+    fps = float(source_info["fps"])
+    source_video = source_video_path(source_root, args.episode)
+    frames = expert_aligned_frames(episode, fps=fps)
+    write_output(
+        output_root,
+        args.episode,
+        task_text,
+        env_conf,
+        frames,
+        [],
+        fps,
+        capture_mode=CAPTURE_MODE_EXPERT_ALIGNED,
+        source_video=source_video,
+    )
+    report = validate_output(output_root, fps, validate_root_motion=True)
+    report.update(
+        validate_expert_alignment(
+            output_root, episode, source_video, fps=fps
+        )
+    )
+    report.update(
+        {
+            "source": str(source_path),
+            "source_video": str(source_video),
+            "output": str(output_root),
+            "success": None,
+            "task_success_available": False,
+            "completion_signal": "source_next_done_only",
+            "replay_backend": "none_recorded_expert",
+            "recorded_frames": len(frames["state"]),
+            "source_frames": len(episode),
+        }
+    )
+    (output_root / "validation.json").write_text(json.dumps(report, indent=2) + "\n")
+    return report
+
+
+def run_physics_replay(args) -> dict:
     os.environ.setdefault("SIMPLE_DATA_DIR", str(DATA_ROOT))
     # Keep any on-demand SIMPLE asset lookup on the fast Hugging Face mirror.
     os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
@@ -854,7 +1360,7 @@ def run(args) -> dict:
     output_root = Path(args.output).resolve()
     episode, source_path = load_episode(source_root, args.episode)
     env_conf = load_env_config(source_root, args.episode)
-    task_text = json.loads((source_root / "meta/tasks.jsonl").read_text().splitlines()[0])["task"]
+    task_text = load_task_text(source_root, episode)
     sonic_config = make_wbc_config()
     env = gym.make(args.env_id, sim_mode=args.sim_mode, render_hz=50, headless=True,
                    max_episode_steps=max(len(episode) + 200, 1000), physics_dt=args.physics_dt,
@@ -916,7 +1422,7 @@ def run(args) -> dict:
             "continuing so validation can decide whether this replay is usable"
         )
 
-    states, actions, root_ps, root_qs, joint_qs, joint_dqs, hand_qs, target_joint_qs = [], [], [], [], [], [], [], []
+    states, actions, root_ps, root_qs, joint_qs, joint_dqs, hand_qs, hand_closures, target_joint_qs, target_hand_qs, action_hand_closures = [], [], [], [], [], [], [], [], [], [], []
     reference_root_ps, reference_root_qs = [], []
     source_states, source_actions, dones, images = [], [], [], []
     success = []
@@ -931,6 +1437,12 @@ def run(args) -> dict:
     for i in range(frame_limit):
         action_cmd = agent.get_action(observation)
         target_q_body = np.asarray(action_cmd["target_q"], dtype=np.float32).reshape(29)
+        target_hand_q = np.concatenate(
+            (
+                np.asarray(action_cmd["left_hand_q"], dtype=np.float32).reshape(7),
+                np.asarray(action_cmd["right_hand_q"], dtype=np.float32).reshape(7),
+            )
+        )
         target_q = target_q_body[[body_name_to_index[name] for name in CANONICAL_NAMES]]
         source_row = episode.iloc[i]
         replay_action = adapt_action(action_cmd)
@@ -948,6 +1460,12 @@ def run(args) -> dict:
         dq = joint_vector(mujoco_sim.mjData, CANONICAL_NAMES, "qvel")
         hq = np.concatenate([joint_vector(mujoco_sim.mjData, LEFT_HAND_NAMES, "qpos"),
                              joint_vector(mujoco_sim.mjData, RIGHT_HAND_NAMES, "qpos")])
+        measured_hand_closure = project_hand_closure(
+            hq, name="measured SIMPLE hand state"
+        )[0]
+        action_hand_closure = project_hand_closure(
+            target_hand_q, name="commanded SIMPLE hand target", max_relative_residual=0.05
+        )[0]
         source_command = source_action_matrix[i]
         reference_rotation = reference_root["rotation_matrices"][i]
         state = np.concatenate([rot6d_from_matrix(r_rel[None])[0], q, dq]).astype(np.float32)
@@ -962,9 +1480,12 @@ def run(args) -> dict:
         ).astype(np.float32)
         states.append(state); actions.append(arena_action); root_ps.append(p); root_qs.append(qpos[3:7]);
         joint_qs.append(q); joint_dqs.append(dq); hand_qs.append(hq)
+        hand_closures.append(measured_hand_closure)
         # Keep the WBC target separately for auditing measured-vs-reference
         # tracking while exposing it in the protocol action[9:38].
         target_joint_qs.append(target_q)
+        target_hand_qs.append(target_hand_q)
+        action_hand_closures.append(action_hand_closure)
         reference_root_ps.append(reference_root["root_p_relative"][i])
         reference_root_qs.append(reference_root["root_q_relative"][i])
         source_states.append(np.asarray(source_row["states"], dtype=np.float32))
@@ -978,12 +1499,23 @@ def run(args) -> dict:
             break
     frames = {"state": np.stack(states), "action": np.stack(actions), "root_p": np.stack(root_ps),
               "root_q": np.stack(root_qs), "joint_q": np.stack(joint_qs), "joint_dq": np.stack(joint_dqs),
-              "hand_q": np.stack(hand_qs), "source_states": np.stack(source_states),
-              "target_joint_q": np.stack(target_joint_qs), "source_action": np.stack(source_actions),
+              "hand_q": np.stack(hand_qs), "hand_closure": np.stack(hand_closures),
+              "source_states": np.stack(source_states),
+              "target_joint_q": np.stack(target_joint_qs), "target_hand_q": np.stack(target_hand_qs),
+              "action_hand_closure": np.stack(action_hand_closures), "source_action": np.stack(source_actions),
               "reference_root_p": np.stack(reference_root_ps),
               "reference_root_q": np.stack(reference_root_qs),
               "done": np.asarray(dones), "success": np.asarray(success)}
-    write_output(output_root, args.episode, task_text, env_conf, frames, images, 50)
+    write_output(
+        output_root,
+        args.episode,
+        task_text,
+        env_conf,
+        frames,
+        images,
+        50,
+        capture_mode=CAPTURE_MODE_PHYSICS_REPLAY,
+    )
     report = validate_output(
         output_root,
         50,
@@ -1002,12 +1534,27 @@ def run(args) -> dict:
     return report
 
 
+def run(args) -> dict:
+    if args.capture_mode == CAPTURE_MODE_EXPERT_ALIGNED:
+        return run_expert_aligned(args)
+    return run_physics_replay(args)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", default=str(DEFAULT_SOURCE))
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT))
     parser.add_argument("--episode", type=int, default=0)
     parser.add_argument("--env-id", default="simple/G1WholebodyBendHandoverTeleop-v0")
+    parser.add_argument(
+        "--capture-mode",
+        choices=CAPTURE_MODES,
+        default=CAPTURE_MODE_EXPERT_ALIGNED,
+        help=(
+            "expert_aligned copies recorded proprioception/video exactly (default); "
+            "physics_replay reruns WBC and simulation for diagnostics"
+        ),
+    )
     parser.add_argument("--sim-mode", choices=("mujoco_isaac", "mujoco"), default="mujoco_isaac",
                         help="MuJoCo physics only, or synchronized Isaac Sim HSSD rendering (default).")
     parser.add_argument("--max-stabilize-steps", type=int, default=600)

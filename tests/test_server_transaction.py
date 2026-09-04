@@ -14,11 +14,16 @@ from evaluation.humanoidarena_server import (
     _resolve_rtc_parameters,
     resample_hand_binary_chunk,
 )
+from motion.g1_reference import resample_hand_continuous_chunk
 from evaluation import humanoidarena_server as arena_server
 from evaluation.simple_server import (
     _make_simple_runtime_class,
     _reset_episode_step_counters,
     _resolve_future_root_boundary,
+    RIGHT_HAND_CLOSE,
+    _wbc_hand_to_mjcf,
+    arena_action_to_simple,
+    SIMPLE_RIGHT_HAND_CLOSE,
 )
 
 KimodoSimpleHumanoidArenaRuntime = _make_simple_runtime_class(arena_server)
@@ -102,6 +107,36 @@ class _RtcTailPolicy(_FakePolicy):
             dim=0,
         )
         output["hand_clean"] = output["hand_binary"] * 2.0 - 1.0
+        return output
+
+
+class _ContinuousHandPolicy(_FakePolicy):
+    def predict_future(self, **kwargs):
+        output = super().predict_future(**kwargs)
+        output["hand_closure"] = torch.tensor(
+            [[0.2, 0.4], [0.8, 1.0]], dtype=torch.float32
+        )
+        output["hand_clean"] = output["hand_closure"] * 2.0 - 1.0
+        output["hand_binary"] = (output["hand_closure"] >= 0.5).float()
+        return output
+
+
+class _ContinuousTailHandPolicy(_FakePolicy):
+    """Predict a close event outside a 15-frame executed body prefix."""
+
+    def predict_future(self, **kwargs):
+        output = super().predict_future(**kwargs)
+        frames = 50
+        output["motion_features"] = torch.zeros(frames, 4)
+        output["local_rot_mats"] = (
+            torch.eye(3).reshape(1, 1, 3, 3).repeat(frames, 1, 1, 1)
+        )
+        output["root_positions"] = torch.zeros(frames, 3)
+        hand_closure = torch.zeros(frames, 2)
+        hand_closure[30:, 1] = 1.0
+        output["hand_closure"] = hand_closure
+        output["hand_clean"] = hand_closure * 2.0 - 1.0
+        output["hand_binary"] = (hand_closure >= 0.5).float()
         return output
 
 
@@ -224,6 +259,238 @@ def _assert_snapshot(test_case, runtime, expected):
 
 
 class ServerTransactionTest(unittest.TestCase):
+    def test_simple_binary_close_uses_training_hand_target_and_mjcf_order(self):
+        action = np.zeros((1, 40), dtype=np.float32)
+        action[0, 39] = 1.0
+
+        source = arena_action_to_simple(action)
+        np.testing.assert_allclose(source[0, 7:14], RIGHT_HAND_CLOSE)
+        np.testing.assert_allclose(
+            _wbc_hand_to_mjcf(source[0, 7:14]),
+            np.asarray([-0.5, -0.7, -0.7, 0.6, 1.5, 1.5, 1.5], dtype=np.float32),
+        )
+
+    def test_simple_continuous_closure_maps_without_binary_threshold(self):
+        action = np.zeros((1, 40), dtype=np.float32)
+        action[0, 39] = 0.25
+
+        source = arena_action_to_simple(action, hand_control_mode="continuous")
+
+        np.testing.assert_allclose(source[0, 7:14], 0.25 * SIMPLE_RIGHT_HAND_CLOSE)
+        self.assertFalse(np.allclose(source[0, 7:14], np.zeros(7)))
+
+    def test_simple_continuous_runtime_executes_closure_without_fsm(self):
+        runtime = _runtime(_FakeActionCodec(), KimodoSimpleHumanoidArenaRuntime)
+        runtime.max_navigation_speed = 100.0
+        runtime.simple_hand_control_mode = "continuous"
+        runtime.execution_frames = 1
+        runtime._init_simple_hand_fsm()
+        runtime.model = _ContinuousHandPolicy()
+
+        action_chunk = runtime.infer(_payload())
+
+        source = torch.tensor([[0.2, 0.4]])
+        expected = resample_hand_continuous_chunk(
+            source,
+            source_fps=30,
+            target_fps=50,
+            previous_hand_closure=torch.zeros(2),
+        )
+        np.testing.assert_allclose(action_chunk[:, 38:40], expected.numpy())
+        torch.testing.assert_close(runtime.history_hand[0, -1:], source)
+        self.assertFalse(runtime.simple_hand_fsm_enabled)
+
+    def test_simple_continuous_tail_event_survives_body_replanning(self):
+        runtime = _runtime(_FakeActionCodec(), KimodoSimpleHumanoidArenaRuntime)
+        runtime.max_navigation_speed = 100.0
+        runtime.simple_hand_control_mode = "continuous"
+        runtime.execution_frames = 15
+        runtime._init_simple_hand_fsm()
+        runtime.model = _ContinuousTailHandPolicy()
+
+        chunks = []
+        queue_lengths = []
+        for _ in range(4):
+            chunks.append(runtime.infer(_payload())[:, 38:40])
+            queue_lengths.append(runtime.simple_continuous_hand_queue.shape[0])
+
+        np.testing.assert_allclose(chunks[0], 0.0)
+        self.assertLess(float(chunks[1][:, 1].max()), 0.5)
+        self.assertGreater(float(chunks[2][:, 1].max()), 0.5)
+        self.assertEqual(queue_lengths, [58, 33, 8, 58])
+        self.assertFalse(runtime.simple_hand_fsm_enabled)
+
+    def test_simple_continuous_full_prediction_executes_without_queue(self):
+        runtime = _runtime(_FakeActionCodec(), KimodoSimpleHumanoidArenaRuntime)
+        runtime.max_navigation_speed = 100.0
+        runtime.simple_hand_control_mode = "continuous"
+        runtime.execution_frames = 50
+        runtime._init_simple_hand_fsm()
+        runtime.model = _ContinuousTailHandPolicy()
+
+        action_chunk = runtime.infer(_payload())
+
+        self.assertEqual(action_chunk.shape, (83, 40))
+        self.assertGreater(float(action_chunk[:, 39].max()), 0.5)
+        self.assertEqual(runtime.simple_continuous_hand_queue.shape, (0, 2))
+        self.assertFalse(runtime.simple_hand_fsm_enabled)
+
+    def test_simple_continuous_conditions_on_measured_hand_history(self):
+        runtime = _runtime(_FakeActionCodec(), KimodoSimpleHumanoidArenaRuntime)
+        runtime.max_navigation_speed = 100.0
+        runtime.simple_hand_control_mode = "continuous"
+        runtime.execution_frames = 1
+        runtime._init_simple_hand_fsm()
+        runtime.model = _ContinuousHandPolicy()
+        payload = _payload()
+        payload["observation"]["state_history"] = np.zeros(
+            (2, 64), dtype=np.float32
+        ).tolist()
+        payload["observation"]["hand_closure_history"] = [
+            [0.1, 0.2],
+            [0.3, 0.4],
+        ]
+
+        with patch(
+            "evaluation.humanoidarena_server._partial_arena_state_history_to_motion",
+            return_value=(
+                torch.zeros(2, 4),
+                torch.ones(2, 4, dtype=torch.bool),
+                torch.eye(3).reshape(1, 1, 3, 3).repeat(2, 1, 1, 1),
+                torch.zeros(2, 3),
+            ),
+        ):
+            runtime.infer(payload)
+
+        # The newest 50 Hz observation is the current prediction cut.  The
+        # model sees only the preceding measured value, never its prior output.
+        expected_condition = torch.tensor([[[0.1, 0.2]]])
+        self.assertEqual(tuple(runtime.model.received_history.shape), (1, 1, 4))
+        torch.testing.assert_close(runtime.model.received_hand_history, expected_condition)
+        torch.testing.assert_close(runtime.history_hand, expected_condition)
+        np.testing.assert_allclose(
+            runtime.simple_observed_hand_closure_history,
+            np.asarray([[0.1, 0.2], [0.3, 0.4]], dtype=np.float32),
+        )
+        self.assertIsNone(runtime.rtc_hand_tail)
+
+    def test_simple_continuous_observed_hand_history_is_transactional(self):
+        runtime = _runtime(
+            _FakeActionCodec(RuntimeError("injected action encoding failure")),
+            KimodoSimpleHumanoidArenaRuntime,
+        )
+        runtime.max_navigation_speed = 100.0
+        runtime.simple_hand_control_mode = "continuous"
+        runtime._init_simple_hand_fsm()
+        runtime.model = _ContinuousHandPolicy()
+        payload = _payload()
+        payload["observation"]["hand_closure_history"] = [[0.1, 0.2]]
+        before_hand = runtime.history_hand.clone()
+
+        with self.assertRaisesRegex(RuntimeError, "action encoding failure"):
+            runtime.infer(payload)
+
+        torch.testing.assert_close(runtime.history_hand, before_hand)
+        self.assertEqual(runtime.simple_observed_hand_closure_history.shape, (0, 2))
+
+    def test_simple_hand_event_in_unexecuted_tail_uses_countdown(self):
+        runtime = KimodoSimpleHumanoidArenaRuntime.__new__(
+            KimodoSimpleHumanoidArenaRuntime
+        )
+        runtime.control_fps = 50.0
+        runtime._init_simple_hand_fsm()
+
+        # Only the first two model frames are executed.  The close event is
+        # predicted at frame 3, so one source-rate frame remains afterward.
+        executed = torch.zeros(2, 2)
+        complete = torch.tensor(
+            [[0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [1.0, 0.0], [1.0, 0.0]]
+        )
+        effective, transitions = runtime._resolve_simple_hand_prefix(
+            executed, detection_hand=complete
+        )
+        torch.testing.assert_close(effective, executed)
+        self.assertTrue((transitions == -1).all())
+        self.assertFalse(bool(runtime.simple_hand_state[0]))
+        self.assertEqual(runtime.simple_hand_phase[0], "stable_open")
+        self.assertEqual(int(runtime.simple_hand_pending_steps[0]), 1)
+
+        # A new prediction cannot push the committed event back into its tail.
+        effective_next, transitions_next = runtime._resolve_simple_hand_prefix(
+            executed, detection_hand=torch.zeros(5, 2)
+        )
+        torch.testing.assert_close(effective_next[:, 0], torch.tensor([0.0, 1.0]))
+        torch.testing.assert_close(effective_next[:, 1], torch.zeros(2))
+        self.assertEqual(int(transitions_next[0]), 1)
+        self.assertTrue(bool(runtime.simple_hand_state[0]))
+        self.assertEqual(int(runtime.simple_hand_pending_steps[0]), -1)
+
+    def test_simple_hand_open_requires_two_replans(self):
+        runtime = KimodoSimpleHumanoidArenaRuntime.__new__(
+            KimodoSimpleHumanoidArenaRuntime
+        )
+        runtime.control_fps = 50.0
+        runtime._init_simple_hand_fsm()
+        runtime.simple_hand_state[0] = True
+        runtime.simple_hand_phase[0] = "stable_closed"
+        predicted_open = torch.zeros(8, 2)
+
+        first, first_transition = runtime._resolve_simple_hand_prefix(predicted_open)
+        torch.testing.assert_close(first[:, 0], torch.ones(8))
+        self.assertEqual(int(first_transition[0]), -1)
+        self.assertTrue(bool(runtime.simple_hand_state[0]))
+
+        second, second_transition = runtime._resolve_simple_hand_prefix(predicted_open)
+        torch.testing.assert_close(second[:, 0], torch.zeros(8))
+        self.assertEqual(int(second_transition[0]), 0)
+        self.assertFalse(bool(runtime.simple_hand_state[0]))
+
+    def test_simple_hand_does_not_open_while_full_prediction_returns_to_close(self):
+        runtime = KimodoSimpleHumanoidArenaRuntime.__new__(
+            KimodoSimpleHumanoidArenaRuntime
+        )
+        runtime.control_fps = 50.0
+        runtime._init_simple_hand_fsm()
+        runtime.simple_hand_state[0] = True
+        runtime.simple_hand_phase[0] = "stable_closed"
+        executed_open = torch.zeros(15, 2)
+        complete = torch.zeros(50, 2)
+        complete[32:, 0] = 1.0
+
+        for _ in range(3):
+            effective, transitions = runtime._resolve_simple_hand_prefix(
+                executed_open, detection_hand=complete
+            )
+            torch.testing.assert_close(effective[:, 0], torch.ones(15))
+            self.assertEqual(int(transitions[0]), -1)
+            self.assertTrue(bool(runtime.simple_hand_state[0]))
+            self.assertEqual(int(runtime.simple_hand_open_votes[0]), 0)
+
+    def test_simple_hand_open_vote_is_reset_when_future_close_reappears(self):
+        runtime = KimodoSimpleHumanoidArenaRuntime.__new__(
+            KimodoSimpleHumanoidArenaRuntime
+        )
+        runtime.control_fps = 50.0
+        runtime._init_simple_hand_fsm()
+        runtime.simple_hand_state[0] = True
+        runtime.simple_hand_phase[0] = "stable_closed"
+        executed_open = torch.zeros(15, 2)
+
+        runtime._resolve_simple_hand_prefix(
+            executed_open, detection_hand=torch.zeros(50, 2)
+        )
+        self.assertEqual(int(runtime.simple_hand_open_votes[0]), 1)
+
+        complete_with_future_close = torch.zeros(50, 2)
+        complete_with_future_close[40:, 0] = 1.0
+        effective, transitions = runtime._resolve_simple_hand_prefix(
+            executed_open, detection_hand=complete_with_future_close
+        )
+        torch.testing.assert_close(effective[:, 0], torch.ones(15))
+        self.assertEqual(int(transitions[0]), -1)
+        self.assertTrue(bool(runtime.simple_hand_state[0]))
+        self.assertEqual(int(runtime.simple_hand_open_votes[0]), 0)
+
     def test_reset_episode_step_counters_clears_nested_timelimit(self):
         class Wrapper:
             def __init__(self, env=None, elapsed=None):

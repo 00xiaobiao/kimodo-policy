@@ -511,6 +511,7 @@ class KimodoHumanoidArenaRuntime:
                 )
             ),
             hand_init_seed=int(model_config.get("hand_init_seed", 3407)),
+            hand_control_mode=str(model_config.get("hand_control_mode", "binary")),
         )
         self.device = torch.device(args.device)
         self.dtype = _dtype_from_name(args.dtype)
@@ -679,6 +680,13 @@ class KimodoHumanoidArenaRuntime:
                 and rtc_motion_tail_snapshot is not None
                 and rtc_task_id_snapshot == task_id
             )
+            # Continuous hand predictions are current-state deltas. Their RTC
+            # tails are anchored to the previous measurement and cannot be
+            # reused after the measured state changes. SIMPLE's runtime
+            # already disables this branch; keep the generic runtime safe too.
+            use_rtc_hand_reference = use_rtc_reference and str(
+                getattr(self.model.config, "hand_control_mode", "binary")
+            ).lower() != "continuous"
             history_feature_mask_snapshot = None
             using_state_history = False
             next_observation_state_history = observation_state_history_snapshot
@@ -763,7 +771,7 @@ class KimodoHumanoidArenaRuntime:
                     rtc_motion_tail_snapshot if use_rtc_reference else None
                 ),
                 rtc_hand_reference=(
-                    rtc_hand_tail_snapshot if use_rtc_reference else None
+                    rtc_hand_tail_snapshot if use_rtc_hand_reference else None
                 ),
                 rtc_overlap_frames=int(getattr(self, "rtc_overlap_frames", 0)),
                 rtc_frozen_frames=int(getattr(self, "rtc_frozen_frames", 0)),
@@ -801,6 +809,10 @@ class KimodoHumanoidArenaRuntime:
                     ].detach().clone()
                     next_rtc_task_id = task_id
                     full_hand_clean = output.get("hand_clean")
+                    if str(
+                        getattr(self.model.config, "hand_control_mode", "binary")
+                    ).lower() == "continuous":
+                        full_hand_clean = None
                     if full_hand_clean is not None:
                         full_hand_clean = (
                             full_hand_clean.detach().to(

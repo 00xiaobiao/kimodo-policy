@@ -23,6 +23,7 @@ fi
 
 TASK="${1:-}"
 GPU_SPEC="${2:-${GPUS:-0 2 5 7}}"
+CAPTURE_MODE="${CAPTURE_MODE:-expert_aligned}"
 if [[ -z "$TASK" ]]; then
   echo "Usage: $0 TASK [GPUS]" >&2
   echo "Example: $0 G1WholebodyBendPickMP-v0 \"0 2 5 7\"" >&2
@@ -35,6 +36,15 @@ read -r -a GPU_LIST <<< "$GPU_SPEC"
 if (( ${#GPU_LIST[@]} == 0 )); then
   echo "No GPUs were specified" >&2
   exit 2
+fi
+if [[ "$CAPTURE_MODE" != "expert_aligned" && "$CAPTURE_MODE" != "physics_replay" ]]; then
+  echo "CAPTURE_MODE must be expert_aligned or physics_replay, got: $CAPTURE_MODE" >&2
+  exit 2
+fi
+if [[ "$CAPTURE_MODE" == "expert_aligned" ]]; then
+  PYTHON_RUNNER=("$SIMPLE/.venv/bin/python")
+else
+  PYTHON_RUNNER=("$ISAAC_PY")
 fi
 
 SOURCE="/ai/Yichi/kimodo-policy/simpledata/simple/$TASK"
@@ -83,7 +93,7 @@ if (( foreground == 0 )); then
   fi
   # Task names and GPU specs are constrained to dataset names and integers.
   tmux new-session -d -s "$SESSION" \
-    "$0 --foreground $(printf '%q' "$TASK") $(printf '%q' "$GPU_SPEC")"
+    "CAPTURE_MODE=$(printf '%q' "$CAPTURE_MODE") $0 --foreground $(printf '%q' "$TASK") $(printf '%q' "$GPU_SPEC")"
   echo "Started tmux session: $SESSION"
   echo "Master log: $MASTER_LOG"
   echo "Attach with: tmux attach -t $SESSION"
@@ -122,6 +132,10 @@ import json, sys
 with open(sys.argv[1]) as f:
     report = json.load(f)
 
+if report.get("capture_mode") != sys.argv[2]:
+    raise SystemExit(1)
+if sys.argv[2] == "expert_aligned" and report.get("expert_alignment_passed") is not True:
+    raise SystemExit(1)
 quality = report.get("quality_passed")
 if quality is False:
     raise SystemExit(1)
@@ -132,12 +146,12 @@ if quality is None:
     rmse = report.get("joint_tracking_rmse_rad")
     if rmse is None or float(rmse) > 0.20:
         raise SystemExit(1)
-' "$report"
+' "$report" "$CAPTURE_MODE"
 }
 
 {
   echo "[master] task=$TASK"
-  echo "[master] episodes=${#EPISODES[@]} gpus=${GPU_LIST[*]} physics_dt=$PHYSICS_DT"
+  echo "[master] episodes=${#EPISODES[@]} gpus=${GPU_LIST[*]} physics_dt=$PHYSICS_DT capture_mode=$CAPTURE_MODE"
   echo "[master] output=$OUTPUT_ROOT"
 } | tee "$MASTER_LOG"
 
@@ -192,8 +206,9 @@ run_worker() {
         TMPDIR="$worker_cache/tmp" \
         PATH="$SIMPLE/.venv/bin:$PATH" \
         PYTHONPATH="$SP:$PROJ/src:$SIMPLE/src:$SIMPLE/third_party:$SIMPLE/third_party/curobo/src:$SIMPLE/third_party/unitree_sdk2_python:$ISO" \
-        "$ISAAC_PY" \
+        "${PYTHON_RUNNER[@]}" \
         "$SCRIPT_DIR/replay_capture.py" \
+        --capture-mode "$CAPTURE_MODE" \
         --sim-mode mujoco_isaac \
         --env-id "simple/$TASK" \
         --source "$SOURCE" \

@@ -47,7 +47,7 @@ bash evaluation/simple_eval_signal_task_sonic.sh \
   --simple-data-dir /ai/Yichi/kimodo-policy/simpledata \
   --dtype fp32 \
   --diffusion-steps 10 \
-  --execution-frames 15 \
+  --execution-frames 50 \
   --rtc 0 \
   --rtc-overlap-frames 0 \
   --rtc-frozen-frames 0 \
@@ -55,7 +55,7 @@ bash evaluation/simple_eval_signal_task_sonic.sh \
 ```
 
 上面命令中的推理参数是本项目当前约定，后续评估应保持这一组值：
-`fp32`、10 步扩散、每次执行 15 帧、关闭 RTC。不要因为脚本内部还有
+`fp32`、10 步扩散、每次完整执行 50 帧、关闭 RTC。不要因为脚本内部还有
 其他默认值而省略这些参数。
 
 默认行为是：
@@ -130,7 +130,7 @@ assets。当前主机使用 `/ai/Yichi/kimodo-policy/simpledata`。
 `--diffusion-steps N`：扩散采样步数，默认 `10`。
 
 `--execution-frames N`：每次重新规划执行的模型帧数。`0` 表示执行完整
-action chunk；本项目固定使用 `15`。
+action chunk；当前 checkpoint 预测 50 帧，本项目固定使用 `50`。
 
 `--rtc 0|1`：是否启用实时 chunking。本项目固定使用 `0`（关闭）。
 
@@ -176,7 +176,7 @@ bash evaluation/simple_eval_signal_task_sonic.sh \
   --simple-data-dir /ai/Yichi/kimodo-policy/simpledata \
   --dtype fp32 \
   --diffusion-steps 10 \
-  --execution-frames 15 \
+  --execution-frames 50 \
   --rtc 0 \
   --rtc-overlap-frames 0 \
   --rtc-frozen-frames 0 \
@@ -235,14 +235,14 @@ episode 前发现训练/推理时序或坐标系再次失配。
 
 ```text
 model_hand_active=[left,right]/50
-control_hand_active=[left,right]/25
-hand_tail_promoted=[left,right]
-hand_latched=[left,right]
+control_hand_active=[left,right]/83
+continuous_hand_queue=0
+measured_hand_closure=[left,right]
 ```
 
-checkpoint 的模型以 30 Hz 预测 50 帧，而评估命令每次执行前 15 个模型帧
-（约 25 个 50 Hz 控制帧）。因此如果闭合状态落在第 15 帧之后，SIMPLE 适配层会
-将连续两帧以上的尾部闭合事件提升到执行边界，并在重规划间做去抖保持；连续三次
-完整“打开”预测后才释放。这样不会把合法的离散抓取状态永久截掉。适配层还显式
-处理了 MuJoCo（thumb-middle-index）与 WBC（thumb-index-middle）的手指顺序，
-这些逻辑只在 `evaluation/simple_server.py` 生效，不改变 Arena 原始运行时。
+checkpoint 的模型以 30 Hz 预测 50 帧，评估也完整执行这 50 个模型帧，重采样后
+通常得到约 83 个 50 Hz 控制帧。因此预测后半段的闭合动作会在本次 action chunk
+中直接送入 WBC，不会再被下一次重规划截断。连续手输出按 `[0,1]` 的闭合度映射到
+手指关节目标；`measured_hand_closure` 记录仿真实测闭合度。适配层还显式处理了
+MuJoCo（thumb-middle-index）与 WBC（thumb-index-middle）的手指顺序，这些逻辑
+只在 `evaluation/simple_server.py` 生效，不改变 Arena 原始运行时。

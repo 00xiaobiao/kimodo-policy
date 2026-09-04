@@ -20,12 +20,16 @@ EVAL_DATA_ROOT="${EVAL_DATA_ROOT:-}"
 PYTHON_BIN="${KIMODO_PYTHON:-${PROJECT_ROOT}/SIMPLE/.venv/bin/python}"
 MODEL_SITE_PACKAGES="${KIMODO_MODEL_SITE_PACKAGES:-}"
 ISAAC_CACHE_ROOT="${ISAAC_CACHE_ROOT:-}"
-DTYPE="${DTYPE:-bf16}"
+# Keep the evaluator defaults aligned with evaluation/simple_eval.md.
+DTYPE="${DTYPE:-fp32}"
 DIFFUSION_STEPS="${DIFFUSION_STEPS:-10}"
-EXECUTION_FRAMES="${EXECUTION_FRAMES:-0}"
-RTC="${RTC:-1}"
-RTC_OVERLAP_FRAMES="${RTC_OVERLAP_FRAMES:-12}"
-RTC_FROZEN_FRAMES="${RTC_FROZEN_FRAMES:-1}"
+# Execute the complete 50-frame prediction horizon before replanning.  The
+# model is trained to produce a 50-frame chunk, so the default evaluator must
+# keep prediction and execution horizons aligned.
+EXECUTION_FRAMES="${EXECUTION_FRAMES:-50}"
+RTC="${RTC:-0}"
+RTC_OVERLAP_FRAMES="${RTC_OVERLAP_FRAMES:-0}"
+RTC_FROZEN_FRAMES="${RTC_FROZEN_FRAMES:-0}"
 RTC_RAMP_POWER="${RTC_RAMP_POWER:-1.0}"
 MAX_NAVIGATION_SPEED="${MAX_NAVIGATION_SPEED:-1.5}"
 SIM_MODE="${SIM_MODE:-mujoco_isaac}"
@@ -55,12 +59,12 @@ Core options:
   --python PATH             Python environment containing Kimodo and SIMPLE
 
 Inference/simulation options:
-  --dtype fp32|bf16         model dtype (default: bf16)
+  --dtype fp32|bf16         model dtype (default: fp32)
   --diffusion-steps N       DDIM sampling steps (default: 10)
   --execution-frames N      model frames executed per replan; 0 means full chunk
-  --rtc 0|1                 real-time chunking (default: 1)
-  --rtc-overlap-frames N    RTC overlap in model frames (default: 12)
-  --rtc-frozen-frames N     RTC frozen prefix (default: 1)
+  --rtc 0|1                 real-time chunking (default: 0)
+  --rtc-overlap-frames N    RTC overlap in model frames (default: 0)
+  --rtc-frozen-frames N     RTC frozen prefix (default: 0)
   --rtc-ramp-power X        RTC ramp exponent (default: 1.0)
   --max-navigation-speed X  fail fast above this planar speed in m/s (default: 1.5)
   --sim-mode NAME           mujoco or mujoco_isaac (default: mujoco_isaac)

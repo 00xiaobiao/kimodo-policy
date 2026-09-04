@@ -9,12 +9,23 @@ same 417D Kimodo tensors as the Arena adapter.
 """
 
 from .common import *  # noqa: F401,F403
+from .simple_hand import project_hand_closure, source_action_hand_targets
 
 
 class SimpleReplayAdapter(BaseSourceAdapter):
     """Load completed SIMPLE replay episodes from ``Simple/<task>/episode_*``."""
 
     source_name = SOURCE_SIMPLE
+
+    @property
+    def hand_control_mode(self) -> str:
+        mode = str(getattr(self, "selection", {}).get("hand_control_mode", "binary")).lower()
+        if mode not in {"binary", "continuous"}:
+            raise ValueError(
+                "Simple hand_control_mode must be 'binary' or 'continuous', "
+                f"got {mode!r}"
+            )
+        return mode
 
     @staticmethod
     def _patterns(value) -> list[str]:
@@ -233,7 +244,8 @@ class SimpleReplayAdapter(BaseSourceAdapter):
                     continue
                 parquet_file = pq.ParquetFile(data_path)
                 required_columns = {"observation.state", "action"}
-                missing_columns = required_columns - set(parquet_file.schema_arrow.names)
+                parquet_columns = set(parquet_file.schema_arrow.names)
+                missing_columns = required_columns - parquet_columns
                 if missing_columns:
                     raise ValueError(
                         f"Simple episode parquet is missing columns {sorted(missing_columns)}: {data_path}"
@@ -243,6 +255,33 @@ class SimpleReplayAdapter(BaseSourceAdapter):
                         f"Simple episode parquet rows={parquet_file.metadata.num_rows} differs "
                         f"from metadata length={source_length}: {data_path}"
                     )
+                if self.hand_control_mode == "continuous":
+                    required_continuous = {"observation.hand_q"}
+                    target_sources = {
+                        "action.hand_closure",
+                        "action.target_hand_q",
+                        "source.action",
+                    }
+                    missing_continuous = required_continuous - parquet_columns
+                    if missing_continuous or not (target_sources & parquet_columns):
+                        raise ValueError(
+                            "Simple continuous hand mode requires observation.hand_q and "
+                            "one of action.hand_closure or source.action in "
+                            f"{data_path}; missing={sorted(missing_continuous)}"
+                        )
+                episode_metadata = {"row_start": 0, "row_end": source_length}
+                hand_columns = sorted(
+                    parquet_columns
+                    & {
+                        "observation.hand_q",
+                        "observation.hand_closure",
+                        "action.target_hand_q",
+                        "action.hand_closure",
+                        "source.action",
+                    }
+                )
+                if hand_columns:
+                    episode_metadata["hand_columns"] = hand_columns
                 self._record(
                     task_id=f"{self.source_name}::{task_name}",
                     task_name=task_name,
@@ -256,18 +295,76 @@ class SimpleReplayAdapter(BaseSourceAdapter):
                     # Each replay parquet is one complete episode.  Supplying an
                     # explicit row range deliberately avoids the Arena global-index
                     # convention and its writer-specific inclusive end field.
-                    metadata={"row_start": 0, "row_end": source_length},
+                    metadata=episode_metadata,
                 )
 
     def load_episode(self, episode: EpisodeRecord) -> dict[str, torch.Tensor]:
-        table = self.reader.read(episode, ["observation.state", "action"])
+        mode = self.hand_control_mode
+        columns = ["observation.state", "action"]
+        if mode == "continuous":
+            available = set(episode.metadata.get("hand_columns", ()))
+            # Manually constructed EpisodeRecords in focused tests have no
+            # discovery metadata; their continuous caller must still expose the
+            # legacy source/measurement fields.
+            if not available:
+                available = {"observation.hand_q", "source.action"}
+            columns.extend(sorted(available))
+        table = self.reader.read(episode, columns)
         state = _as_matrix(table["observation.state"], 64, "Simple observation state")
         actions = _as_matrix(table["action"], 40, "Simple action")
-        target_hand = actions[:, 38:40]
-        if not np.logical_or(target_hand == 0, target_hand == 1).all():
-            raise ValueError(
-                f"Simple episode {episode.episode_id} has non-binary hand actions"
-            )
+        if mode == "binary":
+            observed_hand = actions[:, 38:40]
+            target_hand = observed_hand
+            if not np.logical_or(target_hand == 0, target_hand == 1).all():
+                raise ValueError(
+                    f"Simple episode {episode.episode_id} has non-binary hand actions"
+                )
+            hand_resampling = "binary"
+        else:
+            if "observation.hand_closure" in table:
+                observed_hand = _as_matrix(
+                    table["observation.hand_closure"], 2,
+                    "Simple observed hand closure",
+                )
+            else:
+                observed_hand = project_hand_closure(
+                    _as_matrix(table["observation.hand_q"], 14, "Simple observation hand q"),
+                    name="Simple observed hand q",
+                )
+            if "action.hand_closure" in table:
+                target_hand = _as_matrix(
+                    table["action.hand_closure"], 2,
+                    "Simple target hand closure",
+                )
+            elif "action.target_hand_q" in table:
+                target_hand = project_hand_closure(
+                    _as_matrix(table["action.target_hand_q"], 14, "Simple target hand q"),
+                    name="Simple target hand q",
+                )
+            elif "source.action" in table:
+                target_hand = project_hand_closure(
+                    source_action_hand_targets(
+                        _as_matrix(table["source.action"], 36, "Simple source action")
+                    ),
+                    name="Simple source hand target",
+                )
+            else:
+                raise ValueError(
+                    f"Simple episode {episode.episode_id} is missing a continuous hand target"
+                )
+            for name, values in (
+                ("observed", observed_hand),
+                ("target", target_hand),
+            ):
+                if not np.isfinite(values).all() or (
+                    (values < -1e-6) | (values > 1.0 + 1e-6)
+                ).any():
+                    raise ValueError(
+                        f"Simple episode {episode.episode_id} has invalid continuous {name} hand closure"
+                    )
+            observed_hand = np.clip(observed_hand, 0.0, 1.0).astype(np.float32)
+            target_hand = np.clip(target_hand, 0.0, 1.0).astype(np.float32)
+            hand_resampling = "linear"
         decoder = self._decoder(episode.source_fps)
         observed_root_rotations = rot6d_row_to_matrix(torch.from_numpy(state[:, :6]))
         observed = decoder.decode_joint_configuration_pose(
@@ -277,19 +374,21 @@ class SimpleReplayAdapter(BaseSourceAdapter):
             joint_names=CANONICAL_G1_JOINT_NAMES_29,
         )
         target = decoder.decode_action_pose(actions)
-        hand_valid = np.ones_like(target_hand, dtype=bool)
+        observed_hand_valid = np.ones_like(observed_hand, dtype=bool)
+        target_hand_valid = np.ones_like(target_hand, dtype=bool)
         return self._finalize_motion(
             episode,
             observed["local_rot_mats"],
             observed["root_positions"],
             target["local_rot_mats"],
             target["root_positions"],
+            observed_hand,
             target_hand,
-            target_hand,
-            hand_valid,
-            hand_valid,
+            observed_hand_valid,
+            target_hand_valid,
             observed_motion_valid=self._motion_feature_mask(
                 "global_root_heading", "global_rot_data"
             ),
             target_motion_source="action",
+            hand_resampling=hand_resampling,
         )
