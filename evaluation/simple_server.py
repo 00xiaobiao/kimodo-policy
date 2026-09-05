@@ -611,9 +611,8 @@ class _SimpleRuntimeMixin:
         # Keep the raw 50 Hz stream separately from the model's predicted hand
         # history so the two signals cannot be confused.
         self.simple_observed_hand_closure_history = np.empty((0, 2), dtype=np.float32)
-        # Continuous hand commands are queued independently from the body
-        # prefix.  This preserves a predicted close/open event that lies in
-        # the unexecuted tail when the body is replanned every 0.5 seconds.
+        # Continuous hand commands execute the same replanned prefix as body
+        # and root commands. Keep the legacy queue empty for state compatibility.
         self.simple_continuous_hand_queue = np.empty((0, 2), dtype=np.float32)
 
     def _ensure_simple_hand_fsm(self) -> None:
@@ -1262,75 +1261,9 @@ class _SimpleRuntimeMixin:
                         "SIMPLE continuous hand controller produced a chunk with a "
                         f"different length: {prefix_control_hand.shape[0]} vs {action_chunk.shape[0]}"
                     )
-                queued = np.asarray(
-                    self.simple_continuous_hand_queue, dtype=np.float32
-                )
-                if queued.ndim != 2 or queued.shape[1] != 2:
-                    raise RuntimeError(
-                        "internal SIMPLE continuous hand queue must have shape [T, 2]"
-                    )
-                # The queued horizon has priority over a fresh prediction.
-                # Commit one complete hand horizon at a time; otherwise every
-                # body replan can push the same future close event back beyond
-                # the executed prefix indefinitely.
-                action_frames = int(action_chunk.shape[0])
-                combined_control = queued
-                if combined_control.shape[0] < action_frames:
-                    queued_frames = int(combined_control.shape[0])
-                    if combined_control.shape[0] > 0:
-                        prefix_control_hand = resample_hand_continuous_chunk(
-                            source_hand,
-                            source_fps=float(self.model.fps),
-                            target_fps=float(self.control_fps),
-                            previous_hand_closure=torch.as_tensor(
-                                combined_control[-1], dtype=torch.float32
-                            ),
-                        )
-                    fresh_control = prefix_control_hand.numpy()
-                    remaining_source = full_hand_closure[
-                        self.execution_frames :
-                    ].clamp(0.0, 1.0).float().cpu()
-                    if remaining_source.shape[0] > 0:
-                        tail_anchor = torch.as_tensor(
-                            fresh_control[-1], dtype=torch.float32
-                        )
-                        tail_control_hand = resample_hand_continuous_chunk(
-                            remaining_source,
-                            source_fps=float(self.model.fps),
-                            target_fps=float(self.control_fps),
-                            previous_hand_closure=tail_anchor,
-                        )
-                        fresh_control = np.concatenate(
-                            (fresh_control, tail_control_hand.numpy()), axis=0
-                        )
-                    # The queued commands already cover the first part of the
-                    # current prediction horizon.  Append the fresh plan at
-                    # the matching control timestamp, not again from t=0.
-                    fresh_control = fresh_control[
-                        min(queued_frames, fresh_control.shape[0]) :
-                    ]
-                    combined_control = np.concatenate(
-                        (combined_control, fresh_control), axis=0
-                    )
-                if combined_control.shape[0] < action_frames:
-                    # This is only possible for a malformed/custom test policy;
-                    # hold the final finite target instead of changing chunk
-                    # length or emitting an invalid action.
-                    if combined_control.shape[0] == 0:
-                        combined_control = np.repeat(
-                            previous_hand.numpy().reshape(1, 2), action_frames, axis=0
-                        )
-                    else:
-                        combined_control = np.pad(
-                            combined_control,
-                            ((0, action_frames - combined_control.shape[0]), (0, 0)),
-                            mode="edge",
-                        )
-                control_hand = combined_control[:action_frames]
-                next_hand_queue = combined_control[action_frames:]
-                action_chunk[:, 38:40] = control_hand
-                self.simple_continuous_hand_queue = np.array(
-                    next_hand_queue, dtype=np.float32, copy=True
+                action_chunk[:, 38:40] = prefix_control_hand.numpy()
+                self.simple_continuous_hand_queue = np.empty(
+                    (0, 2), dtype=np.float32
                 )
                 if measured_hand_history is not None:
                     # Keep model conditioning tied to measured closure. The

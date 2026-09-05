@@ -12,6 +12,35 @@ from .common import *  # noqa: F401,F403
 from .simple_hand import project_hand_closure, source_action_hand_targets
 
 
+def _command_space_target_actions(
+    replay_actions: np.ndarray,
+    source_actions: np.ndarray,
+) -> np.ndarray:
+    """Replace measured SIMPLE upper-body targets with executable WBC commands."""
+    replay_actions = _as_matrix(replay_actions, 40, "Simple action")
+    source_actions = _as_matrix(source_actions, 36, "Simple source action")
+    if replay_actions.shape[0] != source_actions.shape[0]:
+        raise ValueError(
+            "Simple action and source action lengths differ: "
+            f"{replay_actions.shape[0]} and {source_actions.shape[0]}"
+        )
+    target_actions = replay_actions.copy()
+    canonical_index = {
+        name: index for index, name in enumerate(CANONICAL_G1_JOINT_NAMES_29)
+    }
+    source_arm_names = UNITREE_G1_JOINT_NAMES_29[15:29]
+    for source_index, name in enumerate(source_arm_names, start=14):
+        target_actions[:, 9 + canonical_index[name]] = source_actions[:, source_index]
+    source_waist_indices = {
+        "waist_yaw_joint": 30,
+        "waist_roll_joint": 28,
+        "waist_pitch_joint": 29,
+    }
+    for name, source_index in source_waist_indices.items():
+        target_actions[:, 9 + canonical_index[name]] = source_actions[:, source_index]
+    return target_actions
+
+
 class SimpleReplayAdapter(BaseSourceAdapter):
     """Load completed SIMPLE replay episodes from ``Simple/<task>/episode_*``."""
 
@@ -316,6 +345,7 @@ class SimpleReplayAdapter(BaseSourceAdapter):
         table = self.reader.read(episode, columns)
         state = _as_matrix(table["observation.state"], 64, "Simple observation state")
         actions = _as_matrix(table["action"], 40, "Simple action")
+        target_actions = actions
         if mode == "binary":
             observed_hand = actions[:, 38:40]
             target_hand = observed_hand
@@ -325,6 +355,12 @@ class SimpleReplayAdapter(BaseSourceAdapter):
                 )
             hand_resampling = "binary"
         else:
+            source_actions = None
+            if "source.action" in table:
+                source_actions = _as_matrix(
+                    table["source.action"], 36, "Simple source action"
+                )
+                target_actions = _command_space_target_actions(actions, source_actions)
             if "observation.hand_closure" in table:
                 observed_hand = _as_matrix(
                     table["observation.hand_closure"], 2,
@@ -335,7 +371,12 @@ class SimpleReplayAdapter(BaseSourceAdapter):
                     _as_matrix(table["observation.hand_q"], 14, "Simple observation hand q"),
                     name="Simple observed hand q",
                 )
-            if "action.hand_closure" in table:
+            if source_actions is not None:
+                target_hand = project_hand_closure(
+                    source_action_hand_targets(source_actions),
+                    name="Simple source hand target",
+                )
+            elif "action.hand_closure" in table:
                 target_hand = _as_matrix(
                     table["action.hand_closure"], 2,
                     "Simple target hand closure",
@@ -344,13 +385,6 @@ class SimpleReplayAdapter(BaseSourceAdapter):
                 target_hand = project_hand_closure(
                     _as_matrix(table["action.target_hand_q"], 14, "Simple target hand q"),
                     name="Simple target hand q",
-                )
-            elif "source.action" in table:
-                target_hand = project_hand_closure(
-                    source_action_hand_targets(
-                        _as_matrix(table["source.action"], 36, "Simple source action")
-                    ),
-                    name="Simple source hand target",
                 )
             else:
                 raise ValueError(
@@ -377,7 +411,7 @@ class SimpleReplayAdapter(BaseSourceAdapter):
             root_rotation_matrices=observed_root_rotations,
             joint_names=CANONICAL_G1_JOINT_NAMES_29,
         )
-        target = decoder.decode_action_pose(actions)
+        target = decoder.decode_action_pose(target_actions)
         observed_hand_valid = np.ones_like(observed_hand, dtype=bool)
         target_hand_valid = np.ones_like(target_hand, dtype=bool)
         return self._finalize_motion(
@@ -393,6 +427,10 @@ class SimpleReplayAdapter(BaseSourceAdapter):
             observed_motion_valid=self._motion_feature_mask(
                 "global_root_heading", "global_rot_data"
             ),
-            target_motion_source="action",
+            target_motion_source=(
+                "source.action upper-body command"
+                if mode == "continuous" and "source.action" in table
+                else "action"
+            ),
             hand_resampling=hand_resampling,
         )

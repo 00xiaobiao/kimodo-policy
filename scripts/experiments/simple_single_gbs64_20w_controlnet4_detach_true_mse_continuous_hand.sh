@@ -28,12 +28,16 @@ if [[ -z "${TASK}" || "${TASK}" == */* ]]; then
 fi
 
 if [[ -n "${KIMODO_ENV:-}" ]]; then
-  ACCELERATE_BIN="${KIMODO_ENV}/bin/accelerate"
+  PYTHON_BIN="${KIMODO_ENV}/bin/python"
 else
-  ACCELERATE_BIN="$(command -v accelerate || true)"
+  PYTHON_BIN="$(command -v python || command -v python3 || true)"
 fi
-if [[ -z "${ACCELERATE_BIN}" || ! -x "${ACCELERATE_BIN}" ]]; then
-  echo "accelerate was not found; activate the training environment or set KIMODO_ENV=/path/to/env" >&2
+if [[ -z "${PYTHON_BIN}" || ! -x "${PYTHON_BIN}" ]]; then
+  echo "python was not found; activate the training environment or set KIMODO_ENV=/path/to/env" >&2
+  exit 1
+fi
+if ! "${PYTHON_BIN}" -c 'import accelerate' >/dev/null 2>&1; then
+  echo "accelerate is not installed in ${PYTHON_BIN}" >&2
   exit 1
 fi
 
@@ -69,11 +73,12 @@ export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 echo "SIMPLE task: ${TASK}"
 echo "SIMPLE root: ${SIMPLE_ROOT}"
 echo "GPUs: ${GPU_LIST}"
+echo "Python: ${PYTHON_BIN}"
 echo "Config: ${CONFIG_PATH}"
 echo "Save root: ${KIMODO_SIMPLE_SAVE_ROOT}"
 
 cd "${PROJECT_ROOT}"
-exec "${ACCELERATE_BIN}" launch \
+exec "${PYTHON_BIN}" -m accelerate.commands.accelerate_cli launch \
   --multi_gpu \
   --num_processes "${NUM_PROCESSES}" \
   --mixed_precision bf16 \

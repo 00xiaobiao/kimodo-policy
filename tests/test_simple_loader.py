@@ -12,6 +12,10 @@ import torch
 from data.common import EpisodeRecord, SOURCE_SIMPLE
 from data.simple_hand import SIMPLE_RIGHT_HAND_CLOSE
 from data.simple_loader import SimpleReplayAdapter
+from motion.g1_reference import (
+    CANONICAL_G1_JOINT_NAMES_29,
+    UNITREE_G1_JOINT_NAMES_29,
+)
 
 
 def _fixed(values, width):
@@ -194,8 +198,11 @@ class SimpleReplayAdapterTest(unittest.TestCase):
         state = np.zeros((4, 64), dtype=np.float32)
         state[:, :6] = np.asarray([1, 0, 0, 0, 1, 0], dtype=np.float32)
         action = np.zeros((4, 40), dtype=np.float32)
+        action[:, 9:38] = -5.0
         source_action = np.zeros((4, 36), dtype=np.float32)
         source_action[:, 7:14] = 0.75 * SIMPLE_RIGHT_HAND_CLOSE
+        source_action[:, 14:28] = np.arange(14, dtype=np.float32)
+        source_action[:, 28:31] = np.asarray([28.0, 29.0, 30.0], dtype=np.float32)
         hand_q = np.zeros((4, 14), dtype=np.float32)
         hand_q[:, 7:14] = 0.25 * SIMPLE_RIGHT_HAND_CLOSE
         adapter.reader = MagicMock()
@@ -240,8 +247,38 @@ class SimpleReplayAdapterTest(unittest.TestCase):
         expected_target = np.tile(np.asarray([0.0, 0.75], dtype=np.float32), (4, 1))
         np.testing.assert_allclose(finalize_args[5], expected_observed)
         np.testing.assert_allclose(finalize_args[6], expected_target)
+        target_actions = decoder.decode_action_pose.call_args.args[0]
+        canonical_index = {
+            name: index for index, name in enumerate(CANONICAL_G1_JOINT_NAMES_29)
+        }
+        source_arm_names = UNITREE_G1_JOINT_NAMES_29[15:29]
+        for source_index, name in enumerate(source_arm_names, start=14):
+            np.testing.assert_allclose(
+                target_actions[:, 9 + canonical_index[name]],
+                source_action[:, source_index],
+            )
+        np.testing.assert_allclose(
+            target_actions[:, 9 + canonical_index["waist_yaw_joint"]],
+            source_action[:, 30],
+        )
+        np.testing.assert_allclose(
+            target_actions[:, 9 + canonical_index["waist_roll_joint"]],
+            source_action[:, 28],
+        )
+        np.testing.assert_allclose(
+            target_actions[:, 9 + canonical_index["waist_pitch_joint"]],
+            source_action[:, 29],
+        )
+        np.testing.assert_allclose(
+            target_actions[:, 9 + canonical_index["left_knee_joint"]],
+            action[:, 9 + canonical_index["left_knee_joint"]],
+        )
         self.assertEqual(
             adapter._finalize_motion.call_args.kwargs["hand_resampling"], "linear"
+        )
+        self.assertEqual(
+            adapter._finalize_motion.call_args.kwargs["target_motion_source"],
+            "source.action upper-body command",
         )
 
     def test_finalize_motion_appends_success_terminal_hold_before_representation(self):

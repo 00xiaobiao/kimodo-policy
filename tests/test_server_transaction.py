@@ -300,7 +300,7 @@ class ServerTransactionTest(unittest.TestCase):
         torch.testing.assert_close(runtime.history_hand[0, -1:], source)
         self.assertFalse(runtime.simple_hand_fsm_enabled)
 
-    def test_simple_continuous_tail_event_survives_body_replanning(self):
+    def test_simple_continuous_hand_executes_same_prefix_as_body(self):
         runtime = _runtime(_FakeActionCodec(), KimodoSimpleHumanoidArenaRuntime)
         runtime.max_navigation_speed = 100.0
         runtime.simple_hand_control_mode = "continuous"
@@ -314,10 +314,10 @@ class ServerTransactionTest(unittest.TestCase):
             chunks.append(runtime.infer(_payload())[:, 38:40])
             queue_lengths.append(runtime.simple_continuous_hand_queue.shape[0])
 
-        np.testing.assert_allclose(chunks[0], 0.0)
-        self.assertLess(float(chunks[1][:, 1].max()), 0.5)
-        self.assertGreater(float(chunks[2][:, 1].max()), 0.5)
-        self.assertEqual(queue_lengths, [58, 33, 8, 58])
+        self.assertTrue(all(chunk.shape == (25, 2) for chunk in chunks))
+        for chunk in chunks:
+            np.testing.assert_allclose(chunk, 0.0)
+        self.assertEqual(queue_lengths, [0, 0, 0, 0])
         self.assertFalse(runtime.simple_hand_fsm_enabled)
 
     def test_simple_continuous_full_prediction_executes_without_queue(self):
