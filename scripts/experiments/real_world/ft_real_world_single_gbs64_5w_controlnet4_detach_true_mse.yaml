@@ -1,20 +1,24 @@
 main:
   batch_size: 16
-  max_steps: 100000
-  save_steps: 50000
+  max_steps: 50000
+  save_steps: 10000
   action_chunk: 50
   action_history: 100
   sample_stride: 1
   seed: 42
-  save_root: "${oc.env:KIMODO_SIMPLE_SAVE_ROOT,log/experiments/simple_single_gbs64_20w_controlnet4_detach_true_mse_continuous_hand/}"
+  # 4 ranks x batch_size 16 = global batch size 64 (the launcher defaults to 4 GPUs).
+  save_root: "${oc.env:KIMODO_FT_SAVE_ROOT,log/experiments/real_world/ft_real_world_single_gbs64_5w_controlnet4_detach_true_mse/}"
   dtype: "bf16"
 
   dataset_roots:
-    Simple: "${oc.env:KIMODO_SIMPLE_ROOT,/data/local-data/data/Humanoid/Simple}"
+    RealWorld: "${oc.env:REAL_WORLD_ROOT,/data/local-data/data/code/yunhengwang/kimodo-polocy/controlnet_v1.2/real-world}"
 
   dataset_selection:
-    Simple:
-      task: "${oc.env:KIMODO_SIMPLE_TASK,G1WholebodyXMovePickTeleop-v0}"
+    RealWorld:
+      # Set REAL_WORLD_DATASET to a folder name or glob. "*" includes every
+      # compatible dataset below REAL_WORLD_ROOT/data.
+      dataset: "${oc.env:REAL_WORLD_DATASET,*}"
+      camera: "observation.images.ego_view"
       hand_control_mode: continuous
 
   sampling:
@@ -25,7 +29,7 @@ main:
   precompute_text_embeddings: true
   wandb: "offline"
   wandb_project: "Kimodo-Policy"
-  wandb_run_name: "${oc.env:KIMODO_SIMPLE_RUN_NAME,simple_single_gbs64_20w_controlnet4_detach_true_mse_continuous_hand}"
+  wandb_run_name: "${oc.env:KIMODO_FT_RUN_NAME,ft_real_world_single_gbs64_5w_controlnet4_detach_true_mse}"
   gradient:
     grad_clip_norm: 1.0
     hand_grad_clip_norm: 1.0

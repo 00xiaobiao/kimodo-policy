@@ -2,6 +2,57 @@
 
 from .common import *  # noqa: F401,F403
 
+
+# Native SONIC/WBC hand order is thumb(3), index(2), middle(2) after the
+# named fields below are gathered from the packed 43-D vectors. These are the
+# Dex3 middle-grip endpoints used by the real-world controller, so closure has
+# the same semantics as SIMPLE: zero is open and one is fully closed.
+REALWORLD_HAND_JOINT_NAMES_14 = tuple(
+    f"{side}_hand_{finger}_{joint_index}_joint"
+    for side in ("left", "right")
+    for finger, joint_count in (("thumb", 3), ("index", 2), ("middle", 2))
+    for joint_index in range(joint_count)
+)
+REALWORLD_LEFT_HAND_CLOSE = np.asarray(
+    [0.0, 0.7, 0.7, -1.0, -1.5, -1.0, -1.5], dtype=np.float32
+)
+REALWORLD_RIGHT_HAND_CLOSE = -REALWORLD_LEFT_HAND_CLOSE
+REALWORLD_HAND_CLOSE_POSES = np.stack(
+    (REALWORLD_LEFT_HAND_CLOSE, REALWORLD_RIGHT_HAND_CLOSE), axis=0
+)
+
+
+def _realworld_hand_indices(feature_names, name: str) -> tuple[int, ...]:
+    names = tuple(str(value) for value in feature_names)
+    if len(names) != 43:
+        raise ValueError(f"{name} metadata must contain 43 names, got {len(names)}")
+    if len(set(names)) != len(names):
+        raise ValueError(f"{name} metadata contains duplicate feature names")
+    missing = sorted(set(REALWORLD_HAND_JOINT_NAMES_14) - set(names))
+    if missing:
+        raise ValueError(f"{name} metadata is missing hand joints: {missing}")
+    name_to_index = {value: index for index, value in enumerate(names)}
+    return tuple(name_to_index[value] for value in REALWORLD_HAND_JOINT_NAMES_14)
+
+
+def project_realworld_hand_closure(
+    values: np.ndarray,
+    feature_names,
+    *,
+    name: str = "RealWorld hand joints",
+) -> np.ndarray:
+    """Project named joints from a packed 43-D state/target to two closures."""
+    matrix = _as_matrix(values, 43, name)
+    indices = _realworld_hand_indices(feature_names, name)
+    hand_q = matrix[:, indices].reshape(-1, 2, 7)
+    denominators = np.sum(REALWORLD_HAND_CLOSE_POSES**2, axis=1)
+    closure = (
+        np.sum(hand_q * REALWORLD_HAND_CLOSE_POSES[None], axis=2)
+        / denominators[None]
+    )
+    return np.clip(closure, 0.0, 1.0).astype(np.float32)
+
+
 class RealWorldAdapter(BaseSourceAdapter):
     """Load the native LeRobot-style real-world export with Arena semantics.
 
@@ -27,14 +78,26 @@ class RealWorldAdapter(BaseSourceAdapter):
         # not be mixed into the Kimodo conditioning frame.
         "observed_root_orientation_field": "observation.root_q_relative",
         "observed_hand_field": "observation.hand_binary",
+        "observed_hand_state_field": "observation.state",
         "target_joint_field": "action.joint_q",
         "target_root_position_field": "action.root_p",
         "target_root_height_field": "action.root_z",
         "target_root_orientation_field": "action.root_q",
         "target_hand_field": "action.hand_binary",
+        "target_hand_wbc_field": "action.wbc",
         "root_target_valid_field": "action.root_target_valid",
         "root_target_discontinuous_field": "action.root_target_discontinuous",
     }
+
+    @property
+    def hand_control_mode(self) -> str:
+        mode = str(self.selection.get("hand_control_mode", "binary")).lower()
+        if mode not in {"binary", "continuous"}:
+            raise ValueError(
+                "RealWorld hand_control_mode must be 'binary' or 'continuous', "
+                f"got {mode!r}"
+            )
+        return mode
 
     @staticmethod
     def _selection_patterns(value) -> list[str]:
@@ -117,11 +180,32 @@ class RealWorldAdapter(BaseSourceAdapter):
         return _matches_selection({"tasks": tasks}, task_name, instruction)
 
     def discover(self) -> None:
+        hand_mode_fields = {
+            "observed_hand_field",
+            "target_hand_field",
+            "observed_hand_state_field",
+            "target_hand_wbc_field",
+        }
         field_names = {
             name: self._field(name)
             for name in self.DEFAULT_FIELDS
-            if name not in {"root_target_valid_field", "root_target_discontinuous_field"}
+            if name
+            not in {
+                "root_target_valid_field",
+                "root_target_discontinuous_field",
+                *hand_mode_fields,
+            }
         }
+        if self.hand_control_mode == "continuous":
+            selected_hand_fields = (
+                "observed_hand_state_field",
+                "target_hand_wbc_field",
+            )
+        else:
+            selected_hand_fields = ("observed_hand_field", "target_hand_field")
+        field_names.update(
+            {name: self._field(name) for name in selected_hand_fields}
+        )
         optional_field_names = {
             name: self._field(name)
             for name in ("root_target_valid_field", "root_target_discontinuous_field")
@@ -136,6 +220,32 @@ class RealWorldAdapter(BaseSourceAdapter):
                     f"RealWorld dataset {dataset_root} has invalid fps={source_fps!r}"
                 )
             features = info.get("features", {})
+            hand_feature_names = {}
+            if self.hand_control_mode == "continuous":
+                for role, field_key in (
+                    ("observed", "observed_hand_state_field"),
+                    ("target", "target_hand_wbc_field"),
+                ):
+                    field_name = field_names[field_key]
+                    feature = features.get(field_name)
+                    if not isinstance(feature, Mapping):
+                        raise ValueError(
+                            f"RealWorld dataset {dataset_root} is missing metadata for "
+                            f"continuous hand field {field_name!r}"
+                        )
+                    shape = tuple(feature.get("shape", ()))
+                    if shape != (43,):
+                        raise ValueError(
+                            f"RealWorld continuous hand field {field_name!r} must have "
+                            f"metadata shape [43], got {list(shape)}"
+                        )
+                    names = feature.get("names")
+                    if not isinstance(names, (list, tuple)):
+                        raise ValueError(
+                            f"RealWorld continuous hand field {field_name!r} must define names"
+                        )
+                    _realworld_hand_indices(names, field_name)
+                    hand_feature_names[role] = tuple(str(value) for value in names)
             configured_camera = self.selection.get(
                 "camera", "observation.images.ego_view"
             )
@@ -239,6 +349,7 @@ class RealWorldAdapter(BaseSourceAdapter):
                             "optional_columns": optional_columns,
                             "field_names": field_names,
                             "optional_field_names": optional_field_names,
+                            "hand_feature_names": hand_feature_names,
                         },
                     )
 
@@ -281,16 +392,37 @@ class RealWorldAdapter(BaseSourceAdapter):
             4,
             "RealWorld target root quaternion",
         )
-        observed_hand = _as_matrix(
-            table[field_names["observed_hand_field"]],
-            2,
-            "RealWorld observed hand_binary",
-        )
-        target_hand = _as_matrix(
-            table[field_names["target_hand_field"]],
-            2,
-            "RealWorld target hand_binary",
-        )
+        if self.hand_control_mode == "continuous":
+            hand_feature_names = episode.metadata.get("hand_feature_names", {})
+            observed_hand = project_realworld_hand_closure(
+                table[field_names["observed_hand_state_field"]],
+                hand_feature_names.get("observed", ()),
+                name="RealWorld observed state",
+            )
+            target_hand = project_realworld_hand_closure(
+                table[field_names["target_hand_wbc_field"]],
+                hand_feature_names.get("target", ()),
+                name="RealWorld WBC hand target",
+            )
+            hand_resampling = "linear"
+            hand_description = "hand closure"
+            target_motion_source = (
+                "action_joint_q_root_p_root_z_root_q + action.wbc hand closure"
+            )
+        else:
+            observed_hand = _as_matrix(
+                table[field_names["observed_hand_field"]],
+                2,
+                "RealWorld observed hand_binary",
+            )
+            target_hand = _as_matrix(
+                table[field_names["target_hand_field"]],
+                2,
+                "RealWorld target hand_binary",
+            )
+            hand_resampling = "binary"
+            hand_description = "hand_binary"
+            target_motion_source = "action_joint_q_root_p_root_z_root_q"
 
         frame_count = observed_q.shape[0]
         arrays = {
@@ -299,8 +431,8 @@ class RealWorldAdapter(BaseSourceAdapter):
             "target root position": target_root_p,
             "target root height": target_root_z,
             "target root quaternion": target_root_q,
-            "observed hand_binary": observed_hand,
-            "target hand_binary": target_hand,
+            f"observed {hand_description}": observed_hand,
+            f"target {hand_description}": target_hand,
         }
         for name, array in arrays.items():
             if array.shape[0] != frame_count:
@@ -392,5 +524,6 @@ class RealWorldAdapter(BaseSourceAdapter):
             observed_hand_valid,
             target_hand_valid,
             observed_motion_valid=observed_motion_valid,
-            target_motion_source="action_joint_q_root_p_root_z_root_q",
+            target_motion_source=target_motion_source,
+            hand_resampling=hand_resampling,
         )

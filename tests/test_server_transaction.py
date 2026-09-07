@@ -936,6 +936,50 @@ class ServerTransactionTest(unittest.TestCase):
             torch.tensor([[[1.0, 1.0], [1.0, 0.0]]]),
         )
 
+    def test_measured_state_does_not_replace_emitted_rotation_boundary(self):
+        runtime = _runtime(_FakeActionCodec())
+        payload = _payload()
+        payload["observation"]["state_history"] = np.zeros(
+            (2, 64), dtype=np.float32
+        ).tolist()
+        angle = 1.0
+        measured_rotation = torch.tensor(
+            [
+                [np.cos(angle), -np.sin(angle), 0.0],
+                [np.sin(angle), np.cos(angle), 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=torch.float32,
+        ).reshape(1, 3, 3)
+
+        def convert(states, **kwargs):
+            frame_count = states.shape[0]
+            return (
+                torch.zeros(frame_count, 4),
+                torch.ones(frame_count, 4, dtype=torch.bool),
+                measured_rotation.repeat(frame_count, 1, 1),
+                torch.zeros(frame_count, 3),
+            )
+
+        with patch(
+            "evaluation.humanoidarena_server._partial_arena_state_history_to_motion",
+            side_effect=convert,
+        ), patch(
+            "evaluation.humanoidarena_server.resample_motion_chunk",
+            wraps=arena_server.resample_motion_chunk,
+        ) as resample_motion:
+            runtime.infer(payload)
+            emitted_boundary = runtime.previous_local_rot_mat.clone()
+            runtime.infer(payload)
+
+        self.assertEqual(resample_motion.call_count, 2)
+        first_boundary = resample_motion.call_args_list[0].kwargs["previous_local_rot_mat"]
+        second_boundary = resample_motion.call_args_list[1].kwargs["previous_local_rot_mat"]
+        torch.testing.assert_close(first_boundary, torch.eye(3).reshape(1, 3, 3))
+        torch.testing.assert_close(second_boundary, emitted_boundary)
+        self.assertFalse(torch.allclose(first_boundary, measured_rotation))
+        self.assertFalse(torch.allclose(second_boundary, measured_rotation))
+
     def test_encoding_failure_does_not_advance_runtime_state(self):
         runtime = _runtime(
             _FakeActionCodec(

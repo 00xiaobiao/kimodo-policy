@@ -14,18 +14,17 @@ if [[ -z "${ACCELERATE_BIN}" || ! -x "${ACCELERATE_BIN}" ]]; then
   exit 1
 fi
 
-CONFIG_PATH="${KIMODO_CONFIG:-${SCRIPT_DIR}/real_world_bottle_packing_gbs64_5w_controlnet4_detach_true_mse.yaml}"
+CONFIG_PATH="${KIMODO_CONFIG:-${SCRIPT_DIR}/ft_real_world_single_gbs64_5w_controlnet4_detach_true_mse.yaml}"
 if [[ ! -f "${CONFIG_PATH}" ]]; then
   echo "Training config does not exist: ${CONFIG_PATH}" >&2
   exit 2
 fi
 
 # Real-world training is initialized from a compatible Kimodo checkpoint.
-# Accept either the first positional argument or KIMODO_INIT_CHECKPOINT, with
-# the positional argument taking precedence just like the fine-tuning launchers.
+# Accept either the first positional argument or KIMODO_INIT_CHECKPOINT.
 INIT_CHECKPOINT="${1:-${KIMODO_INIT_CHECKPOINT:-}}"
 if [[ -z "${INIT_CHECKPOINT}" ]]; then
-  echo "Usage: bash $0 /path/to/pretrain/checkpoint_STEP" >&2
+  echo "Usage: bash $0 /path/to/pretrain/checkpoint_STEP [dataset_name_or_glob]" >&2
   echo "Or set KIMODO_INIT_CHECKPOINT=/path/to/pretrain/checkpoint_STEP" >&2
   exit 2
 fi
@@ -34,6 +33,15 @@ if [[ ! -f "${INIT_CHECKPOINT}/training_state.pt" || ! -f "${INIT_CHECKPOINT}/co
   echo "Expected training_state.pt and config.json in that directory." >&2
   exit 2
 fi
+
+# The second positional argument overrides REAL_WORLD_DATASET.  The default
+# wildcard lets one run across every compatible dataset below REAL_WORLD_ROOT.
+DATASET_NAME="${2:-${REAL_WORLD_DATASET:-*}}"
+if [[ -z "${DATASET_NAME}" ]]; then
+  echo "REAL_WORLD_DATASET must be a non-empty folder name or glob" >&2
+  exit 2
+fi
+export REAL_WORLD_DATASET="${DATASET_NAME}"
 
 GPU_LIST="${KIMODO_GPUS:-0,1,2,3}"
 IFS=',' read -r -a GPU_IDS <<< "${GPU_LIST}"
@@ -61,6 +69,7 @@ cd "${PROJECT_ROOT}"
 # conda activate kimodo
 # export KIMODO_ENV="$CONDA_PREFIX"
 # export REAL_WORLD_ROOT=/data/local-data/data/code/yunhengwang/kimodo-polocy/controlnet_v1.2/real-world
+# export REAL_WORLD_DATASET=01_SitSofa
 # KIMODO_GPUS=4,5,6,7 \
-# KIMODO_INIT_CHECKPOINT=/data/local-data/data/code/yunhengwang/kimodo-polocy/controlnet_v1.2/log/ablation/multi_task_gbs128_50w_controlnet4_detach_true_mse/2026-08-23_18-26-31/checkpoint_500000 \
-# bash scripts/experiments/real_world/real_world_bottle_packing_gbs64_5w_controlnet4_detach_true_mse.sh
+# KIMODO_INIT_CHECKPOINT=/path/to/pretrain/checkpoint_STEP \
+# bash scripts/experiments/real_world/ft_real_world_single_gbs64_5w_controlnet4_detach_true_mse.sh

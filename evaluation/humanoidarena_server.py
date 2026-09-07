@@ -692,6 +692,11 @@ class KimodoHumanoidArenaRuntime:
             next_observation_state_history = observation_state_history_snapshot
             motion_previous_local_rot_mat = previous_local_rot_mat_snapshot
             motion_previous_root_position = previous_root_position_snapshot
+            motion_boundary_source = (
+                "last_emitted_target"
+                if previous_local_rot_mat_snapshot is not None
+                else "measured_reset_fallback"
+            )
             if state_history_segment is not None:
                 using_state_history = True
                 segment = np.asarray(state_history_segment, dtype=np.float32)
@@ -735,7 +740,18 @@ class KimodoHumanoidArenaRuntime:
                 model_hand_history_snapshot = _align_hand_history(
                     history_hand_snapshot, history_motion_snapshot.shape[1]
                 )
-                motion_previous_local_rot_mat = state_local_rot_mats[-1].clone()
+                # ``state_history`` is the measured trajectory used to condition
+                # the policy.  It must not replace the command trajectory used
+                # to make the next chunk continuous: TWIST2 derives yaw velocity
+                # from consecutive *reference targets*, and SONIC sends the
+                # interpolated target pose directly to its WBC.  After the first
+                # chunk, keep the last target that was actually returned.  Use
+                # the measured pose only as the reset-time fallback.
+                if motion_previous_local_rot_mat is None:
+                    motion_previous_local_rot_mat = state_local_rot_mats[-1].clone()
+                    motion_boundary_source = "measured_reset_fallback"
+                else:
+                    motion_boundary_source = "last_emitted_target"
                 if motion_previous_root_position is None:
                     motion_previous_root_position = state_root_positions[-1].clone()
             elif observation.get("state") is not None:
@@ -872,6 +888,13 @@ class KimodoHumanoidArenaRuntime:
                         f"{motion_previous_root_position.numpy().tolist()}",
                         flush=True,
                     )
+            if _env_flag("KIMODO_SERVER_TRACE"):
+                print(
+                    "[KIMODO_SERVER_TRACE] "
+                    f"motion_boundary_source={motion_boundary_source} "
+                    f"root_boundary_source={'anchor_first_prediction' if _env_flag('KIMODO_SERVER_ANCHOR_ROOT') else 'history_or_previous'}",
+                    flush=True,
+                )
             future_features, source_local_rot_mats, source_root_positions = (
                 _select_execution_prefix(
                     future_features,

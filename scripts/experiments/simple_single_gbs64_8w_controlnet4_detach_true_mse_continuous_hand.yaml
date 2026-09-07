@@ -1,23 +1,21 @@
 main:
-  batch_size: 16
-  max_steps: 50000
-  save_steps: 10000
+  batch_size: 8
+  max_steps: 80000
+  save_steps: 80000
   action_chunk: 50
   action_history: 100
   sample_stride: 1
   seed: 42
-  # 4 ranks x batch_size 16 = global batch size 64 (the launcher defaults to 4 GPUs).
-  save_root: "log/experiments/real_world/real_world_bottle_packing_gbs64_5w_controlnet4_detach_true_mse/"
+  save_root: "${oc.env:KIMODO_SIMPLE_SAVE_ROOT,log/experiments/simple_single_gbs64_8w_controlnet4_detach_true_mse_continuous_hand/}"
   dtype: "bf16"
 
   dataset_roots:
-    RealWorld: "${oc.env:REAL_WORLD_ROOT,/data/local-data/data/code/yunhengwang/kimodo-polocy/controlnet_v1.2/real-world}"
+    Simple: "${oc.env:KIMODO_SIMPLE_ROOT,/data/local-data/data/Humanoid/Simple}"
 
   dataset_selection:
-    RealWorld:
-      task: "Bottle_Packing"
-      dataset: "g1_real_20260823_11_59"
-      camera: "observation.images.ego_view"
+    Simple:
+      task: "${oc.env:KIMODO_SIMPLE_TASK,G1WholebodyXMovePickTeleop-v0}"
+      hand_control_mode: continuous
 
   sampling:
     mode: "episode_uniform"
@@ -27,7 +25,7 @@ main:
   precompute_text_embeddings: true
   wandb: "offline"
   wandb_project: "Kimodo-Policy"
-  wandb_run_name: "real_world_bottle_packing_gbs64_5w_controlnet4_detach_true_mse"
+  wandb_run_name: "${oc.env:KIMODO_SIMPLE_RUN_NAME,simple_single_gbs64_8w_controlnet4_detach_true_mse_continuous_hand}"
   gradient:
     grad_clip_norm: 1.0
     hand_grad_clip_norm: 1.0
@@ -41,6 +39,8 @@ model:
   text_feature_dim: 4096
   controlnet_num_layers: 4
   detach_root_control_for_body: true
+  control_fusion_mode: "both"
+  hand_control_mode: continuous
   hand_hidden_dim: 256
   hand_num_layers: 4
   hand_num_heads: 4

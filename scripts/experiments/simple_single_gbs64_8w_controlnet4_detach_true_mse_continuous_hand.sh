@@ -9,7 +9,7 @@ usage() {
 Train the 4-layer ControlNet continuous-hand experiment on one SIMPLE task.
 
 Usage:
-  bash scripts/experiments/simple_single_gbs64_20w_controlnet4_detach_true_mse_continuous_hand.sh [TASK]
+  bash scripts/experiments/simple_single_gbs64_8w_controlnet4_detach_true_mse_continuous_hand.sh [TASK]
 
 TASK defaults to G1WholebodyXMovePickTeleop-v0. The expected directory is
 ${KIMODO_SIMPLE_ROOT:-/data/local-data/data/Humanoid/Simple}/TASK/episode_XXXXXX.
@@ -41,7 +41,7 @@ if ! "${PYTHON_BIN}" -c 'import accelerate' >/dev/null 2>&1; then
   exit 1
 fi
 
-CONFIG_PATH="${KIMODO_CONFIG:-${SCRIPT_DIR}/simple_single_gbs64_20w_controlnet4_detach_true_mse_continuous_hand.yaml}"
+CONFIG_PATH="${KIMODO_CONFIG:-${SCRIPT_DIR}/simple_single_gbs64_8w_controlnet4_detach_true_mse_continuous_hand.yaml}"
 if [[ ! -f "${CONFIG_PATH}" ]]; then
   echo "Training config does not exist: ${CONFIG_PATH}" >&2
   exit 2
@@ -61,7 +61,7 @@ if (( NUM_PROCESSES < 1 )); then
   exit 2
 fi
 
-RUN_NAME="simple_single_gbs64_20w_controlnet4_detach_true_mse_continuous_hand_${TASK}"
+RUN_NAME="simple_single_gbs64_8w_controlnet4_detach_true_mse_continuous_hand_${TASK}"
 export KIMODO_SIMPLE_TASK="${TASK}"
 export KIMODO_SIMPLE_ROOT="${SIMPLE_ROOT}"
 export KIMODO_SIMPLE_RUN_NAME="${KIMODO_SIMPLE_RUN_NAME:-${RUN_NAME}}"
@@ -85,3 +85,11 @@ exec "${PYTHON_BIN}" -m accelerate.commands.accelerate_cli launch \
   --main_process_port "${KIMODO_MASTER_PORT:-29659}" \
   train.py \
   --config "${CONFIG_PATH}"
+
+
+# cd /data/local-data/data/code/yunhengwang/kimodo-polocy/controlnet_v1.2
+# conda activate kimodo
+# KIMODO_GPUS=0,1,2,3 \
+# KIMODO_SIMPLE_ROOT=/data/local-data/data/Humanoid/Simple \
+# KIMODO_SIMPLE_TASK=G1WholebodyXMovePickTeleop-v0 \
+# bash scripts/experiments/simple_single_gbs64_8w_controlnet4_detach_true_mse_continuous_hand.sh

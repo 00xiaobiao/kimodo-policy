@@ -66,6 +66,87 @@ class G1ReferenceTest(unittest.TestCase):
         self.assertEqual(resampled_rotations.shape[0], 25)
         self.assertEqual(resampled_root.shape[0], 25)
 
+    def test_root_planar_gauge_translation_preserves_encoded_actions(self):
+        """A shared local-coordinate translation must not change root deltas."""
+        decoder = HumanoidArenaActionDecoder(G1Skeleton34(), XML_PATH, fps=30.0)
+        source_frames = 7
+        local_rot_mats = torch.eye(3).reshape(1, 1, 3, 3).repeat(
+            source_frames, 34, 1, 1
+        )
+        root_positions = torch.tensor(
+            [
+                [0.10, 0.82, -0.20],
+                [0.16, 0.82, -0.16],
+                [0.23, 0.82, -0.11],
+                [0.31, 0.82, -0.05],
+                [0.40, 0.82, 0.02],
+                [0.50, 0.82, 0.10],
+                [0.61, 0.82, 0.19],
+            ],
+            dtype=torch.float32,
+        )
+        previous_root_position = torch.tensor([0.04, 0.82, -0.24])
+        planar_offset = torch.tensor([12.0, 0.0, -7.0])
+
+        resampled_rotations, resampled_roots = resample_motion_chunk(
+            local_rot_mats,
+            root_positions,
+            source_fps=30.0,
+            target_fps=50.0,
+            previous_local_rot_mat=local_rot_mats[0],
+            previous_root_position=previous_root_position,
+        )
+        shifted_rotations, shifted_roots = resample_motion_chunk(
+            local_rot_mats,
+            root_positions + planar_offset,
+            source_fps=30.0,
+            target_fps=50.0,
+            previous_local_rot_mat=local_rot_mats[0],
+            previous_root_position=previous_root_position + planar_offset,
+        )
+
+        baseline = decoder.encode(
+            resampled_rotations,
+            resampled_roots,
+            previous_root_position=previous_root_position,
+        )
+        shifted = decoder.encode(
+            shifted_rotations,
+            shifted_roots,
+            previous_root_position=previous_root_position + planar_offset,
+        )
+
+        torch.testing.assert_close(shifted, baseline, rtol=1e-5, atol=1e-5)
+
+    def test_root_boundary_gauge_mismatch_changes_only_first_planar_delta(self):
+        """A boundary from another local gauge can create a false first step."""
+        decoder = HumanoidArenaActionDecoder(G1Skeleton34(), XML_PATH, fps=30.0)
+        local_rot_mats = torch.eye(3).reshape(1, 1, 3, 3).repeat(3, 34, 1, 1)
+        root_positions = torch.tensor(
+            [[0.00, 0.82, 0.00], [0.10, 0.82, 0.02], [0.20, 0.82, 0.04]],
+            dtype=torch.float32,
+        )
+        previous_root_position = torch.tensor([-0.10, 0.82, -0.02])
+        wrong_boundary = previous_root_position + torch.tensor([1.0, 0.0, 0.0])
+
+        aligned = decoder.encode(
+            local_rot_mats,
+            root_positions,
+            previous_root_position=previous_root_position,
+        )
+        mismatched = decoder.encode(
+            local_rot_mats,
+            root_positions,
+            previous_root_position=wrong_boundary,
+        )
+
+        self.assertGreater(
+            float(torch.linalg.vector_norm(mismatched[0, :2] - aligned[0, :2])),
+            0.5,
+        )
+        torch.testing.assert_close(mismatched[1:, :2], aligned[1:, :2])
+        torch.testing.assert_close(mismatched[:, 2:], aligned[:, 2:])
+
     def test_decoded_joint_positions_match_mujoco(self):
         try:
             import mujoco

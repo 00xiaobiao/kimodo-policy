@@ -86,7 +86,7 @@ class KimodoPolicyConfig:
     # of KimodoPolicyConfig remains compatible.
     control_fusion_mode: str = "both"
     controlnet_scale: int = 1
-    hand_control_mode: str = "binary"  # "binary" or SIMPLE-only "continuous"
+    hand_control_mode: str = "binary"  # "binary" or closure-delta "continuous"
 
 
 class KimodoPolicy(nn.Module):
@@ -760,7 +760,7 @@ class KimodoPolicy(nn.Module):
                 gt_hand[:, :H], history_mask, gt_hand_mask[:, :H]
             )
             # The hand head always receives the current state in the legacy
-            # [-1, 1] representation.  Continuous SIMPLE training uses a
+            # [-1, 1] representation. Continuous hand training uses a
             # signed closure residual in [-1, 1] as the denoising target:
             # target_future - current_measured_state.
             current_hand_closure = current_hand
