@@ -1148,6 +1148,8 @@ class BaseSourceAdapter:
         observed_motion_valid: np.ndarray | torch.Tensor | None = None,
         target_motion_source: str = "action",
         hand_resampling: str = "binary",
+        observed_hand_resampling: str | None = None,
+        target_hand_resampling: str | None = None,
     ) -> dict[str, torch.Tensor | str]:
         observed_local_rot, observed_root = resample_motion(
             observed_local_rot,
@@ -1161,19 +1163,35 @@ class BaseSourceAdapter:
             episode.source_fps,
             episode.target_fps,
         )
-        if hand_resampling == "binary":
-            hand_resampler = resample_hand_binary
-        elif hand_resampling == "linear":
-            hand_resampler = resample_hand_continuous
-        else:
+        def resolve_hand_resampler(mode: str, name: str):
+            if mode == "binary":
+                return resample_hand_binary
+            if mode == "linear":
+                return resample_hand_continuous
             raise ValueError(
-                "hand_resampling must be 'binary' or 'linear', "
-                f"got {hand_resampling!r}"
+                f"{name} must be 'binary' or 'linear', got {mode!r}"
             )
-        observed_hand = hand_resampler(
+
+        observed_hand_resampling = (
+            hand_resampling
+            if observed_hand_resampling is None
+            else observed_hand_resampling
+        )
+        target_hand_resampling = (
+            hand_resampling
+            if target_hand_resampling is None
+            else target_hand_resampling
+        )
+        observed_hand_resampler = resolve_hand_resampler(
+            observed_hand_resampling, "observed_hand_resampling"
+        )
+        target_hand_resampler = resolve_hand_resampler(
+            target_hand_resampling, "target_hand_resampling"
+        )
+        observed_hand = observed_hand_resampler(
             observed_hand, episode.source_fps, episode.target_fps
         )
-        target_hand = hand_resampler(
+        target_hand = target_hand_resampler(
             target_hand, episode.source_fps, episode.target_fps
         )
         observed_hand_valid = _resample_binary_mask(

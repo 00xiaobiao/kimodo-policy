@@ -160,6 +160,7 @@ def build_model_and_optimizer(config):
         ),
         hand_init_seed = config.model.get("hand_init_seed", 3407),
         hand_control_mode = str(config.model.get("hand_control_mode", "binary")),
+        hand_observation_mode = config.model.get("hand_observation_mode", None),
     )
     model = KimodoPolicy(config=model_config)
     optimizer = torch.optim.AdamW(
@@ -679,6 +680,7 @@ _RESUME_CONFIG_FIELDS = (
     "model.hand_ffn_dim",
     "model.hand_init_seed",
     "model.hand_control_mode",
+    "model.hand_observation_mode",
     "training.loss",
     "training.optimizer",
     "training.scheduler",
@@ -722,6 +724,8 @@ def _normalize_resume_config_value(path, value):
         return 1.0 if value is _MISSING_CONFIG_VALUE else float(value)
     if path == "model.hand_control_mode":
         return "binary" if value is _MISSING_CONFIG_VALUE else str(value).lower()
+    if path == "model.hand_observation_mode":
+        return None if value is _MISSING_CONFIG_VALUE or value is None else str(value).lower()
     if path == "model.enable_hand_head":
         return True if value is _MISSING_CONFIG_VALUE else value
     if path == "model.detach_root_control_for_body":

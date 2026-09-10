@@ -87,6 +87,9 @@ class KimodoPolicyConfig:
     control_fusion_mode: str = "both"
     controlnet_scale: int = 1
     hand_control_mode: str = "binary"  # "binary" or closure-delta "continuous"
+    # Defaults to hand_control_mode. Real-world training may condition on a
+    # continuous measured closure while predicting binary trigger actions.
+    hand_observation_mode: Optional[str] = None
 
 
 class KimodoPolicy(nn.Module):
@@ -118,10 +121,21 @@ class KimodoPolicy(nn.Module):
             )
         return mode
 
+    def _hand_observation_mode(self) -> str:
+        configured = getattr(self.config, "hand_observation_mode", None)
+        mode = self._hand_control_mode() if configured is None else str(configured).lower()
+        if mode not in {"binary", "continuous"}:
+            raise ValueError(
+                "hand_observation_mode must be 'binary' or 'continuous', "
+                f"got {mode!r}"
+            )
+        return mode
+
     def __init__(self, config: KimodoPolicyConfig = None):
         super().__init__()
         self.config = config or KimodoPolicyConfig()
         self._hand_control_mode()
+        self._hand_observation_mode()
         config = self.config
         self.fps = config.fps
         checkpoint_path = os.path.abspath(
@@ -567,7 +581,7 @@ class KimodoPolicy(nn.Module):
         gt_mask: torch.Tensor,   # [B, T] bool, T = action_history + action_chunk
         condition_motion: Optional[torch.Tensor] = None,
         condition_motion_mask: Optional[torch.Tensor] = None,
-        gt_hand: Optional[torch.Tensor] = None, # [B, T, 2], binary or continuous closure
+        gt_hand: Optional[torch.Tensor] = None, # [B, T, 2], observed state then control target
         gt_hand_mask: Optional[torch.Tensor] = None, # [B, T, 2], valid hand supervision
         text_feat: Optional[torch.Tensor] = None,
         text_length: Optional[torch.Tensor] = None,
@@ -631,12 +645,28 @@ class KimodoPolicy(nn.Module):
             if not _masked_all_finite(gt_hand, gt_hand_mask):
                 raise ValueError("gt_hand contains NaN or Inf")
             hand_control_mode = self._hand_control_mode()
-            if hand_control_mode == "binary":
-                if not _masked_all_binary(gt_hand, gt_hand_mask):
-                    raise ValueError("gt_hand must contain only binary 0/1 values")
-            elif not _masked_all_unit_interval(gt_hand, gt_hand_mask):
+            hand_observation_mode = self._hand_observation_mode()
+            history_hand = gt_hand[:, :H]
+            history_hand_mask = gt_hand_mask[:, :H]
+            future_hand = gt_hand[:, H:]
+            future_hand_mask = gt_hand_mask[:, H:]
+            if hand_observation_mode == "binary":
+                if not _masked_all_binary(history_hand, history_hand_mask):
+                    raise ValueError(
+                        "observed hand history must contain only binary 0/1 values"
+                    )
+            elif not _masked_all_unit_interval(history_hand, history_hand_mask):
                 raise ValueError(
-                    "continuous gt_hand must contain values within [0, 1]"
+                    "continuous observed hand history must contain values within [0, 1]"
+                )
+            if hand_control_mode == "binary":
+                if not _masked_all_binary(future_hand, future_hand_mask):
+                    raise ValueError(
+                        "future hand targets must contain only binary 0/1 values"
+                    )
+            elif not _masked_all_unit_interval(future_hand, future_hand_mask):
+                raise ValueError(
+                    "continuous future hand targets must contain values within [0, 1]"
                 )
         # 1. 标准化完整 motion
         x_start_full = self.representation.normalize(gt_motion)  # [B, T, 417]
@@ -1037,8 +1067,8 @@ class KimodoPolicy(nn.Module):
             )
             if not torch.isfinite(current_hand_state).all():
                 raise ValueError("hand_history contains NaN or Inf")
-            hand_control_mode = self._hand_control_mode()
-            if hand_control_mode == "binary":
+            hand_observation_mode = self._hand_observation_mode()
+            if hand_observation_mode == "binary":
                 if not torch.logical_or(
                     current_hand_state == 0, current_hand_state == 1
                 ).all():

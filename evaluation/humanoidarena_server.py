@@ -512,6 +512,7 @@ class KimodoHumanoidArenaRuntime:
             ),
             hand_init_seed=int(model_config.get("hand_init_seed", 3407)),
             hand_control_mode=str(model_config.get("hand_control_mode", "binary")),
+            hand_observation_mode=model_config.get("hand_observation_mode"),
         )
         self.device = torch.device(args.device)
         self.dtype = _dtype_from_name(args.dtype)

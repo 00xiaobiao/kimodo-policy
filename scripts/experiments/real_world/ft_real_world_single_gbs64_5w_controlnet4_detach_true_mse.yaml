@@ -1,5 +1,5 @@
 main:
-  batch_size: 16
+  batch_size: 8
   max_steps: 50000
   save_steps: 10000
   action_chunk: 50
@@ -19,7 +19,11 @@ main:
       # compatible dataset below REAL_WORLD_ROOT/data.
       dataset: "${oc.env:REAL_WORLD_DATASET,*}"
       camera: "observation.images.ego_view"
-      hand_control_mode: continuous
+      # Supervise the hand head with the operator's held trigger action:
+      # action.hand_binary (0=open/released, 1=close/held).
+      hand_control_mode: binary
+      # Condition on measured hand-joint closure from observation.state.
+      hand_observation_mode: continuous
 
   sampling:
     mode: "episode_uniform"
@@ -44,7 +48,8 @@ model:
   controlnet_num_layers: 4
   detach_root_control_for_body: true
   control_fusion_mode: "both"
-  hand_control_mode: continuous
+  hand_control_mode: binary
+  hand_observation_mode: continuous
   hand_hidden_dim: 256
   hand_num_layers: 4
   hand_num_heads: 4

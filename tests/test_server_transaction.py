@@ -279,6 +279,33 @@ class ServerTransactionTest(unittest.TestCase):
         np.testing.assert_allclose(source[0, 7:14], 0.25 * SIMPLE_RIGHT_HAND_CLOSE)
         self.assertFalse(np.allclose(source[0, 7:14], np.zeros(7)))
 
+    def test_simple_yaw_target_is_enabled_and_reanchored_to_episode_heading(self):
+        action = np.zeros((2, 40), dtype=np.float32)
+        relative_yaw = 3.0 * np.pi / 4.0
+        relative_rotation = np.asarray(
+            [
+                [np.cos(relative_yaw), -np.sin(relative_yaw), 0.0],
+                [np.sin(relative_yaw), np.cos(relative_yaw), 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float32,
+        )
+        action[:, 3:9] = relative_rotation[:, :2].reshape(6)
+        initial_yaw = 3.0 * np.pi / 4.0
+        episode_heading = np.asarray(
+            [
+                [np.cos(initial_yaw), -np.sin(initial_yaw), 0.0],
+                [np.sin(initial_yaw), np.cos(initial_yaw), 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float32,
+        )
+
+        source = arena_action_to_simple(action, episode_heading=episode_heading)
+
+        np.testing.assert_array_equal(source[:, 34], np.ones(2, dtype=np.float32))
+        np.testing.assert_allclose(source[:, 35], -np.pi / 2.0, atol=1e-6)
+
     def test_simple_continuous_runtime_executes_closure_without_fsm(self):
         runtime = _runtime(_FakeActionCodec(), KimodoSimpleHumanoidArenaRuntime)
         runtime.max_navigation_speed = 100.0

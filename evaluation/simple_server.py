@@ -276,6 +276,7 @@ def arena_action_to_simple(
     control_fps: float = 50.0,
     *,
     hand_control_mode: str = "binary",
+    episode_heading: np.ndarray | None = None,
 ) -> np.ndarray:
     """Convert Kimodo's 40-D reference action to SIMPLE's 36-D WBC command."""
     actions = np.asarray(action_chunk, dtype=np.float32)
@@ -285,6 +286,16 @@ def arena_action_to_simple(
         raise ValueError(f"expected Kimodo action shape (T, 40), got {actions.shape}")
     if not np.isfinite(actions).all():
         raise ValueError("Kimodo action contains NaN or Inf")
+    if episode_heading is None:
+        episode_heading = np.eye(3, dtype=np.float32)
+    else:
+        episode_heading = np.asarray(episode_heading, dtype=np.float32)
+        if episode_heading.shape != (3, 3):
+            raise ValueError(
+                f"episode_heading must have shape (3, 3), got {episode_heading.shape}"
+            )
+        if not np.isfinite(episode_heading).all():
+            raise ValueError("episode_heading contains NaN or Inf")
     hand_control_mode = str(hand_control_mode).lower()
     if hand_control_mode not in {"binary", "continuous"}:
         raise ValueError(
@@ -323,8 +334,10 @@ def arena_action_to_simple(
         source[frame, 31] = action[2]
         source[frame, 32] = action[0] * float(control_fps)
         source[frame, 33] = action[1] * float(control_fps)
-        source[frame, 34] = 0.0  # turning flag is not represented by the 40-D contract
-        # The action root is episode-relative, matching SIMPLE's target-yaw frame.
+        # The 40-D contract represents root orientation as an always-valid
+        # reference target, so keep SIMPLE's WBC yaw tracker enabled. Its yaw
+        # error dead zone stops rotation after the target has been reached.
+        source[frame, 34] = 1.0
         try:
             from motion.g1_reference import rot6d_row_to_matrix
             import torch
@@ -332,7 +345,10 @@ def arena_action_to_simple(
             rotation = rot6d_row_to_matrix(torch.from_numpy(action[3:9]).reshape(1, 6))[0].numpy()
         except Exception as exc:  # pragma: no cover - only reached in broken environments
             raise RuntimeError("could not decode Kimodo root rotation") from exc
-        source[frame, 35] = np.arctan2(rotation[1, 0], rotation[0, 0])
+        # Model rotations are episode-relative. Re-anchor them to the initial
+        # SIMPLE world heading before comparing against the robot's world yaw.
+        world_rotation = episode_heading @ rotation
+        source[frame, 35] = np.arctan2(world_rotation[1, 0], world_rotation[0, 0])
     return source
 
 
@@ -1975,6 +1991,7 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
                             actions40,
                             args.control_fps,
                             hand_control_mode=runtime.runtime.simple_hand_control_mode,
+                            episode_heading=context.first_heading,
                         )
                         return actions36, 0.0, None
 

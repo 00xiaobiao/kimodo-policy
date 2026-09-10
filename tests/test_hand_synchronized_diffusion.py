@@ -504,17 +504,42 @@ class HandSynchronizedDiffusionTest(unittest.TestCase):
         )
         self.assertTrue(torch.isfinite(output["loss"]))
 
+    def test_binary_training_accepts_continuous_observation_history(self):
+        policy = _build_test_policy(_KeepNoiseSampler())
+        policy.config.hand_control_mode = "binary"
+        policy.config.hand_observation_mode = "continuous"
+        policy.config.root_loss_weight = 1.0
+        policy.config.body_loss_weight = 1.0
+        policy.config.hand_loss_weight = 1.0
+        policy.config.hand_transition_loss_weight = 0.2
+        gt_hand = torch.tensor(
+            [[[0.1, 0.25], [0.2, 0.75], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]]]
+        )
+
+        output = policy.training_kimodo_policy_controlnet(
+            instruction=["Pick up the object."],
+            egoview=torch.zeros(1, 3, 2, 2),
+            gt_motion=torch.zeros(1, 5, 4),
+            gt_mask=torch.ones(1, 5, dtype=torch.bool),
+            gt_hand=gt_hand,
+            text_feat=torch.zeros(1, 1, 6),
+        )
+
+        self.assertTrue(torch.isfinite(output["loss"]))
+
     def test_binary_training_still_rejects_intermediate_targets(self):
         policy = _build_test_policy(_KeepNoiseSampler())
         policy.config.root_loss_weight = 1.0
         policy.config.body_loss_weight = 1.0
+        gt_hand = torch.zeros(1, 5, 2)
+        gt_hand[:, 2:] = 0.5
         with self.assertRaisesRegex(ValueError, "binary 0/1"):
             policy.training_kimodo_policy_controlnet(
                 instruction=["Pick up the object."],
                 egoview=torch.zeros(1, 3, 2, 2),
                 gt_motion=torch.zeros(1, 5, 4),
                 gt_mask=torch.ones(1, 5, dtype=torch.bool),
-                gt_hand=torch.full((1, 5, 2), 0.5),
+                gt_hand=gt_hand,
                 text_feat=torch.zeros(1, 1, 6),
             )
 

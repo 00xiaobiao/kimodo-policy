@@ -181,6 +181,55 @@ class RealWorldAdapterTest(unittest.TestCase):
             adapter._finalize_motion.call_args.kwargs["hand_resampling"], "binary"
         )
 
+    def test_continuous_observation_with_binary_action(self):
+        adapter, table = _adapter_and_body_table(
+            {
+                "hand_control_mode": "binary",
+                "hand_observation_mode": "continuous",
+            }
+        )
+        observed_closure = np.asarray(
+            [[0.0, 0.25], [0.1, 0.5], [0.2, 0.75], [0.3, 1.0]],
+            dtype=np.float32,
+        )
+        observed_names, table["observation.state"] = _packed_names_and_values(
+            observed_closure
+        )
+        target_hand = np.asarray(
+            [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]],
+            dtype=np.float32,
+        )
+        table["action.hand_binary"] = target_hand
+        adapter.reader.read.return_value = table
+        field_names = {
+            "observed_joint_field": "observation.joint_q",
+            "observed_root_orientation_field": "observation.root_q_relative",
+            "observed_hand_state_field": "observation.state",
+            "target_joint_field": "action.joint_q",
+            "target_root_position_field": "action.root_p",
+            "target_root_height_field": "action.root_z",
+            "target_root_orientation_field": "action.root_q",
+            "target_hand_field": "action.hand_binary",
+        }
+        episode = _episode(
+            field_names,
+            table,
+            {"observed": observed_names},
+        )
+
+        result = adapter.load_episode(episode)
+
+        self.assertEqual(result, {"loaded": True})
+        finalize_args = adapter._finalize_motion.call_args.args
+        np.testing.assert_allclose(finalize_args[5], observed_closure, atol=1e-6)
+        np.testing.assert_array_equal(finalize_args[6], target_hand)
+        finalize_kwargs = adapter._finalize_motion.call_args.kwargs
+        self.assertEqual(finalize_kwargs["observed_hand_resampling"], "linear")
+        self.assertEqual(finalize_kwargs["target_hand_resampling"], "binary")
+        self.assertNotIn(
+            "action.wbc hand closure", finalize_kwargs["target_motion_source"]
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

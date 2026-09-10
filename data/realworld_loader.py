@@ -99,6 +99,18 @@ class RealWorldAdapter(BaseSourceAdapter):
             )
         return mode
 
+    @property
+    def hand_observation_mode(self) -> str:
+        mode = str(
+            self.selection.get("hand_observation_mode", self.hand_control_mode)
+        ).lower()
+        if mode not in {"binary", "continuous"}:
+            raise ValueError(
+                "RealWorld hand_observation_mode must be 'binary' or 'continuous', "
+                f"got {mode!r}"
+            )
+        return mode
+
     @staticmethod
     def _selection_patterns(value) -> list[str]:
         if value is None:
@@ -196,13 +208,17 @@ class RealWorldAdapter(BaseSourceAdapter):
                 *hand_mode_fields,
             }
         }
-        if self.hand_control_mode == "continuous":
-            selected_hand_fields = (
-                "observed_hand_state_field",
-                "target_hand_wbc_field",
-            )
-        else:
-            selected_hand_fields = ("observed_hand_field", "target_hand_field")
+        observed_hand_field = (
+            "observed_hand_state_field"
+            if self.hand_observation_mode == "continuous"
+            else "observed_hand_field"
+        )
+        target_hand_field = (
+            "target_hand_wbc_field"
+            if self.hand_control_mode == "continuous"
+            else "target_hand_field"
+        )
+        selected_hand_fields = (observed_hand_field, target_hand_field)
         field_names.update(
             {name: self._field(name) for name in selected_hand_fields}
         )
@@ -221,31 +237,32 @@ class RealWorldAdapter(BaseSourceAdapter):
                 )
             features = info.get("features", {})
             hand_feature_names = {}
+            continuous_hand_fields = []
+            if self.hand_observation_mode == "continuous":
+                continuous_hand_fields.append(("observed", observed_hand_field))
             if self.hand_control_mode == "continuous":
-                for role, field_key in (
-                    ("observed", "observed_hand_state_field"),
-                    ("target", "target_hand_wbc_field"),
-                ):
-                    field_name = field_names[field_key]
-                    feature = features.get(field_name)
-                    if not isinstance(feature, Mapping):
-                        raise ValueError(
-                            f"RealWorld dataset {dataset_root} is missing metadata for "
-                            f"continuous hand field {field_name!r}"
-                        )
-                    shape = tuple(feature.get("shape", ()))
-                    if shape != (43,):
-                        raise ValueError(
-                            f"RealWorld continuous hand field {field_name!r} must have "
-                            f"metadata shape [43], got {list(shape)}"
-                        )
-                    names = feature.get("names")
-                    if not isinstance(names, (list, tuple)):
-                        raise ValueError(
-                            f"RealWorld continuous hand field {field_name!r} must define names"
-                        )
-                    _realworld_hand_indices(names, field_name)
-                    hand_feature_names[role] = tuple(str(value) for value in names)
+                continuous_hand_fields.append(("target", target_hand_field))
+            for role, field_key in continuous_hand_fields:
+                field_name = field_names[field_key]
+                feature = features.get(field_name)
+                if not isinstance(feature, Mapping):
+                    raise ValueError(
+                        f"RealWorld dataset {dataset_root} is missing metadata for "
+                        f"continuous hand field {field_name!r}"
+                    )
+                shape = tuple(feature.get("shape", ()))
+                if shape != (43,):
+                    raise ValueError(
+                        f"RealWorld continuous hand field {field_name!r} must have "
+                        f"metadata shape [43], got {list(shape)}"
+                    )
+                names = feature.get("names")
+                if not isinstance(names, (list, tuple)):
+                    raise ValueError(
+                        f"RealWorld continuous hand field {field_name!r} must define names"
+                    )
+                _realworld_hand_indices(names, field_name)
+                hand_feature_names[role] = tuple(str(value) for value in names)
             configured_camera = self.selection.get(
                 "camera", "observation.images.ego_view"
             )
@@ -392,36 +409,43 @@ class RealWorldAdapter(BaseSourceAdapter):
             4,
             "RealWorld target root quaternion",
         )
-        if self.hand_control_mode == "continuous":
-            hand_feature_names = episode.metadata.get("hand_feature_names", {})
+        hand_feature_names = episode.metadata.get("hand_feature_names", {})
+        if self.hand_observation_mode == "continuous":
             observed_hand = project_realworld_hand_closure(
                 table[field_names["observed_hand_state_field"]],
                 hand_feature_names.get("observed", ()),
                 name="RealWorld observed state",
             )
-            target_hand = project_realworld_hand_closure(
-                table[field_names["target_hand_wbc_field"]],
-                hand_feature_names.get("target", ()),
-                name="RealWorld WBC hand target",
-            )
-            hand_resampling = "linear"
-            hand_description = "hand closure"
-            target_motion_source = (
-                "action_joint_q_root_p_root_z_root_q + action.wbc hand closure"
-            )
+            observed_hand_resampling = "linear"
+            observed_hand_description = "hand closure"
         else:
             observed_hand = _as_matrix(
                 table[field_names["observed_hand_field"]],
                 2,
                 "RealWorld observed hand_binary",
             )
+            observed_hand_resampling = "binary"
+            observed_hand_description = "hand_binary"
+
+        if self.hand_control_mode == "continuous":
+            target_hand = project_realworld_hand_closure(
+                table[field_names["target_hand_wbc_field"]],
+                hand_feature_names.get("target", ()),
+                name="RealWorld WBC hand target",
+            )
+            target_hand_resampling = "linear"
+            target_hand_description = "hand closure"
+            target_motion_source = (
+                "action_joint_q_root_p_root_z_root_q + action.wbc hand closure"
+            )
+        else:
             target_hand = _as_matrix(
                 table[field_names["target_hand_field"]],
                 2,
                 "RealWorld target hand_binary",
             )
-            hand_resampling = "binary"
-            hand_description = "hand_binary"
+            target_hand_resampling = "binary"
+            target_hand_description = "hand_binary"
             target_motion_source = "action_joint_q_root_p_root_z_root_q"
 
         frame_count = observed_q.shape[0]
@@ -431,8 +455,8 @@ class RealWorldAdapter(BaseSourceAdapter):
             "target root position": target_root_p,
             "target root height": target_root_z,
             "target root quaternion": target_root_q,
-            f"observed {hand_description}": observed_hand,
-            f"target {hand_description}": target_hand,
+            f"observed {observed_hand_description}": observed_hand,
+            f"target {target_hand_description}": target_hand,
         }
         for name, array in arrays.items():
             if array.shape[0] != frame_count:
@@ -525,5 +549,7 @@ class RealWorldAdapter(BaseSourceAdapter):
             target_hand_valid,
             observed_motion_valid=observed_motion_valid,
             target_motion_source=target_motion_source,
-            hand_resampling=hand_resampling,
+            hand_resampling=target_hand_resampling,
+            observed_hand_resampling=observed_hand_resampling,
+            target_hand_resampling=target_hand_resampling,
         )
