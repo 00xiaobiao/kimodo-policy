@@ -90,6 +90,28 @@ def _adapter_and_body_table(selection):
 
 
 class RealWorldAdapterTest(unittest.TestCase):
+    def test_dataset_task_name_mode_uses_folder_without_numeric_prefix(self):
+        adapter = RealWorldAdapter.__new__(RealWorldAdapter)
+        adapter.selection = {"task_name_mode": "dataset"}
+
+        self.assertEqual(
+            adapter._task_name(Path("/real-world/data/00_SingleManipulation")),
+            "SingleManipulation",
+        )
+        self.assertEqual(
+            adapter._task_name(Path("/real-world/data/01_BimanualManipulation")),
+            "BimanualManipulation",
+        )
+
+    def test_task_name_mode_defaults_to_legacy_parent_name(self):
+        adapter = RealWorldAdapter.__new__(RealWorldAdapter)
+        adapter.selection = {}
+
+        self.assertEqual(
+            adapter._task_name(Path("/real-world/data/00_SingleManipulation")),
+            "data",
+        )
+
     def test_projection_uses_feature_names_and_realworld_close_pose(self):
         expected = np.asarray([[0.25, 0.75], [1.0, 0.5]], dtype=np.float32)
         names, values = _packed_names_and_values(expected)

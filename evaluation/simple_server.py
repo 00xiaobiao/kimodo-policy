@@ -113,6 +113,7 @@ _SIMPLE_HAND_OPEN_POSITION_TOL = 0.08
 _SIMPLE_HAND_VELOCITY_TOL = 0.20
 _SIMPLE_HAND_CLOSE_PROGRESS = 0.45
 _SIMPLE_HAND_TORQUE_FRACTION = 0.75
+_SIMPLE_MAX_ANGULAR_VELOCITY = 1.0
 
 
 def _mjcf_hand_to_wbc(values: Any) -> np.ndarray:
@@ -277,6 +278,7 @@ def arena_action_to_simple(
     *,
     hand_control_mode: str = "binary",
     episode_heading: np.ndarray | None = None,
+    previous_target_yaw: float | None = None,
 ) -> np.ndarray:
     """Convert Kimodo's 40-D reference action to SIMPLE's 36-D WBC command."""
     actions = np.asarray(action_chunk, dtype=np.float32)
@@ -286,6 +288,9 @@ def arena_action_to_simple(
         raise ValueError(f"expected Kimodo action shape (T, 40), got {actions.shape}")
     if not np.isfinite(actions).all():
         raise ValueError("Kimodo action contains NaN or Inf")
+    control_fps = float(control_fps)
+    if not np.isfinite(control_fps) or control_fps <= 0.0:
+        raise ValueError(f"control_fps must be positive and finite, got {control_fps}")
     if episode_heading is None:
         episode_heading = np.eye(3, dtype=np.float32)
     else:
@@ -296,6 +301,10 @@ def arena_action_to_simple(
             )
         if not np.isfinite(episode_heading).all():
             raise ValueError("episode_heading contains NaN or Inf")
+    if previous_target_yaw is not None:
+        previous_target_yaw = float(previous_target_yaw)
+        if not np.isfinite(previous_target_yaw):
+            raise ValueError("previous_target_yaw must be finite")
     hand_control_mode = str(hand_control_mode).lower()
     if hand_control_mode not in {"binary", "continuous"}:
         raise ValueError(
@@ -332,12 +341,8 @@ def arena_action_to_simple(
         # MuJoCo convention used by the 40-D action, height is z (Kimodo y), so
         # action[2] remains an absolute pelvis-height command.
         source[frame, 31] = action[2]
-        source[frame, 32] = action[0] * float(control_fps)
-        source[frame, 33] = action[1] * float(control_fps)
-        # The 40-D contract represents root orientation as an always-valid
-        # reference target, so keep SIMPLE's WBC yaw tracker enabled. Its yaw
-        # error dead zone stops rotation after the target has been reached.
-        source[frame, 34] = 1.0
+        source[frame, 32] = action[0] * control_fps
+        source[frame, 33] = action[1] * control_fps
         try:
             from motion.g1_reference import rot6d_row_to_matrix
             import torch
@@ -349,6 +354,26 @@ def arena_action_to_simple(
         # SIMPLE world heading before comparing against the robot's world yaw.
         world_rotation = episode_heading @ rotation
         source[frame, 35] = np.arctan2(world_rotation[1, 0], world_rotation[0, 0])
+
+    # Official SIMPLE actions carry both the raw yaw-rate command and its
+    # integrated target yaw. Kimodo carries only root orientation, so recover
+    # the former by differentiating the latter across the command stream.
+    if len(source):
+        yaw_predecessor = (
+            source[0, 35] if previous_target_yaw is None else previous_target_yaw
+        )
+        prior_yaws = np.concatenate(
+            (np.asarray([yaw_predecessor], dtype=np.float32), source[:-1, 35])
+        )
+        yaw_delta = np.arctan2(
+            np.sin(source[:, 35] - prior_yaws),
+            np.cos(source[:, 35] - prior_yaws),
+        )
+        source[:, 34] = np.clip(
+            yaw_delta * control_fps,
+            -_SIMPLE_MAX_ANGULAR_VELOCITY,
+            _SIMPLE_MAX_ANGULAR_VELOCITY,
+        )
     return source
 
 
@@ -1710,6 +1735,7 @@ def serve(args: argparse.Namespace) -> None:
 @dataclass
 class _EpisodeContext:
     first_heading: np.ndarray | None = None
+    previous_target_yaw: float | None = None
     observation: dict[str, Any] | None = None
     info: dict[str, Any] | None = None
     state_buffer: list[np.ndarray] = field(default_factory=list)
@@ -1992,7 +2018,10 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
                             args.control_fps,
                             hand_control_mode=runtime.runtime.simple_hand_control_mode,
                             episode_heading=context.first_heading,
+                            previous_target_yaw=context.previous_target_yaw,
                         )
+                        if len(actions36):
+                            context.previous_target_yaw = float(actions36[-1, 35])
                         return actions36, 0.0, None
 
                 # Host/port are unused after replacing ``client`` below, but

@@ -279,18 +279,19 @@ class ServerTransactionTest(unittest.TestCase):
         np.testing.assert_allclose(source[0, 7:14], 0.25 * SIMPLE_RIGHT_HAND_CLOSE)
         self.assertFalse(np.allclose(source[0, 7:14], np.zeros(7)))
 
-    def test_simple_yaw_target_is_enabled_and_reanchored_to_episode_heading(self):
-        action = np.zeros((2, 40), dtype=np.float32)
-        relative_yaw = 3.0 * np.pi / 4.0
-        relative_rotation = np.asarray(
-            [
-                [np.cos(relative_yaw), -np.sin(relative_yaw), 0.0],
-                [np.sin(relative_yaw), np.cos(relative_yaw), 0.0],
-                [0.0, 0.0, 1.0],
-            ],
-            dtype=np.float32,
-        )
-        action[:, 3:9] = relative_rotation[:, :2].reshape(6)
+    def test_simple_yaw_command_matches_official_rate_and_target_contract(self):
+        action = np.zeros((3, 40), dtype=np.float32)
+        relative_yaws = (0.0, 0.01, 0.01)
+        for frame, relative_yaw in enumerate(relative_yaws):
+            relative_rotation = np.asarray(
+                [
+                    [np.cos(relative_yaw), -np.sin(relative_yaw), 0.0],
+                    [np.sin(relative_yaw), np.cos(relative_yaw), 0.0],
+                    [0.0, 0.0, 1.0],
+                ],
+                dtype=np.float32,
+            )
+            action[frame, 3:9] = relative_rotation[:, :2].reshape(6)
         initial_yaw = 3.0 * np.pi / 4.0
         episode_heading = np.asarray(
             [
@@ -301,10 +302,38 @@ class ServerTransactionTest(unittest.TestCase):
             dtype=np.float32,
         )
 
-        source = arena_action_to_simple(action, episode_heading=episode_heading)
+        source = arena_action_to_simple(
+            action,
+            control_fps=50.0,
+            episode_heading=episode_heading,
+            previous_target_yaw=initial_yaw,
+        )
 
-        np.testing.assert_array_equal(source[:, 34], np.ones(2, dtype=np.float32))
-        np.testing.assert_allclose(source[:, 35], -np.pi / 2.0, atol=1e-6)
+        np.testing.assert_allclose(source[:, 34], [0.0, 0.5, 0.0], atol=1e-5)
+        np.testing.assert_allclose(
+            source[:, 35], initial_yaw + np.asarray(relative_yaws), atol=1e-6
+        )
+
+    def test_simple_yaw_command_wraps_and_clips_like_official_streamer(self):
+        action = np.zeros((1, 40), dtype=np.float32)
+        target_yaw = -np.pi + 0.02
+        rotation = np.asarray(
+            [
+                [np.cos(target_yaw), -np.sin(target_yaw), 0.0],
+                [np.sin(target_yaw), np.cos(target_yaw), 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float32,
+        )
+        action[0, 3:9] = rotation[:, :2].reshape(6)
+
+        source = arena_action_to_simple(
+            action,
+            control_fps=50.0,
+            previous_target_yaw=np.pi - 0.02,
+        )
+
+        np.testing.assert_allclose(source[:, 34], [1.0], atol=1e-6)
 
     def test_simple_continuous_runtime_executes_closure_without_fsm(self):
         runtime = _runtime(_FakeActionCodec(), KimodoSimpleHumanoidArenaRuntime)

@@ -1,5 +1,7 @@
 """Real-world data-source adapter."""
 
+import re
+
 from .common import *  # noqa: F401,F403
 
 
@@ -135,6 +137,27 @@ class RealWorldAdapter(BaseSourceAdapter):
             raise ValueError(f"RealWorld selection field {name!r} must be a non-empty string")
         return value.strip()
 
+    @property
+    def task_name_mode(self) -> str:
+        mode = str(self.selection.get("task_name_mode", "legacy")).lower()
+        if mode not in {"legacy", "dataset"}:
+            raise ValueError(
+                "RealWorld task_name_mode must be 'legacy' or 'dataset', "
+                f"got {mode!r}"
+            )
+        return mode
+
+    def _task_name(self, dataset_root: Path) -> str:
+        """Resolve the task/cache name without changing legacy configs."""
+        legacy_name = dataset_root.parent.name
+        if self.task_name_mode == "legacy":
+            return legacy_name
+
+        dataset_name = dataset_root.name
+        # RealWorld exports commonly carry an ordering prefix in the folder.
+        name = re.sub(r"^\d+[-_]", "", dataset_name).strip("._-")
+        return name or dataset_name or legacy_name
+
     def _selected_dataset_roots(self) -> list[Path]:
         info_paths = sorted(self.root.rglob("meta/info.json"))
         dataset_roots = [path.parent.parent for path in info_paths]
@@ -149,7 +172,7 @@ class RealWorldAdapter(BaseSourceAdapter):
         )
         selected = []
         for dataset_root in dataset_roots:
-            task_name = dataset_root.parent.name
+            task_name = self._task_name(dataset_root)
             dataset_name = dataset_root.name
             if task_selection is not None and not self._matches_patterns(
                 task_name, task_selection
@@ -292,7 +315,7 @@ class RealWorldAdapter(BaseSourceAdapter):
                 raise FileNotFoundError(
                     f"RealWorld dataset is missing episode metadata: {episodes_path}"
                 )
-            task_name = dataset_root.parent.name
+            task_name = self._task_name(dataset_root)
             dataset_name = dataset_root.name
             data_template = info.get("data_path")
             video_template = info.get("video_path")

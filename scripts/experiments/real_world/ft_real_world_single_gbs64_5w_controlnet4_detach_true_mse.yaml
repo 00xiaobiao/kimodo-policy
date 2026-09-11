@@ -18,6 +18,9 @@ main:
       # Set REAL_WORLD_DATASET to a folder name or glob. "*" includes every
       # compatible dataset below REAL_WORLD_ROOT/data.
       dataset: "${oc.env:REAL_WORLD_DATASET,*}"
+      # Use the selected dataset folder for task/text-cache names, e.g.
+      # 00_SingleManipulation -> SingleManipulation.
+      task_name_mode: dataset
       camera: "observation.images.ego_view"
       # Supervise the hand head with the operator's held trigger action:
       # action.hand_binary (0=open/released, 1=close/held).
