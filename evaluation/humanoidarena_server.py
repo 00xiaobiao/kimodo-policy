@@ -477,6 +477,7 @@ class KimodoHumanoidArenaRuntime:
         config = KimodoPolicyConfig(
             fps=int(model_config["fps"]),
             motion_mask_mode=str(model_config["motion_mask_mode"]),
+            kimodo_checkpoint=model_config.get("kimodo_checkpoint"),
             dinov3_model_name=str(model_config["dinov3_model_name"]),
             dinov3_checkpoint=model_config.get("dinov3_checkpoint"),
             action_chunk=int(main_config["action_chunk"]),

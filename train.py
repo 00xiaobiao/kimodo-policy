@@ -127,6 +127,7 @@ def build_model_and_optimizer(config):
     model_config = KimodoPolicyConfig(
         fps              = config.model.fps,
         motion_mask_mode = config.model.motion_mask_mode,
+        kimodo_checkpoint = config.model.get("kimodo_checkpoint", None),
         dinov3_model_name= config.model.dinov3_model_name,
         dinov3_checkpoint= config.model.get("dinov3_checkpoint", None),
         action_chunk     = config.main.action_chunk,
@@ -666,6 +667,7 @@ _RESUME_CONFIG_FIELDS = (
     "main.gradient.grad_accumulation_steps",
     "model.fps",
     "model.motion_mask_mode",
+    "model.kimodo_checkpoint",
     "model.dinov3_model_name",
     "model.dinov3_checkpoint",
     "model.text_feature_dim",
@@ -690,6 +692,7 @@ _INIT_CHECKPOINT_CONFIG_FIELDS = (
     "main.action_history",
     "model.fps",
     "model.motion_mask_mode",
+    "model.kimodo_checkpoint",
     "model.dinov3_model_name",
     "model.dinov3_checkpoint",
     "model.text_feature_dim",
@@ -718,6 +721,10 @@ def _config_value(config, path):
 
 def _normalize_resume_config_value(path, value):
     """Fill newly introduced no-op defaults when comparing old checkpoints."""
+    if path == "model.kimodo_checkpoint":
+        # Checkpoints written before the optional backbone selector was added
+        # used Kimodo-G1-RP-v1 implicitly.
+        return None if value is _MISSING_CONFIG_VALUE else value
     if path == "main.precompute_motion_cache":
         return False if value is _MISSING_CONFIG_VALUE else value
     if path == "main.pretrain_data_fraction":

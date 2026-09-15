@@ -90,6 +90,10 @@ class KimodoPolicyConfig:
     # Defaults to hand_control_mode. Real-world training may condition on a
     # continuous measured closure while predicting binary trigger actions.
     hand_observation_mode: Optional[str] = None
+    # Optional local Kimodo backbone directory. ``None`` preserves the
+    # historical default of Kimodo-G1-RP-v1. Keep this field last so existing
+    # positional construction remains compatible.
+    kimodo_checkpoint: Optional[str] = None
 
 
 class KimodoPolicy(nn.Module):
@@ -141,7 +145,16 @@ class KimodoPolicy(nn.Module):
         checkpoint_path = os.path.abspath(
             os.path.join(os.path.dirname(os.path.dirname(__file__)), "..", "checkpoints")
         )
-        model_dir = os.path.join(checkpoint_path, "Kimodo-G1-RP-v1")
+        model_dir = config.kimodo_checkpoint or os.path.join(
+            checkpoint_path, "Kimodo-G1-RP-v1"
+        )
+        model_dir = os.path.abspath(os.path.expanduser(model_dir))
+        for required_file in ("config.yaml", "model.safetensors"):
+            required_path = os.path.join(model_dir, required_file)
+            if not os.path.isfile(required_path):
+                raise FileNotFoundError(
+                    f"Kimodo backbone is missing {required_file}: {required_path}"
+                )
         image_checkpoint = config.dinov3_checkpoint or os.path.join(
             checkpoint_path, config.dinov3_model_name
         )
