@@ -43,7 +43,7 @@ model:
   detach_root_control_for_body: true
   control_fusion_mode: "both"
   hand_hidden_dim: 256
-  hand_num_layers: 4
+  hand_num_layers: 8
   hand_num_heads: 4
   hand_ffn_dim: 1024
   hand_init_seed: 3407
