@@ -1,0 +1,229 @@
+{
+  "schema_version": 1,
+  "description": "Corrections for known issues in the official SIMPLE evaluation exports. Pose repairs must preserve Level 2 spatial perturbations unless an upstream replacement explicitly says otherwise.",
+  "source": {
+    "dataset": "USC-PSI-Lab/psi-data",
+    "archive": "simple-eval/G1WholebodyPushOfficeChairTeleop-v0.zip",
+    "archive_sha256": "24c7931f27640481e3fb1b96c7d5023bb9b9fe200bc5534922d6b82d0dc54ca6",
+    "level2_metadata_sha256": "f4f44e333e87ff010a7b45289205f2edc6c388c4c2b62c0f6380b4fe26b6219d"
+  },
+  "rules": [
+    {
+      "id": "push_office_chair_level2_articulated_pose",
+      "enabled": true,
+      "status": "validated_by_bounds_and_cross_level",
+      "task": "G1WholebodyPushOfficeChairTeleop-v0",
+      "level": "dr-level-2",
+      "file": "meta/episodes.jsonl",
+      "document_field": "environment_config",
+      "path": "dr_state_dict.spatial.articulated_0.position",
+      "reason": "In official Level 2 episodes 0, 2, 4, 6 and 8, the chair pose has a systematic +0.5 m x/+0.5 m y offset relative to the task articulated_region. Subtracting that offset puts each chair back in the valid approach region while preserving its episode-specific Level 2 perturbation. The chair z and quaternion are already valid and remain unchanged.",
+      "reference": "G1WholebodyPushOfficeChairTeleop-v0/dr-level-2/meta/episodes.jsonl and comparison with dr-level-0/dr-level-1 plus other articulated Level 2 exports",
+      "source_issue": "https://github.com/physical-superintelligence-lab/SIMPLE/issues/22",
+      "repair_policy": {
+        "preserve": [
+          "episode-specific x/y perturbation after offset correction",
+          "z=0.3 support height",
+          "chair quaternion",
+          "target/distractor spatial placement",
+          "scene identity"
+        ],
+        "repair_only": [
+          "systematic +0.5 m x/+0.5 m y offset in affected Level 2 chair positions"
+        ],
+        "note": "This is a component-level translation. Do not copy complete Level 0 poses; Level 2 spatial variation is retained."
+      },
+      "entries": [
+        {
+          "episode_index": 0,
+          "expected": [
+            -0.5384654420441213,
+            0.22635382625764394,
+            0.3
+          ],
+          "replacement": [
+            -1.0384654420441213,
+            -0.27364617374235606,
+            0.3
+          ],
+          "operation": "subtract_offset",
+          "offset": [
+            0.5,
+            0.5,
+            0.0
+          ]
+        },
+        {
+          "episode_index": 2,
+          "expected": [
+            -0.5147934555791467,
+            0.22523318127078967,
+            0.3
+          ],
+          "replacement": [
+            -1.0147934555791467,
+            -0.2747668187292103,
+            0.3
+          ],
+          "operation": "subtract_offset",
+          "offset": [
+            0.5,
+            0.5,
+            0.0
+          ]
+        },
+        {
+          "episode_index": 4,
+          "expected": [
+            -0.5356899095992487,
+            0.7016073214955856,
+            0.3
+          ],
+          "replacement": [
+            -1.0356899095992487,
+            0.20160732149558558,
+            0.3
+          ],
+          "operation": "subtract_offset",
+          "offset": [
+            0.5,
+            0.5,
+            0.0
+          ]
+        },
+        {
+          "episode_index": 6,
+          "expected": [
+            -0.5363581878392991,
+            0.7815047546660234,
+            0.3
+          ],
+          "replacement": [
+            -1.0363581878392991,
+            0.2815047546660234,
+            0.3
+          ],
+          "operation": "subtract_offset",
+          "offset": [
+            0.5,
+            0.5,
+            0.0
+          ]
+        },
+        {
+          "episode_index": 8,
+          "expected": [
+            -0.5396626859938078,
+            0.49407664538725754,
+            0.3
+          ],
+          "replacement": [
+            -1.0396626859938078,
+            -0.00592335461274246,
+            0.3
+          ],
+          "operation": "subtract_offset",
+          "offset": [
+            0.5,
+            0.5,
+            0.0
+          ]
+        }
+      ],
+      "source_issue_note": "The upstream issue documents the same class of deterministic initial-state corruption for other articulated tasks; it does not list PushOfficeChair. The chair correction is validated here by the task articulated_region bounds and the repeated +0.5 m/+0.5 m offset pattern."
+    },
+    {
+      "id": "push_office_chair_level2_layout_pose",
+      "enabled": true,
+      "status": "validated_by_bounds_and_cross_level",
+      "task": "G1WholebodyPushOfficeChairTeleop-v0",
+      "level": "dr-level-2",
+      "file": "meta/episodes.jsonl",
+      "document_field": "environment_config",
+      "path": "layout.actors.articulated.pose.position",
+      "reason": "Keep the serialized layout pose consistent with dr_state_dict.spatial.articulated_0.position for the same Level 2 chair offset correction.",
+      "reference": "push_office_chair_level2_articulated_pose",
+      "repair_policy": {
+        "preserve": [
+          "chair z and quaternion",
+          "all other layout actors"
+        ],
+        "repair_only": [
+          "chair x/y translation"
+        ]
+      },
+      "entries": [
+        {
+          "episode_index": 0,
+          "replacement": [
+            -1.0384654420441213,
+            -0.27364617374235606,
+            0.3
+          ],
+          "operation": "subtract_offset",
+          "offset": [
+            0.5,
+            0.5,
+            0.0
+          ]
+        },
+        {
+          "episode_index": 2,
+          "replacement": [
+            -1.0147934555791467,
+            -0.2747668187292103,
+            0.3
+          ],
+          "operation": "subtract_offset",
+          "offset": [
+            0.5,
+            0.5,
+            0.0
+          ]
+        },
+        {
+          "episode_index": 4,
+          "replacement": [
+            -1.0356899095992487,
+            0.20160732149558558,
+            0.3
+          ],
+          "operation": "subtract_offset",
+          "offset": [
+            0.5,
+            0.5,
+            0.0
+          ]
+        },
+        {
+          "episode_index": 6,
+          "replacement": [
+            -1.0363581878392991,
+            0.2815047546660234,
+            0.3
+          ],
+          "operation": "subtract_offset",
+          "offset": [
+            0.5,
+            0.5,
+            0.0
+          ]
+        },
+        {
+          "episode_index": 8,
+          "replacement": [
+            -1.0396626859938078,
+            -0.00592335461274246,
+            0.3
+          ],
+          "operation": "subtract_offset",
+          "offset": [
+            0.5,
+            0.5,
+            0.0
+          ]
+        }
+      ]
+    }
+  ]
+}

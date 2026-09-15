@@ -420,7 +420,17 @@ def _robot_proprio(robot: Any) -> dict[str, Any] | None:
         if data is None:
             data = getattr(robot, "mjData", None)
         pose = np.asarray(data.qpos[:7], dtype=np.float32) if data is not None else np.asarray([0, 0, 0.75, 1, 0, 0, 0], dtype=np.float32)
-        return {"floating_base_pose": pose, "body_q": body_q, "body_dq": body_dq}
+        result = {"floating_base_pose": pose, "body_q": body_q, "body_dq": body_dq}
+        # Legacy G1Wholebody exposes joints through the generic ``joints``
+        # mapping instead of Sonic's prepare_obs(). Continuous-hand
+        # checkpoints need measured 7-DoF hand positions for their history.
+        for key, names in (("left_hand_q", LEFT_HAND_NAMES), ("right_hand_q", RIGHT_HAND_NAMES)):
+            if all(name in joints for name in names):
+                result[key] = np.asarray(
+                    [float(np.asarray(joints[name].qpos).reshape(-1)[0]) for name in names],
+                    dtype=np.float32,
+                )
+        return result
     return None
 
 
@@ -565,6 +575,46 @@ def _add_model_dependency_paths() -> None:
             "KIMODO_MODEL_SITE_PACKAGES to the site-packages directory used "
             "for training."
         ) from exc
+
+
+def _patch_mp_amo_policy_device(task_name: str, device: str) -> None:
+    """Bind MP's legacy AMO controller to this evaluator worker's GPU.
+
+    SIMPLE's ``g1_wholebody`` constructor passes ``device="cuda"`` to
+    ``AMO_Policy``. On a multi-GPU Isaac worker that resolves to cuda:0,
+    while Kimodo is loaded on the worker's explicit physical device. Keep this
+    as an evaluator-only runtime adapter so vendored SIMPLE source is untouched.
+    """
+    if not str(task_name).endswith("MP-v0"):
+        return
+    from simple.robots.policy.AMO_Policy import AMO_Policy
+
+    if getattr(AMO_Policy, "_kimodo_mp_device_patch", False):
+        return
+    original_init = AMO_Policy.__init__
+    # The shipped AMO TorchScript graph contains cuda:0 constants from its
+    # original tracing environment. Keep AMO on cuda:0; Kimodo itself remains
+    # on the worker GPU passed as ``device``.
+    target_device = "cuda:0"
+
+    def _mp_init(self, *init_args, **init_kwargs):
+        # Current SIMPLE supplies the device as a keyword; also handle a
+        # positional call for compatibility with a future SIMPLE revision.
+        if init_kwargs.get("device") == "cuda":
+            init_kwargs["device"] = target_device
+        elif len(init_args) >= 2 and init_args[1] == "cuda":
+            init_args = list(init_args)
+            init_args[1] = target_device
+            init_args = tuple(init_args)
+        original_init(self, *init_args, **init_kwargs)
+
+    AMO_Policy.__init__ = _mp_init
+    AMO_Policy._kimodo_mp_device_patch = True
+    print(
+        f"MP AMO runtime device override: cuda -> {target_device} "
+        f"(Kimodo worker device: {device})",
+        flush=True,
+    )
 
 
 def _add_simple_dependency_paths() -> None:
@@ -1780,6 +1830,53 @@ def _make_action_from_40(
     return ActionCmd("eval_move_actuators", target_qpos=target_qpos, action_command=command, waist_qpos=waist)
 
 
+def _make_mp_action_from_simple(action: np.ndarray, robot: Any) -> Any:
+    """Build the official SIMPLE MP ``eval_move_actuators`` command.
+
+    MP checkpoints are trained against SIMPLE's 36-D action layout.  The
+    evaluator receives Arena's converted layout and must preserve the same
+    joint ordering and torso command semantics as ``Psi0Agent``/``Cosmos3Agent``.
+    """
+    from simple.core.action import ActionCmd
+
+    action = np.asarray(action, dtype=np.float32).reshape(36)
+    if not np.isfinite(action).all():
+        raise ValueError("SIMPLE MP action contains NaN or Inf")
+    # psi0 upper-joint order: 14 arm joints followed by the hand joints in
+    # thumb/index/middle order expected by the G1 whole-body robot.
+    upper = np.concatenate(
+        (
+            action[14:28],
+            action[0:3],
+            action[5:7],
+            action[3:5],
+            action[7:14],
+        )
+    )
+    target_qpos = dict(zip(robot.joint_names[15:], upper.tolist()))
+    target_waist_qpos = {
+        "waist_yaw_joint": float(action[30]),
+        "waist_roll_joint": float(action[28]),
+        "waist_pitch_joint": float(action[29]),
+    }
+    command = [
+        float(action[32]),  # vx
+        float(action[35]),  # target yaw
+        float(action[33]),  # vy
+        float(action[31] - 0.75),  # pelvis-height delta
+        float(action[30]),  # torso yaw
+        float(action[29]),  # torso pitch
+        float(action[28]),  # torso roll
+        float(action[34]),  # turning flag / yaw rate
+    ]
+    return ActionCmd(
+        "eval_move_actuators",
+        target_qpos=target_qpos,
+        action_command=command,
+        waist_qpos=target_waist_qpos,
+    )
+
+
 def run_eval(args: argparse.Namespace) -> dict[str, Any]:
     """Run SIMPLE's gym/reset/step/video loop with a local Kimodo policy."""
     if str(args.task).startswith("simple/"):
@@ -1826,10 +1923,20 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
     }
     # Registered SIMPLE teleop environments require this positional config;
     # passing it to MP environments is harmless because their constructors
-    # forward unknown kwargs to the base task.
+    # forward unknown kwargs to the base task. Do not inject Sonic's 0.005 s
+    # timestep globally: MP tasks define 0.002 s in their own metadata.
     env_kwargs["sonic_config"] = _make_sonic_config()
-    env_kwargs["physics_dt"] = float(env_kwargs["sonic_config"]["SIMULATE_DT"])
+    _patch_mp_amo_policy_device(task_name, args.device)
     env = gym.make(env_id, **env_kwargs)
+    if str(task_name).endswith("MP-v0"):
+        # Match SIMPLE's official WholeBody evaluation path: AMO needs a
+        # short loco stand warmup before the first policy action. Without it,
+        # the legacy g1_wholebody robot receives VLA actions while still
+        # settling from reset and immediately falls. Keep this MP-only so the
+        # Sonic/Teleop evaluator remains unchanged.
+        from simple.envs.wrappers import StandStabilizationWrapper
+
+        env = StandStabilizationWrapper(env, n_stand_steps=60)
     task = env.unwrapped.task
     robot = task.robot
     # Match SIMPLE's official evaluator: an omitted limit uses the task's
@@ -2093,6 +2200,11 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
             termination_reason = None
             steps = 0
             started = time.perf_counter()
+            # MP is a queued action policy: infer a chunk and execute every
+            # returned frame at the simulator control rate.  Replanning every
+            # frame discards the checkpoint's temporal chunk and destabilizes
+            # the whole-body controller.
+            mp_action_queue: list[Any] = []
             while not (terminated or truncated):
                 context.observation = observation
                 context.info = info
@@ -2104,16 +2216,59 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
                         proprio = _robot_proprio(robot)
                     if proprio is None:
                         raise RuntimeError("SIMPLE environment did not expose usable robot proprioception")
-                    state, context.first_heading = build_arena_state(proprio, context.first_heading)
-                    image = _simple_image(observation)
-                    predicted = runtime.infer40(task_name, image, state)
-                    current_height = float(np.asarray(proprio["floating_base_pose"])[2])
-                    action = _make_action_from_40(
-                        predicted[0],
-                        robot,
-                        current_height,
-                        hand_control_mode=runtime.runtime.simple_hand_control_mode,
-                    )
+                    if not mp_action_queue:
+                        # Include the current observation in the segment.  The
+                        # subsequent frames are appended below after each
+                        # simulator step, matching SIMPLE's client history.
+                        if not context.state_buffer:
+                            append_state_history(
+                                context.state_buffer, proprio, context.first_heading
+                            )
+                            if runtime.runtime.simple_hand_control_mode == "continuous":
+                                append_hand_closure_history(
+                                    context.hand_closure_buffer, proprio
+                                )
+                        state_history = np.stack(context.state_buffer, axis=0)
+                        hand_closure_history = (
+                            np.stack(context.hand_closure_buffer, axis=0)
+                            if runtime.runtime.simple_hand_control_mode == "continuous"
+                            else None
+                        )
+                        image = _simple_image(observation)
+                        hand_observation = {
+                            key: proprio.get(key)
+                            for key in (
+                                "left_hand_q", "right_hand_q",
+                                "left_hand_dq", "right_hand_dq",
+                                "left_hand_tau_est", "right_hand_tau_est",
+                            )
+                            if proprio.get(key) is not None
+                        }
+                        predicted = runtime.infer40(
+                            task_name,
+                            image,
+                            state_history,
+                            hand_observation=hand_observation,
+                            hand_closure_history=hand_closure_history,
+                        )
+                        context.state_buffer.clear()
+                        if hand_closure_history is not None:
+                            context.hand_closure_buffer.clear()
+                        actions36 = arena_action_to_simple(
+                            predicted,
+                            args.control_fps,
+                            hand_control_mode=runtime.runtime.simple_hand_control_mode,
+                            episode_heading=context.first_heading,
+                            previous_target_yaw=context.previous_target_yaw,
+                        )
+                        if len(actions36) == 0:
+                            raise RuntimeError("Kimodo MP runtime returned an empty action chunk")
+                        context.previous_target_yaw = float(actions36[-1, 35])
+                        mp_action_queue.extend(
+                            _make_mp_action_from_simple(frame, robot)
+                            for frame in actions36
+                        )
+                    action = mp_action_queue.pop(0)
                 observation, reward, terminated, truncated, info = video_env.step(action)
                 if terminated:
                     termination_reason = (
