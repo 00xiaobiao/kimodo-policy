@@ -1,12 +1,14 @@
 main:
-  batch_size: 8
-  max_steps: 80000
-  save_steps: 80000
+  # Four processes with per-process batch 16 give the gbs64 used by this
+  # fine-tuning experiment. Override KIMODO_GPUS when using another world size.
+  batch_size: 16
+  max_steps: 200000
+  save_steps: 20000
   action_chunk: 50
   action_history: 100
   sample_stride: 1
   seed: 42
-  save_root: "${oc.env:KIMODO_SIMPLE_SAVE_ROOT,log/experiments/simple_single_gbs64_8w_controlnet4_detach_true_mse_continuous_hand/}"
+  save_root: "${oc.env:KIMODO_SIMPLE_SAVE_ROOT,log/experiments/ft_simple_single_gbs64_20w_controlnet4_detach_true_mse_continuous_hand/}"
   dtype: "bf16"
 
   dataset_roots:
@@ -17,6 +19,17 @@ main:
       task: "${oc.env:KIMODO_SIMPLE_TASK,G1WholebodyXMovePickTeleop-v0}"
       hand_control_mode: continuous
 
+  # Optional for any training config; omitted or enabled: false means no jitter.
+  # When enabled, explicitly supply all color_jitter parameters below.
+  domain_randomization:
+    enabled: true
+    color_jitter:
+      probability: 0.8
+      brightness: 0.2
+      contrast: 0.2
+      saturation: 0.2
+      hue: 0.02
+
   sampling:
     mode: "episode_uniform"
 
@@ -25,7 +38,7 @@ main:
   precompute_text_embeddings: true
   wandb: "offline"
   wandb_project: "Kimodo-Policy"
-  wandb_run_name: "${oc.env:KIMODO_SIMPLE_RUN_NAME,simple_single_gbs64_8w_controlnet4_detach_true_mse_continuous_hand}"
+  wandb_run_name: "${oc.env:KIMODO_SIMPLE_RUN_NAME,ft_simple_single_gbs64_20w_controlnet4_detach_true_mse_continuous_hand}"
   gradient:
     grad_clip_norm: 1.0
     hand_grad_clip_norm: 1.0
@@ -66,9 +79,9 @@ training:
       hand: 1.0
       hand_transition: 0.2
   optimizer:
-    control_backbone_lr: 3.0e-5
-    control_adapter_lr: 1.0e-4
-    hand_lr: 1.0e-4
+    control_backbone_lr: 1.0e-5
+    control_adapter_lr: 3.0e-5
+    hand_lr: 3.0e-5
     weight_decay: 0.01
     betas: [0.9, 0.999]
     eps: 1.0e-8

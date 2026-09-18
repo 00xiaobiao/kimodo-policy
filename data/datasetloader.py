@@ -5,12 +5,13 @@ original MultiSourceG1Dataset orchestration and sampling implementation.
 """
 
 from .common import *  # noqa: F401,F403
+from .domain_randomization import build_domain_randomization
 from .humanoidarena_loader import HumanoidArenaAdapter
 from .unifolm_loader import UnifoLMAdapter
 from .humanoid_everyday_loader import HumanoidEverydayAdapter
 from .hiw500_loader import HIW500Adapter
 from .realworld_loader import RealWorldAdapter
-from .simple_loader import SimpleReplayAdapter
+from .simple_loader import SimpleAdapter
 from .humanoidarena_legacy import *  # noqa: F401,F403
 
 ADAPTER_BY_SOURCE = {
@@ -19,7 +20,7 @@ ADAPTER_BY_SOURCE = {
     SOURCE_HIW500: HIW500Adapter,
     SOURCE_UNIFOLM: UnifoLMAdapter,
     SOURCE_REAL_WORLD: RealWorldAdapter,
-    SOURCE_SIMPLE: SimpleReplayAdapter,
+    SOURCE_SIMPLE: SimpleAdapter,
 }
 
 
@@ -39,6 +40,8 @@ class MultiSourceG1Dataset(data.Dataset):
         sampling: Mapping | None = None,
         target_fps: float = 30.0,
         sampling_seed: int = 0,
+        training: bool = False,
+        domain_randomization: Mapping | None = None,
     ) -> None:
         self.action_history = int(action_history)
         self.action_chunk = int(action_chunk)
@@ -54,6 +57,12 @@ class MultiSourceG1Dataset(data.Dataset):
 
         roots = self._normalize_roots(dataset_root, dataset_roots)
         selections = self._normalize_selection(dataset_selection, roots)
+        self.training = bool(training)
+        self._domain_randomization = (
+            build_domain_randomization(domain_randomization) if self.training else None
+        )
+        if self._domain_randomization is not None:
+            logger.info("Training domain randomization enabled: %s", domain_randomization)
         self.adapters: dict[str, BaseSourceAdapter] = {}
         self._episodes_by_source: dict[str, list[tuple[BaseSourceAdapter, EpisodeRecord]]] = {}
         self._episodes_by_source_task: dict[
@@ -804,6 +813,10 @@ class MultiSourceG1Dataset(data.Dataset):
                 f"Could not sample a valid episode window after {MAX_SAMPLE_ATTEMPTS} attempts: "
                 f"{details}"
             )
+
+        domain_randomization = getattr(self, "_domain_randomization", None)
+        if getattr(self, "training", False) and domain_randomization is not None:
+            egoview = domain_randomization(egoview, seed=self.sampling_seed, index=index)
 
         total_length = self.action_history + self.action_chunk
         gt_motion = torch.zeros(

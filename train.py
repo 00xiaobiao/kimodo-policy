@@ -198,6 +198,9 @@ def build_dataset(config):
     sampling = config.main.get("sampling", None)
     if sampling is not None:
         sampling = OmegaConf.to_container(sampling, resolve=True)
+    domain_randomization = config.main.get("domain_randomization", None)
+    if domain_randomization is not None:
+        domain_randomization = OmegaConf.to_container(domain_randomization, resolve=True)
     return MultiSourceG1Dataset(
         dataset_root=config.main.get("data_root", None),
         dataset_roots=dataset_roots,
@@ -212,6 +215,8 @@ def build_dataset(config):
         sampling=sampling,
         target_fps=config.model.fps,
         sampling_seed=int(config.main.seed),
+        training=True,
+        domain_randomization=domain_randomization,
     )
 
 
@@ -657,6 +662,7 @@ _RESUME_CONFIG_FIELDS = (
     "main.data_root",
     "main.dataset_roots",
     "main.dataset_selection",
+    "main.domain_randomization",
     "main.sampling",
     "main.sample_stride",
     "main.precompute_text_embeddings",
@@ -721,6 +727,12 @@ def _config_value(config, path):
 
 def _normalize_resume_config_value(path, value):
     """Fill newly introduced no-op defaults when comparing old checkpoints."""
+    if path == "main.domain_randomization":
+        if value is _MISSING_CONFIG_VALUE or value is None:
+            return None
+        if isinstance(value, dict) and value.get("enabled", False) is False:
+            return None
+        return value
     if path == "model.kimodo_checkpoint":
         # Checkpoints written before the optional backbone selector was added
         # used Kimodo-G1-RP-v1 implicitly.

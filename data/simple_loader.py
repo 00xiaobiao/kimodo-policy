@@ -1,48 +1,104 @@
-"""SIMPLE MuJoCo replay data-source adapter.
+"""Read official SIMPLE LeRobot v2.1 episodes directly, without replay/export."""
 
-The replay exporter writes one self-contained LeRobot-style dataset per
-episode under ``<root>/<task>/episode_XXXXXX``.  This adapter intentionally
-does not use HumanoidArena task registration or its global index metadata:
-SIMPLE task names are its own namespace and each parquet contains exactly one
-episode.  It reads the verified 64D/40D ref-pose contract and produces the
-same 417D Kimodo tensors as the Arena adapter.
-"""
+from scipy.spatial.transform import Rotation
 
 from .common import *  # noqa: F401,F403
 from .simple_hand import project_hand_closure, source_action_hand_targets
 
 
-def _command_space_target_actions(
-    replay_actions: np.ndarray,
-    source_actions: np.ndarray,
-) -> np.ndarray:
-    """Replace measured SIMPLE upper-body targets with executable WBC commands."""
-    replay_actions = _as_matrix(replay_actions, 40, "Simple action")
-    source_actions = _as_matrix(source_actions, 36, "Simple source action")
-    if replay_actions.shape[0] != source_actions.shape[0]:
-        raise ValueError(
-            "Simple action and source action lengths differ: "
-            f"{replay_actions.shape[0]} and {source_actions.shape[0]}"
+SIMPLE_COLUMNS = (
+    "observation.leg_joints",
+    "observation.arm_joints",
+    "observation.hand_joints",
+    "action",
+    "task_index",
+)
+
+
+def reference_root_from_source_action(source_action: np.ndarray, fps: float) -> dict:
+    """Reconstruct commanded root motion, not measured floating-base poses.
+
+    Keep the existing training convention: first displacement zero, subsequent
+    displacements from the current velocity command, yaw relative to frame zero.
+    """
+    source_action = _as_matrix(source_action, 36, "Simple source action")
+    if not len(source_action):
+        raise ValueError("Cannot construct a reference root for an empty episode")
+    if not np.isfinite(fps) or fps <= 0:
+        raise ValueError(f"Invalid Simple source fps: {fps}")
+    delta = np.zeros((len(source_action), 2), dtype=np.float32)
+    delta[1:] = source_action[1:, 32:34] / float(fps)
+    yaw = np.unwrap(source_action[:, 35].astype(np.float64))
+    yaw -= yaw[0]
+    rotations = Rotation.from_euler("z", yaw).as_matrix().astype(np.float32)
+    return {
+        "local_xy_delta": delta,
+        "height": source_action[:, 31].copy(),
+        "rotation_matrices": rotations,
+    }
+
+
+def simple_training_arrays(table: Mapping, fps: float, hand_control_mode: str) -> dict:
+    """Convert recorded joints and commands in memory without a simulator.
+
+    Continuous mode retains command targets for arms/waist/hands, recorded
+    lower-body targets and two hand closure scalars. Binary mode retains
+    recorded body targets and command-threshold hand labels.
+    """
+    leg = _as_matrix(table["observation.leg_joints"], 15, "Simple leg joints")
+    arm = _as_matrix(table["observation.arm_joints"], 14, "Simple arm joints")
+    hand = _as_matrix(table["observation.hand_joints"], 14, "Simple hand joints")
+    command = _as_matrix(table["action"], 36, "Simple source action")
+    if not len(command) or len({len(leg), len(arm), len(hand), len(command)}) != 1:
+        raise ValueError("Simple observation/action lengths must be equal and nonzero")
+    indices = [
+        UNITREE_G1_JOINT_NAMES_29.index(name)
+        for name in CANONICAL_G1_JOINT_NAMES_29
+    ]
+    observed_body = np.concatenate((leg, arm), axis=1)[:, indices]
+    reference = reference_root_from_source_action(command, fps)
+    rot6d = reference["rotation_matrices"][:, :, :2].reshape(-1, 6)
+    binary_hand = (
+        np.abs(command[:, :14]).reshape(-1, 2, 7).max(axis=2) > 0.10
+    ).astype(np.float32)
+    target_body = observed_body.copy()
+    if hand_control_mode == "continuous":
+        canonical = {name: i for i, name in enumerate(CANONICAL_G1_JOINT_NAMES_29)}
+        for source_index, name in enumerate(
+            UNITREE_G1_JOINT_NAMES_29[15:29], start=14
+        ):
+            target_body[:, canonical[name]] = command[:, source_index]
+        for name, index in (
+            ("waist_yaw_joint", 30),
+            ("waist_roll_joint", 28),
+            ("waist_pitch_joint", 29),
+        ):
+            target_body[:, canonical[name]] = command[:, index]
+        observed_hand = project_hand_closure(hand, name="Simple observed hand q")
+        target_hand = project_hand_closure(
+            source_action_hand_targets(command), name="Simple source hand target"
         )
-    target_actions = replay_actions.copy()
-    canonical_index = {
-        name: index for index, name in enumerate(CANONICAL_G1_JOINT_NAMES_29)
+    elif hand_control_mode == "binary":
+        observed_hand = binary_hand
+        target_hand = binary_hand
+    else:
+        raise ValueError(f"Unknown Simple hand_control_mode: {hand_control_mode!r}")
+    actions = np.concatenate(
+        (reference["local_xy_delta"], reference["height"][:, None],
+         rot6d, target_body, binary_hand),
+        axis=1,
+    ).astype(np.float32)
+    return {
+        "observed_body": observed_body,
+        "root_rot6d": rot6d,
+        "target_actions": actions,
+        "observed_hand": observed_hand,
+        "target_hand": target_hand,
     }
-    source_arm_names = UNITREE_G1_JOINT_NAMES_29[15:29]
-    for source_index, name in enumerate(source_arm_names, start=14):
-        target_actions[:, 9 + canonical_index[name]] = source_actions[:, source_index]
-    source_waist_indices = {
-        "waist_yaw_joint": 30,
-        "waist_roll_joint": 28,
-        "waist_pitch_joint": 29,
-    }
-    for name, source_index in source_waist_indices.items():
-        target_actions[:, 9 + canonical_index[name]] = source_actions[:, source_index]
-    return target_actions
 
 
-class SimpleReplayAdapter(BaseSourceAdapter):
-    """Load completed SIMPLE replay episodes from ``Simple/<task>/episode_*``."""
+class SimpleAdapter(BaseSourceAdapter):
+    """Load <root>/<task>/{meta,data,videos} from official SIMPLE archives."""
 
     source_name = SOURCE_SIMPLE
 
@@ -52,11 +108,10 @@ class SimpleReplayAdapter(BaseSourceAdapter):
 
     @property
     def hand_control_mode(self) -> str:
-        mode = str(getattr(self, "selection", {}).get("hand_control_mode", "binary")).lower()
+        mode = str(self.selection.get("hand_control_mode", "binary")).lower()
         if mode not in {"binary", "continuous"}:
             raise ValueError(
-                "Simple hand_control_mode must be 'binary' or 'continuous', "
-                f"got {mode!r}"
+                f"Simple hand_control_mode must be binary or continuous, got {mode!r}"
             )
         return mode
 
@@ -68,369 +123,151 @@ class SimpleReplayAdapter(BaseSourceAdapter):
             return [value]
         if isinstance(value, (list, tuple, set)):
             return [str(item) for item in value]
-        raise TypeError("Simple task selection must be a string or a sequence of strings")
-
-    @classmethod
-    def _matches_task(cls, task_name: str, patterns) -> bool:
-        return any(
-            fnmatch.fnmatch(task_name, pattern)
-            or fnmatch.fnmatch(task_name.lower(), pattern.lower())
-            for pattern in cls._patterns(patterns)
-        )
+        raise TypeError("Simple task selection must be a string or sequence")
 
     def _selected_task_roots(self) -> list[Path]:
         if "task" in self.selection and "tasks" in self.selection:
-            raise ValueError("Simple selection accepts either 'task' or 'tasks', not both")
-        patterns = self.selection.get("task", self.selection.get("tasks"))
-        task_roots = [
-            path
-            for path in sorted(self.root.iterdir())
-            if path.is_dir() and not path.name.startswith(".")
+            raise ValueError("Simple selection accepts either task or tasks, not both")
+        patterns = self._patterns(
+            self.selection.get("task", self.selection.get("tasks"))
+        )
+        roots = [
+            p for p in sorted(self.root.iterdir())
+            if p.is_dir() and not p.name.startswith(".")
         ]
-        if not task_roots:
-            raise FileNotFoundError(
-                f"Simple root {self.root} contains no task directories"
-            )
         selected = [
-            path for path in task_roots if self._matches_task(path.name, patterns)
+            p for p in roots
+            if any(fnmatch.fnmatch(p.name.lower(), pattern.lower()) for pattern in patterns)
         ]
         if not selected:
-            raise RuntimeError(
-                f"No Simple task matched selection {patterns!r} below {self.root}"
-            )
+            raise RuntimeError(f"No Simple task matched {patterns!r} below {self.root}")
         return selected
 
     @staticmethod
-    def _task_catalog(episode_root: Path) -> dict[int, str]:
-        tasks_path = episode_root / "meta/tasks.parquet"
-        if not tasks_path.is_file():
-            raise FileNotFoundError(f"Simple episode is missing task metadata: {tasks_path}")
-        table = pq.read_table(tasks_path).to_pydict()
-        try:
-            catalog = {
-                int(index): str(task).strip()
-                for index, task in zip(table["task_index"], table["task"])
-            }
-        except KeyError as error:
-            raise ValueError(
-                f"Simple task metadata {tasks_path} must contain task_index and task"
-            ) from error
-        if not catalog or any(not text for text in catalog.values()):
-            raise ValueError(f"Simple task metadata is empty or malformed: {tasks_path}")
-        return catalog
+    def _jsonl(path: Path) -> list[dict]:
+        with path.open(encoding="utf-8") as stream:
+            return [json.loads(line) for line in stream if line.strip()]
 
     @staticmethod
-    def _episode_metadata(episode_root: Path) -> dict:
-        meta_paths = sorted((episode_root / "meta/episodes").glob("*.parquet"))
-        if len(meta_paths) != 1:
-            raise ValueError(
-                f"Simple episode {episode_root} must have exactly one metadata parquet, "
-                f"found {len(meta_paths)}"
-            )
-        metadata = pq.read_table(meta_paths[0]).to_pydict()
-        if len(metadata.get("episode_index", ())) != 1:
-            raise ValueError(
-                f"Simple episode metadata must contain exactly one episode: {meta_paths[0]}"
-            )
-        return {name: values[0] for name, values in metadata.items()}
-
-    @staticmethod
-    def _task_index(metadata: Mapping, episode_root: Path) -> int:
-        values = metadata.get("tasks")
-        if isinstance(values, np.ndarray):
-            values = values.tolist()
-        if not isinstance(values, (list, tuple)) or len(values) != 1:
-            raise ValueError(
-                f"Simple episode metadata must contain one task index: {episode_root}"
-            )
-        try:
-            return int(values[0])
-        except (TypeError, ValueError) as error:
-            raise ValueError(
-                f"Simple episode task index is not an integer: {episode_root}"
-            ) from error
-
-    @staticmethod
-    def _completed_length(episode_root: Path) -> int:
-        report_path = episode_root / "validation.json"
-        if not report_path.is_file():
-            raise FileNotFoundError(
-                f"Simple episode has not completed replay validation: {report_path}"
-            )
-        try:
-            report = json.loads(report_path.read_text(encoding="utf-8"))
-            frames = int(report["frames"])
-            source_frames = int(report["source_frames"])
-            recorded_frames = int(report["recorded_frames"])
-            state_dim = int(report["state_dim"])
-            action_dim = int(report["action_dim"])
-            kimodo_dim = int(report["kimodo_dim"])
-            target_kimodo_dim = int(report["target_kimodo_dim"])
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
-            raise ValueError(
-                f"Simple episode validation report is malformed: {report_path}"
-            ) from error
-        if (
-            frames <= 0
-            # Replays stop when the task terminates successfully.  In that
-            # valid case the recorded dataset is a prefix of the source
-            # command episode, so source_frames may be larger than frames.
-            or source_frames < frames
-            or recorded_frames != frames
-            or (state_dim, action_dim, kimodo_dim, target_kimodo_dim)
-            != (64, 40, 417, 417)
-        ):
-            raise ValueError(
-                f"Simple episode validation report is incompatible: {report_path}"
-            )
-        return frames
-
-    @staticmethod
-    def _episode_directory_index(episode_root: Path) -> int:
-        prefix = "episode_"
-        if not episode_root.name.startswith(prefix):
-            raise ValueError(f"Invalid Simple episode directory name: {episode_root}")
-        try:
-            return int(episode_root.name[len(prefix) :])
-        except ValueError as error:
-            raise ValueError(f"Invalid Simple episode directory name: {episode_root}") from error
+    def _source_path(root: Path, template: str, **values) -> Path:
+        relative = Path(template.format(**values))
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError(f"Simple metadata path escapes task directory: {relative}")
+        path = root / relative
+        if not path.is_file():
+            raise FileNotFoundError(f"Missing official Simple data/video: {path}")
+        return path
 
     def discover(self) -> None:
+        _ = self.hand_control_mode
         for task_root in self._selected_task_roots():
-            task_name = task_root.name
-            episode_roots = sorted(
-                path
-                for path in task_root.glob("episode_*")
-                if path.is_dir()
-            )
-            if not episode_roots:
-                logger.warning("Skipping Simple task with no episode directories: %s", task_root)
-                continue
-
-            for episode_root in episode_roots:
-                info_path = episode_root / "meta/info.json"
-                if not info_path.is_file():
-                    logger.warning("Skipping incomplete Simple episode without info: %s", episode_root)
-                    continue
-                if not (episode_root / "validation.json").is_file():
-                    logger.warning(
-                        "Skipping Simple episode that has not completed validation: %s",
-                        episode_root,
-                    )
-                    continue
-                info = json.loads(info_path.read_text(encoding="utf-8"))
-                schema = info.get("vla_protocol", {}).get("schema")
-                if schema != ARENA_EXPECTED_SCHEMA:
-                    raise ValueError(
-                        f"Unsupported Simple replay schema {schema!r} in {episode_root}"
-                    )
-                source_fps = float(info.get("fps", 0.0))
-                if not np.isfinite(source_fps) or source_fps <= 0:
-                    raise ValueError(f"Simple episode has invalid fps in {info_path}")
-                features = info.get("features", {})
-                state_shape = tuple(features.get("observation.state", {}).get("shape", ()))
-                action_shape = tuple(features.get("action", {}).get("shape", ()))
-                if state_shape != (64,) or action_shape != (40,):
-                    raise ValueError(
-                        f"Simple episode {episode_root} must expose state=(64,) and action=(40,), "
-                        f"got {state_shape} and {action_shape}"
-                    )
-                video_key = _video_key(
-                    features, (str(self.selection.get("camera", "observation.images.front")),)
+            info_path = task_root / "meta/info.json"
+            if not info_path.is_file():
+                raise FileNotFoundError(
+                    f"Expected official SIMPLE meta/info.json at {info_path}; "
+                    "extract the official task archive directly"
                 )
-                metadata = self._episode_metadata(episode_root)
-                episode_index = int(metadata["episode_index"])
-                if episode_index != self._episode_directory_index(episode_root):
+            info = json.loads(info_path.read_text())
+            fps = float(info["fps"])
+            chunk_size = int(info["chunks_size"])
+            if not np.isfinite(fps) or fps <= 0 or chunk_size <= 0:
+                raise ValueError(f"Invalid Simple fps/chunks_size: {info_path}")
+            features = info["features"]
+            camera = str(self.selection.get("camera", "observation.images.egocentric"))
+            if camera == "observation.images.front":
+                camera = "observation.images.egocentric"
+            if features.get(camera, {}).get("dtype") != "video":
+                raise ValueError(f"Simple camera {camera!r} is not a video in {info_path}")
+            rows = self._jsonl(task_root / "meta/tasks.jsonl")
+            catalog = {
+                int(row["task_index"]): str(row["task"]).strip() for row in rows
+            }
+            if (not catalog or len(catalog) != len(rows)
+                    or any(not text for text in catalog.values())):
+                raise ValueError(f"Invalid or duplicate Simple task metadata: {task_root}")
+            episodes = self._jsonl(task_root / "meta/episodes.jsonl")
+            if len(episodes) != int(info["total_episodes"]):
+                raise ValueError(f"Simple episode count differs from info.json: {task_root}")
+            seen = set()
+            for metadata in sorted(
+                episodes, key=lambda row: int(row["episode_index"])
+            ):
+                index = int(metadata["episode_index"])
+                length = int(metadata["length"])
+                if index < 0 or index in seen or length <= 0:
                     raise ValueError(
-                        f"Simple episode index differs from directory name: {episode_root}"
+                        f"Invalid or duplicate Simple episode {index}: {task_root}"
                     )
-                source_length = int(metadata["length"])
-                validated_length = self._completed_length(episode_root)
-                if source_length != validated_length:
+                seen.add(index)
+                task_indices = metadata["tasks"]
+                if len(task_indices) != 1 or int(task_indices[0]) not in catalog:
                     raise ValueError(
-                        f"Simple metadata length={source_length} differs from validation "
-                        f"frames={validated_length}: {episode_root}"
+                        f"Simple episode {index} must identify one known instruction"
                     )
-                task_catalog = self._task_catalog(episode_root)
-                task_index = self._task_index(metadata, episode_root)
-                if task_index not in task_catalog:
-                    raise KeyError(
-                        f"Simple episode references unknown task index {task_index}: {episode_root}"
-                    )
-                instruction = task_catalog[task_index]
-
-                video_chunk_key = f"videos/{video_key}/chunk_index"
-                video_file_key = f"videos/{video_key}/file_index"
-                video_timestamp_key = f"videos/{video_key}/from_timestamp"
-                data_path = episode_root / "data" / (
-                    f"chunk-{int(metadata['data/chunk_index']):03d}"
-                ) / f"file-{int(metadata['data/file_index']):03d}.parquet"
-                video_path = episode_root / "videos" / video_key / (
-                    f"chunk-{int(metadata[video_chunk_key]):03d}"
-                ) / f"file-{int(metadata[video_file_key]):03d}.mp4"
-                if not data_path.is_file() or not video_path.is_file():
-                    logger.warning(
-                        "Skipping Simple episode with missing data/video: %s %s",
-                        data_path,
-                        video_path,
-                    )
-                    continue
-                parquet_file = pq.ParquetFile(data_path)
-                required_columns = {"observation.state", "action"}
-                parquet_columns = set(parquet_file.schema_arrow.names)
-                missing_columns = required_columns - parquet_columns
-                if missing_columns:
-                    raise ValueError(
-                        f"Simple episode parquet is missing columns {sorted(missing_columns)}: {data_path}"
-                    )
-                if parquet_file.metadata.num_rows != source_length:
-                    raise ValueError(
-                        f"Simple episode parquet rows={parquet_file.metadata.num_rows} differs "
-                        f"from metadata length={source_length}: {data_path}"
-                    )
-                if self.hand_control_mode == "continuous":
-                    required_continuous = {"observation.hand_q"}
-                    target_sources = {
-                        "action.hand_closure",
-                        "action.target_hand_q",
-                        "source.action",
-                    }
-                    missing_continuous = required_continuous - parquet_columns
-                    if missing_continuous or not (target_sources & parquet_columns):
-                        raise ValueError(
-                            "Simple continuous hand mode requires observation.hand_q and "
-                            "one of action.hand_closure or source.action in "
-                            f"{data_path}; missing={sorted(missing_continuous)}"
-                        )
-                episode_metadata = {"row_start": 0, "row_end": source_length}
-                hand_columns = sorted(
-                    parquet_columns
-                    & {
-                        "observation.hand_q",
-                        "observation.hand_closure",
-                        "action.target_hand_q",
-                        "action.hand_closure",
-                        "source.action",
-                    }
+                task_index = int(task_indices[0])
+                values = dict(
+                    episode_index=index,
+                    episode_chunk=index // chunk_size,
+                    video_key=camera,
                 )
-                if hand_columns:
-                    episode_metadata["hand_columns"] = hand_columns
+                data_path = self._source_path(task_root, info["data_path"], **values)
+                video_path = self._source_path(task_root, info["video_path"], **values)
+                parquet = pq.ParquetFile(data_path)
+                missing = set(SIMPLE_COLUMNS) - set(parquet.schema_arrow.names)
+                if missing or parquet.metadata.num_rows != length:
+                    raise ValueError(
+                        f"Invalid Simple parquet {data_path}: missing={sorted(missing)}, "
+                        f"expected_rows={length}, actual_rows={parquet.metadata.num_rows}"
+                    )
+                task_id = f"{self.source_name}::{task_root.name}"
+                if len(catalog) > 1:
+                    task_id += f"::{task_index}"
                 self._record(
-                    task_id=f"{self.source_name}::{task_name}",
-                    task_name=task_name,
-                    instruction=instruction,
-                    episode_id=f"{task_name}:{episode_index:06d}",
+                    task_id=task_id,
+                    task_name=task_root.name,
+                    instruction=catalog[task_index],
+                    episode_id=f"{task_root.name}:{index:06d}",
                     data_path=data_path,
-                    source_length=source_length,
-                    source_fps=source_fps,
+                    source_length=length,
+                    source_fps=fps,
                     video_path=video_path,
-                    video_from_timestamp=float(metadata[video_timestamp_key]),
-                    # Each replay parquet is one complete episode.  Supplying an
-                    # explicit row range deliberately avoids the Arena global-index
-                    # convention and its writer-specific inclusive end field.
-                    metadata=episode_metadata,
+                    video_from_timestamp=0.0,
+                    metadata={"row_start": 0, "row_end": length, "task_index": task_index},
                 )
 
     def load_episode(self, episode: EpisodeRecord) -> dict[str, torch.Tensor]:
+        table = self.reader.read(episode, list(SIMPLE_COLUMNS))
+        task_indices = np.asarray(table["task_index"]).reshape(-1)
+        if (len(task_indices) != episode.source_length
+                or not np.all(task_indices == episode.metadata["task_index"])):
+            raise ValueError(
+                "Simple parquet task_index differs from episode metadata: "
+                f"{episode.episode_id}"
+            )
         mode = self.hand_control_mode
-        columns = ["observation.state", "action"]
-        if mode == "continuous":
-            available = set(episode.metadata.get("hand_columns", ()))
-            # Manually constructed EpisodeRecords in focused tests have no
-            # discovery metadata; their continuous caller must still expose the
-            # legacy source/measurement fields.
-            if not available:
-                available = {"observation.hand_q", "source.action"}
-            columns.extend(sorted(available))
-        table = self.reader.read(episode, columns)
-        state = _as_matrix(table["observation.state"], 64, "Simple observation state")
-        actions = _as_matrix(table["action"], 40, "Simple action")
-        target_actions = actions
-        if mode == "binary":
-            observed_hand = actions[:, 38:40]
-            target_hand = observed_hand
-            if not np.logical_or(target_hand == 0, target_hand == 1).all():
-                raise ValueError(
-                    f"Simple episode {episode.episode_id} has non-binary hand actions"
-                )
-            hand_resampling = "binary"
-        else:
-            source_actions = None
-            if "source.action" in table:
-                source_actions = _as_matrix(
-                    table["source.action"], 36, "Simple source action"
-                )
-                target_actions = _command_space_target_actions(actions, source_actions)
-            if "observation.hand_closure" in table:
-                observed_hand = _as_matrix(
-                    table["observation.hand_closure"], 2,
-                    "Simple observed hand closure",
-                )
-            else:
-                observed_hand = project_hand_closure(
-                    _as_matrix(table["observation.hand_q"], 14, "Simple observation hand q"),
-                    name="Simple observed hand q",
-                )
-            if source_actions is not None:
-                target_hand = project_hand_closure(
-                    source_action_hand_targets(source_actions),
-                    name="Simple source hand target",
-                )
-            elif "action.hand_closure" in table:
-                target_hand = _as_matrix(
-                    table["action.hand_closure"], 2,
-                    "Simple target hand closure",
-                )
-            elif "action.target_hand_q" in table:
-                target_hand = project_hand_closure(
-                    _as_matrix(table["action.target_hand_q"], 14, "Simple target hand q"),
-                    name="Simple target hand q",
-                )
-            else:
-                raise ValueError(
-                    f"Simple episode {episode.episode_id} is missing a continuous hand target"
-                )
-            for name, values in (
-                ("observed", observed_hand),
-                ("target", target_hand),
-            ):
-                if not np.isfinite(values).all() or (
-                    (values < -1e-6) | (values > 1.0 + 1e-6)
-                ).any():
-                    raise ValueError(
-                        f"Simple episode {episode.episode_id} has invalid continuous {name} hand closure"
-                    )
-            observed_hand = np.clip(observed_hand, 0.0, 1.0).astype(np.float32)
-            target_hand = np.clip(target_hand, 0.0, 1.0).astype(np.float32)
-            hand_resampling = "linear"
+        arrays = simple_training_arrays(table, episode.source_fps, mode)
         decoder = self._decoder(episode.source_fps)
-        observed_root_rotations = rot6d_row_to_matrix(torch.from_numpy(state[:, :6]))
         observed = decoder.decode_joint_configuration_pose(
-            state[:, 6:35],
-            np.zeros((state.shape[0], 3), dtype=np.float32),
-            root_rotation_matrices=observed_root_rotations,
+            arrays["observed_body"],
+            np.zeros((episode.source_length, 3), dtype=np.float32),
+            root_rotation_matrices=rot6d_row_to_matrix(
+                torch.from_numpy(arrays["root_rot6d"])
+            ),
             joint_names=CANONICAL_G1_JOINT_NAMES_29,
         )
-        target = decoder.decode_action_pose(target_actions)
-        observed_hand_valid = np.ones_like(observed_hand, dtype=bool)
-        target_hand_valid = np.ones_like(target_hand, dtype=bool)
+        target = decoder.decode_action_pose(arrays["target_actions"])
         return self._finalize_motion(
             episode,
-            observed["local_rot_mats"],
-            observed["root_positions"],
-            target["local_rot_mats"],
-            target["root_positions"],
-            observed_hand,
-            target_hand,
-            observed_hand_valid,
-            target_hand_valid,
+            observed["local_rot_mats"], observed["root_positions"],
+            target["local_rot_mats"], target["root_positions"],
+            arrays["observed_hand"], arrays["target_hand"],
+            np.ones_like(arrays["observed_hand"], dtype=bool),
+            np.ones_like(arrays["target_hand"], dtype=bool),
             observed_motion_valid=self._motion_feature_mask(
                 "global_root_heading", "global_rot_data"
             ),
             target_motion_source=(
-                "source.action upper-body command"
-                if mode == "continuous" and "source.action" in table
-                else "action"
+                "source.action upper-body command" if mode == "continuous" else "action"
             ),
-            hand_resampling=hand_resampling,
+            hand_resampling="linear" if mode == "continuous" else "binary",
         )

@@ -34,6 +34,7 @@ from train import (
     _validate_init_checkpoint_config,
     _validate_resume_config,
     _worker_seed,
+    build_dataset,
     build_dataloader,
 )
 
@@ -766,6 +767,64 @@ class TrainingResumeTest(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn('NUM_PROCESSES="${#GPU_IDS[@]}"', pretrain_script)
         self.assertIn('--num_processes "${NUM_PROCESSES}"', pretrain_script)
+
+    def test_dataset_receives_opt_in_randomization_and_arena_defaults_to_off(self):
+        project_root = Path(__file__).resolve().parents[1]
+        for filename, enabled in (
+            ("scripts/experiments/humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse.yaml", False),
+            ("scripts/experiments/simple/ft_simple_single_gbs64_20w_controlnet4_detach_true_mse_continuous_hand.yaml", True),
+            ("scripts/experiments/real_world/ft_real_world_single_gbs64_5w_controlnet4_detach_true_mse.yaml", True),
+        ):
+            config = OmegaConf.load(project_root / filename)
+            with self.subTest(filename=filename), patch("train.MultiSourceG1Dataset") as dataset:
+                build_dataset(config)
+                options = dataset.call_args.kwargs
+                self.assertTrue(options["training"])
+                if enabled:
+                    self.assertEqual(options["domain_randomization"], OmegaConf.to_container(
+                        config.main.domain_randomization, resolve=True
+                    ))
+                else:
+                    self.assertIsNone(options["domain_randomization"])
+
+    def test_resume_accepts_disabled_randomization_for_old_checkpoints(self):
+        project_root = Path(__file__).resolve().parents[1]
+        config = OmegaConf.load(project_root / "train.yaml")
+        checkpoint_config = OmegaConf.to_container(config, resolve=True)
+        checkpoint_config["main"].pop("domain_randomization", None)
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "config.json").write_text(json.dumps(checkpoint_config))
+            for disabled in (None, {}, {"enabled": False}):
+                with self.subTest(disabled=disabled):
+                    config.main.domain_randomization = disabled
+                    _validate_resume_config(config, directory)
+
+    def test_resume_rejects_changed_randomization_but_finetuning_allows_it(self):
+        project_root = Path(__file__).resolve().parents[1]
+        config = OmegaConf.load(project_root / "train.yaml")
+        config.main.domain_randomization = {
+            "enabled": True,
+            "color_jitter": {"probability": 0.8, "brightness": 0.2, "contrast": 0.2,
+                             "saturation": 0.2, "hue": 0.02},
+        }
+        checkpoint_config = OmegaConf.to_container(config, resolve=True)
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "config.json").write_text(json.dumps(checkpoint_config))
+            _validate_resume_config(config, directory)
+            config.main.domain_randomization.color_jitter.brightness = 0.1
+            with self.assertRaisesRegex(ValueError, "main.domain_randomization"):
+                _validate_resume_config(config, directory)
+            _validate_init_checkpoint_config(config, directory)
+            config.main.domain_randomization.color_jitter.brightness = 0.2
+            config.main.domain_randomization.view_crop = {
+                "enabled": True, "probability": 0.3, "min_scale": 0.95,
+            }
+            with self.assertRaisesRegex(ValueError, "main.domain_randomization"):
+                _validate_resume_config(config, directory)
+            _validate_init_checkpoint_config(config, directory)
+            config.main.domain_randomization.enabled = False
+            with self.assertRaisesRegex(ValueError, "main.domain_randomization"):
+                _validate_resume_config(config, directory)
 
     def test_resume_rejects_a_changed_episode_group_size(self):
         project_root = Path(__file__).resolve().parents[1]

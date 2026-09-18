@@ -28,6 +28,22 @@ main:
       # Condition on measured hand-joint closure from observation.state.
       hand_observation_mode: continuous
 
+  # Training-only image augmentation. Omitted transforms remain disabled.
+  domain_randomization:
+    enabled: true
+    color_jitter:
+      probability: 0.8
+      brightness: 0.2
+      contrast: 0.2
+      saturation: 0.2
+      hue: 0.02
+    # Keep approximately 95%-100% of each side, then resize to the original size.
+    # Omit this section or set enabled: false to disable cropping independently.
+    view_crop:
+      enabled: true
+      probability: 0.3
+      min_scale: 0.95
+
   sampling:
     mode: "episode_uniform"
 

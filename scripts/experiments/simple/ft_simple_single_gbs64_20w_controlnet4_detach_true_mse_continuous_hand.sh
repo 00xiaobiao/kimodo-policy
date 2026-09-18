@@ -2,15 +2,15 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
+PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/../../.." && pwd)"
 
 usage() {
   cat <<'EOF'
 Fine-tune the 4-layer ControlNet continuous-hand model on one SIMPLE task.
 
 Usage:
-  bash scripts/experiments/ft_simple_single_gbs64_20w_controlnet4_detach_true_mse_continuous_hand.sh TASK [CHECKPOINT]
-  bash scripts/experiments/ft_simple_single_gbs64_20w_controlnet4_detach_true_mse_continuous_hand.sh CHECKPOINT TASK
+  bash scripts/experiments/simple/ft_simple_single_gbs64_20w_controlnet4_detach_true_mse_continuous_hand.sh TASK [CHECKPOINT]
+  bash scripts/experiments/simple/ft_simple_single_gbs64_20w_controlnet4_detach_true_mse_continuous_hand.sh CHECKPOINT TASK
 
 TASK defaults to KIMODO_SIMPLE_TASK. CHECKPOINT is the initialization checkpoint
 (config.json + training_state.pt), supplied as the second argument or with
