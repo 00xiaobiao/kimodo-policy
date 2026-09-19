@@ -5,6 +5,13 @@
 /scripts/logs/
 /real-world/data/
 
+# SIMPLE local Git metadata, environments, and package caches
+/SIMPLE/.git
+/SIMPLE/.venv/
+/SIMPLE/.venv_isaac/
+/SIMPLE/.uv-cache/
+/SIMPLE/.uv-python/
+
 # Local caches and generated artifacts
 __pycache__/
 *.py[cod]

@@ -1,0 +1,348 @@
+"""
+SIMPLE: SIMulation-based Policy Learning and Evaluation
+
+Copyright (c) 2025 Songlin Wei and Contributors
+Licensed under the terms in LICENSE file.
+"""
+from __future__ import annotations
+from typing import TYPE_CHECKING, Dict,Optional
+if TYPE_CHECKING:
+    from simple.core.randomizer import RandomizerCfg
+from simple.core.task import Task
+from simple.core.randomizer import Randomizer, RandomizerCfg
+from simple.core.object import Object
+from simple.core.actor import Actor, ObjectActor
+from simple.core.layout import Layout
+from simple.core.robot import Robot
+from simple.core.scene import Scene
+from simple.core.scene import Scene
+# from simple.dr import TargetDR, SpatialDR, DistractorDR, CameraDR, TabletopSceneDR, SceneDR, MaterialDR, LightingDR
+from simple.dr import *
+from simple.dr.manager import DRManager, TabletopGraspDRManager # , LayoutManager
+
+from simple.dr.types import Box
+from simple.robots.registry import RobotRegistry
+from simple.tasks.registry import TaskRegistry
+from simple.core.actor import ActorReigstry
+from simple.robots.protocols import Controllable
+from simple.sensors import StereoCameraCfg, SensorCfg, CameraCfg
+from copy import deepcopy
+from gymnasium import spaces
+import numpy as np
+from typing import Any
+import math
+from simple.assets import AssetManager
+
+
+_LIFT_HEIGHT = 0.1
+_PLACE_HEIGHT = 0.45
+_LOWER_HEIGHT = 0.05
+@TaskRegistry.register("g1_wholebody_bend_pick_teleop")
+class G1WholebodyBendPickTeleop(Task):
+    uid:str = "g1_wholebody_bend_pick_teleop"
+    label: str = "G1 Wholebody Bend Pick Teleop"
+    description: str = "A task where the G1 Wholebody robot must bend and pick up an object."
+
+    metadata: dict[str, Any] = {
+        "physics_dt": 0.005,
+        "control_hz": 200,
+        "render_hz": 50,
+        "dr_level": 0,
+        "version": 1.0,
+        "reward_dt": 0.02,
+        "image_dt": 0.033333,
+        "need_gravity": True,
+        "max_episode_steps": 800,
+        "success_criteria": 0.8,
+        # "debug": True
+    }
+
+    robot_cfg: dict[str, Any] = dict(
+        uid="g1_sonic",
+    )
+
+    sensor_cfgs: dict[str, SensorCfg] = dict(
+        
+        head_stereo = StereoCameraCfg(
+            uid="Realsense_D435i",
+            mount="eye_in_head",
+            width=640,
+            height=360,
+            focal_length=1.93,
+            fov=np.deg2rad(110),
+            near=0.2,
+            far=5,
+            baseline=0.05,
+            pose=dict(
+                position=[0.0, 0.0, 0.0],
+            )
+        ),
+
+    )
+
+
+    dr_cfgs: dict[str, RandomizerCfg] = dict(
+        language = LanguageDRCfg(
+            instructions = [
+                "bend the robot and pick up the {}",
+            ]
+        ),
+
+        target = TargetDRCfg(
+            asset_id="graspnet1b:0" # e.g., "primitive:cube"
+        ),
+
+        distractors = DistractorDRCfg(
+            res_id="graspnet1b", 
+            number_of_distractors=2,
+            allow_duplicates=False,
+            exclude=["0"]  # Exclude the target object 
+        ),
+
+        spatial = SpatialDRCfg(
+            spatial_mode="random",
+            robot_region=Box(low=[-0.6, -0.0,0.], high=[-0.66, 0.0,0.]),
+            # robot_orientation_region=Box(low=[0.7071, 0, 0, -0.7071], high=[0.7071, 0, 0, -0.7071]),
+
+            target_region=Box(low=[-0.32 ,-0.08], high=[-0.37, -0.04]),
+            # container_region=Box(low=[-0.22, -0.09], high=[-0.17, 0.02]),
+            distractors_region=Box(low=[-0.2, -0.3], high=[0.4, 0.3]),
+            target_stable_indices = [0],
+            target_rotate_z = Box(low=-0.15, high=0.15),
+            # container_rotate_z = Box(low=1.57, high=1.59)
+        ),
+        camera = CameraDRCfg(
+            cam_id="franka_camera",
+            # position=[0.5, 0, 0.5], # TODO
+            # orientation=[0, 0, 0], # TODO define a range
+        ),
+
+        scene = TabletopSceneDRCfg(
+            # asset_id="primitive:table",
+            # scene_mode="random", # fixed, random
+            # table_size=Box(low=[1.4, 1.4, 0.1], high=[1.8, 1.8, 0.2]),  # Table dimensions
+            table_position=Box(low=[0.2, 0], high=[0.2, 0]),
+            # table_height=Box(low=0.0, high=0.0),
+            # rotation_z=Box(low=0, high=3.14),  # Rotation around the Z-axis
+            table_height=Box(low=0.4, high=0.4),
+            room_choices=["hssd:scene0"],
+            scene_manager="hssd"
+        ),
+        lighting = LightingDRCfg(
+            light_mode="random", # fixed, random
+            light_num=(2,3),
+            light_color_temperature=Box(low=6001, high=8001),  # I was not joking :)
+            light_intensity=Box(low=1e4*0.8, high=1e4*1.2),
+            light_radius=Box(0.08, 0.12),
+            light_length=Box(0.51, 2.1),
+            light_spacing=Box((1., 1.), (2.5, 2.5)),
+            light_position=Box((-1.1, -1.1, 1.3), (1.1, 1.1, 1.5)),
+            light_eulers=Box((0,0,-0.5*math.pi), (0,0,0.5*math.pi))
+        ),
+
+        material = MaterialDRCfg(
+            material_mode="rand_all", # fixed, rand_all, rand_tableground, rand_objects
+        )
+    )
+
+    def __init__(
+        self, 
+        robot_uid: str = "g1_sonic",
+        scene_uid: str | Scene = "hssd:scene0",
+        target_object: str | Object = "graspnet1b:0",
+        controller_uid: str = "pd_joint_pos", # pd_joint_vel, pd_ee_pose, pd_delta_ee_pose
+        split: str = "train",  # train, val, test
+        render_hz: int | None = None,
+        dr_level: int = 0,
+        # physics_dt: float = 0.002, 
+        # success_criteria: float = 0.9,
+        *args,
+        **kwargs
+    ):
+       # lazy init instance variables
+        self._instruction = None
+        self._target = None
+        self._layout = None
+        self._init_target_height = None
+        self._contact_started = False
+        
+        self.robot_cfg.update(dict(
+            uid=robot_uid,
+            # controller_uid=controller_uid,
+        ))
+
+        self.reward = 0
+        # self.success_criteria = success_criteria
+
+        self._robot=RobotRegistry.make(**self.robot_cfg,**kwargs)
+
+         # domain randomization confs
+        #HACK THIS task is only in scene0
+        # if scene_uid is not None:
+        #     assert isinstance(self.dr_cfgs["scene"], TabletopSceneDRCfg)
+        #     self.dr_cfgs["scene"].room_choices = [scene_uid] # type:ignore
+
+        if target_object is not None:
+            assert isinstance(self.dr_cfgs["target"], TargetDRCfg)
+            self.dr_cfgs["target"].asset_id = target_object # type:ignore
+            
+            # Exclude target object from distractors to avoid duplicates
+            target_id = self.dr_cfgs["target"].asset_id.split(":")[-1]
+            distractor_cfg = self.dr_cfgs.get("distractors")
+            if distractor_cfg is not None and isinstance(distractor_cfg, DistractorDRCfg):
+                if distractor_cfg.exclude is None:
+                    distractor_cfg.exclude = []
+                if target_id not in distractor_cfg.exclude:
+                    distractor_cfg.exclude.append(target_id)
+            
+        drmgr = TabletopGraspDRManager(level=dr_level, **self.dr_cfgs)
+        super().__init__(
+            dr=drmgr,
+            split=split, 
+            render_hz=render_hz, 
+            dr_level=dr_level, 
+            # physics_dt=physics_dt, 
+            *args, 
+            **kwargs
+        )
+
+
+    @property
+    def layout(self) -> Layout:
+        """Returns the layout of the task."""
+        assert self._layout is not None, "call reset() first"
+        return self._layout
+    
+    @property
+    def instruction(self) -> str:
+        assert self._instruction is not None, "call reset() first"
+        return self._instruction
+    
+    @property
+    def target(self) -> Actor:
+        assert self._target is not None, "call reset() first"
+        return self._target
+    @property
+    def action_space(self) -> spaces.Space:
+        assert isinstance(self.robot, Controllable)
+        return self.robot.controller.action_space
+    @property
+    def observation_space(self) -> spaces.Space:
+        default_obs = super().observation_space
+        obs: dict[str, Any] = {
+            # "agent": spaces.Box(-np.pi, np.pi, shape=(self.robot.wholebody_dof,), dtype=np.float32), #type:ignore
+            "joint_qpos": spaces.Box(-np.pi, np.pi, shape=(self.robot.wholebody_dof,), dtype=np.float32),#type:ignore
+            # "eef_pose": spaces.Box(-np.inf, np.inf, shape=(7,), dtype=np.float32),#TODO
+            # "mujoco": spaces.Box(0, 255, shape=(360, 640, 3), dtype=np.uint8),
+            # "front_stereo_left": spaces.Box(0, 255, shape=(360, 640, 3), dtype=np.uint8),
+            # "front_stereo_right": spaces.Box(0, 255, shape=(360, 640, 3), dtype=np.uint8),
+            # "wrist": spaces.Box(0, 255, shape=(270, 480, 3), dtype=np.uint8),
+            # "wrist_left": spaces.Box(0, 255, shape=(270, 480, 3), dtype=np.uint8),
+            # "side_left": spaces.Box(0, 255, shape=(360, 640, 3), dtype=np.uint8),
+        }
+        if isinstance(default_obs, spaces.Dict):
+            obs.update(dict(default_obs))
+        return spaces.Dict(obs)
+    
+    def reset(self, seed:int|None=None, options: Optional[dict[str, Any]] = None) -> None:
+        """Resets the task state."""       
+        super().reset(seed, options)
+        split = self.metadata.get("split", "train")
+        self._target = self.layout.actors.get("target")
+        lang_dr = self.dr.get_randomizer("language")
+        assert lang_dr is not None
+        language_template = lang_dr(split)
+        self._instruction = language_template.format(self._target.asset.name) # type: ignore
+        self._init_target_height = None
+        self.reward = 0
+        self.robot.reset(spawn_pose=self.layout.robot.pose)
+
+    # def clone_layout(self, options: dict[str, Any]) -> None:
+    #     """Replicates an environment layout from given options."""
+    #     self._layout = self.dr.replicate_env(self.robot, self.sensor_cfgs, deepcopy(options), self.split)
+
+    def state_dict(self) -> Dict[str, Any]:
+        state_dict = super().state_dict()
+        state_dict.update({
+        }) # TODO
+        return state_dict
+    
+    # def load_state(self, options: Dict[str, Any]) -> None:
+    #     return super().load_state(options)
+
+    
+    def check_success(self, info: dict[str, Any], *args, **kwargs) -> bool:
+        reward = self.compute_reward(info, *args, **kwargs)
+        return reward >= self.metadata["success_criteria"]
+
+    def compute_reward(self, info: dict[str, Any], *args, **kwargs) -> float:
+        target_obj_height = info["target"][2]
+        if self._init_target_height is None:
+            self._init_target_height = target_obj_height
+        """Compute reward based on info dict."""
+        reward = np.clip(
+            (target_obj_height - self._init_target_height) / _LIFT_HEIGHT, 0, 1
+        )
+        return reward
+
+
+    def preload_objects(self) -> list[Actor]:
+        """Preloads all assets required by the task."""
+        asset_manager = AssetManager.get("graspnet1b")
+
+        # for asset in asset_manager:
+        #     yield ObjectActor(asset=asset) # ActorReigstry.make("object", asset)#
+
+        return [ObjectActor(asset=asset) for asset in asset_manager]
+
+    def decompose(self):
+        from simple.datagen.subtask_spec import (
+            StandSpec,
+            WalkSpec,
+            TurnSpec,
+            HeightAdjustSpec,
+            OpenGripperSpec,
+            MoveEEFToPoseSpec,
+            GraspObjectSpec,
+            LiftSpec,
+            PhaseBreakSpec,
+            LowerSpec,
+            RetreatSpec
+        )
+
+        container_pos = self.container.pose.position
+        place_origon = Box(low=[-0.1, -0.24], high=[0.05, -0.15])
+        place_position = container_pos + np.array(place_origon.sample()+ [_PLACE_HEIGHT])
+
+        import transforms3d as t3d
+        place_orientation = t3d.euler.euler2quat(0, 0, 0)
+
+        walk_distace = container_pos[1] +0.17
+
+        return [
+            StandSpec("initialize",),
+            
+            HeightAdjustSpec("adjust_height",height=-0.3,keep_waist_pose=True),
+
+            PhaseBreakSpec("phase_break_before_pick",grasp_type="bodex"),
+
+            GraspObjectSpec("approach", target_uid=self.target.uid, pregrasp=False,grasp_type="bodex",hand_uid="dex3_right",lock_links=[ "left_hand_palm_link"]),
+            HeightAdjustSpec("adjust_height",height=-0.1,keep_waist_pose=True),
+            # WalkSpec("walk_to_container", height =0, vx = -0.1, vy= 0.35,target_yaw=0, distance=walk_distace),
+            # HeightAdjustSpec("adjust_height",height=-0.2),
+            PhaseBreakSpec("phase_break_before_place",grasp_type="bodex"),
+            
+            MoveEEFToPoseSpec("move_to_container",                     
+                            position=place_position,
+                            orientation=place_orientation,
+                            grasp_type="bodex",hand_uid="dex3_right"),
+            LowerSpec("lower", down=_LOWER_HEIGHT ,grasp_type="bodex",hand_uid="dex3_right"),
+            OpenGripperSpec("place" ,grasp_type="bodex",hand_uid="dex3_right"),
+            StandSpec("initialize",)
+            # RetreatSpec("retreat",grasp_type="bodex",hand_uid="dex3_right")
+            
+
+
+            
+        ]
+

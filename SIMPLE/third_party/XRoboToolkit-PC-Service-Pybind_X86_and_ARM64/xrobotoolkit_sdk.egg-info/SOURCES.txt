@@ -1,0 +1,8 @@
+LICENSE
+README.md
+setup.py
+xrobotoolkit_sdk.egg-info/PKG-INFO
+xrobotoolkit_sdk.egg-info/SOURCES.txt
+xrobotoolkit_sdk.egg-info/dependency_links.txt
+xrobotoolkit_sdk.egg-info/not-zip-safe
+xrobotoolkit_sdk.egg-info/top_level.txt
