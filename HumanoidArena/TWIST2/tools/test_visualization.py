@@ -8,7 +8,7 @@
 import sys
 import os
 
-# 添加项目路径
+# Add the project path.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from episode_reader import EpisodeReader
@@ -20,19 +20,19 @@ def test_smplx_visualization():
     print("测试 1: SMPLX骨架可视化")
     print("="*60)
 
-    # 加载episode数据
+    # Load episode data.
     episode_path = "/home/hcl4070-1/Desktop/taowen/projects/TWIST2/data/demo_20260114_222032/episode_0001"
     reader = EpisodeReader(episode_path)
 
-    # 可视化第100帧的SMPLX骨架
+    # Visualize the SMPL-X skeleton at frame 100.
     print("\n可视化第100帧的SMPLX骨架...")
     reader.visualize_smplx(
         idx=100,
         save_path="test_output/smplx_frame_100.png",
-        show=False  # 不显示窗口，只保存
+        show=False  # Save without displaying a window.
     )
 
-    # 可视化第500帧
+    # Visualize frame 500.
     print("可视化第500帧的SMPLX骨架...")
     reader.visualize_smplx(
         idx=500,
@@ -49,11 +49,11 @@ def test_qpos_visualization():
     print("测试 2: 关节角度(qpos)可视化")
     print("="*60)
 
-    # 加载episode数据
+    # Load episode data.
     episode_path = "/home/hcl4070-1/Desktop/taowen/projects/TWIST2/data/demo_20260114_222032/episode_0001"
     reader = EpisodeReader(episode_path)
 
-    # 可视化前300帧的qpos
+    # Visualize qpos for the first 300 frames.
     print("\n可视化前300帧的关节角度...")
     reader.visualize_qpos(
         start_frame=0,
@@ -62,7 +62,7 @@ def test_qpos_visualization():
         show=False
     )
 
-    # 可视化中间300帧
+    # Visualize a 300-frame segment from the middle.
     print("可视化中间300帧的关节角度...")
     reader.visualize_qpos(
         start_frame=500,
@@ -83,10 +83,10 @@ def test_data_inspection():
     episode_path = "/home/hcl4070-1/Desktop/taowen/projects/TWIST2/data/demo_20260114_222032/episode_0001"
     reader = EpisodeReader(episode_path)
 
-    # 打印详细信息
+    # Print detailed information.
     reader.print_info()
 
-    # 检查SMPLX数据
+    # Check SMPL-X data.
     print("\n检查SMPLX数据...")
     smplx = reader.get_smplx_data(100)
     if smplx:
@@ -95,7 +95,7 @@ def test_data_inspection():
     else:
         print("  ✗ 没有SMPLX数据")
 
-    # 检查qpos数据
+    # Check qpos data.
     print("\n检查qpos数据...")
     state_body = reader.get_state_body(100)
     if state_body:
@@ -133,7 +133,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # 创建输出目录
+    # Create the output directory.
     os.makedirs("test_output", exist_ok=True)
 
     try:

@@ -172,14 +172,14 @@ fi
 
 exec "${cmd[@]}" 2>&1 | tee -a "${SIM_LOG}"
 
-# 可切换：
-#一般沙袋: tasks/common_env_config/boxing_bag_sonic.yaml
-#吊挂沙袋: tasks/common_env_config/boxing_bag_hanging_sonic.yaml
-#足球: tasks/common_env_config/football_sonic.yaml
-#单足球: tasks/common_env_config/football_single_sonic.yaml
-#双桌面拾放: tasks/common_env_config/doubledesk_sonic.yaml
-#Push-T: tasks/common_env_config/push_t_sonic.yaml
-#三级台阶平台：tasks/common_env_config/three_step_platform_sonic.yaml
-#开门：tasks/common_env_config/opendoor_sonic.yaml
-#小推车：tasks/common_env_config/pickplace_small_trolley_sonic.yaml
-# 箱子：tasks/common_env_config/pickplace_box_sonic.yaml
+# Available task configurations:
+# Single football: tasks/common_env_config/boxing_bag_sonic.yaml
+# Single football: tasks/common_env_config/boxing_bag_hanging_sonic.yaml
+# Single football: tasks/common_env_config/football_sonic.yaml
+# Single football: tasks/common_env_config/football_single_sonic.yaml
+# Single football: tasks/common_env_config/doubledesk_sonic.yaml
+# Single football: tasks/common_env_config/push_t_sonic.yaml
+# Three-step platform: tasks/common_env_config/three_step_platform_sonic.yaml
+# Door opening: tasks/common_env_config/opendoor_sonic.yaml
+# Small trolley: tasks/common_env_config/pickplace_small_trolley_sonic.yaml
+# Box: tasks/common_env_config/pickplace_box_sonic.yaml

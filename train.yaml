@@ -8,33 +8,33 @@ main:
   save_root: "log/"
   dtype: "bf16"
   dataset_roots:
-    HumanoidArena: "/data/local-data/data/Humanoid/HumanoidArena_dataset_v3_1"
-    HumanoidEveryday: "/data/local-data/data/Humanoid/HumanoidEveryday_debug"
-    HIW500: "/data/local-data/data/Humanoid/HIW500_debug"
-    UnifoLM_WBT_Dataset: "/data/local-data/data/Humanoid/UnifoLM_WBT_Dataset"
+    HumanoidArena: "datasets/HumanoidArena_dataset_v3_1"
+    HumanoidEveryday: "datasets/HumanoidEveryday"
+    HIW500: "datasets/HIW500"
+    UnifoLM_WBT_Dataset: "datasets/UnifoLM_WBT_Dataset"
   dataset_selection:
     # HumanoidArena:
     #   task: "HOI_double_desk"
-    #   backend: "sonic"             # sonic 或 twist2
+    #   backend: "sonic"             # "sonic" or "twist2"
     HumanoidArena:
-      merged: "all_16_refpose_v3_1" # sonic_8_refpose_v3_1、twist2_8_refpose_v3_1
+      merged: "all_16_refpose_v3_1" # sonic_8_refpose_v3_1, twist2_8_refpose_v3_1
     # HumanoidEveryday:
-    #   tasks: ["*"]                # 全部已下载 G1 episode；使用 egocentric
+    #   tasks: ["*"]                # All downloaded G1 episodes; use egocentric views.
     # HIW500:
     #   tasks: ["*"]
     #   camera: "observation.images.head"
-    #   stereo_view: "left"         # 1280x480 双目拼接裁为左目 640x480
-    #   hand_trigger_threshold: 5.0  # trigger 向下脉冲触发闭合
-    #   hand_squeeze_threshold: 0.5  # squeeze 向上脉冲触发张开
+    #   stereo_view: "left"         # Crop the left 640x480 view from a side-by-side 1280x480 image.
+    #   hand_trigger_threshold: 5.0  # Close on a downward trigger pulse.
+    #   hand_squeeze_threshold: 0.5  # Open on an upward squeeze pulse.
     # UnifoLM_WBT_Dataset:
     #   tasks: ["*"]
-    #   camera: "observation.images.head_stereo_left"  # MainCamOnly 自动回退 cam_0
+    #   camera: "observation.images.head_stereo_left"  # MainCamOnly falls back to cam_0 automatically.
     #   joint_jump_threshold_radians: 0.5
     #   root_rotation_jump_threshold_degrees: 30.0
   sampling:
     mode: "episode_uniform"
-  episode_cache_size: 1400           # Merge16 名称保留；loader 排除 GrapCup 后实际使用 1400 episodes
-  cpu_workers_num: 32                # 实测约 1.60-1.62 s/step；4 ranks 共 128 workers，以 I/O/视频解码并行换取最高吞吐
+  episode_cache_size: 1400           # The Merge16 name is retained; 1400 episodes are used after excluding GrapCup.
+  cpu_workers_num: 32                # Measured at 1.60-1.62 s/step; 4 ranks use 128 workers for I/O and video decoding.
   precompute_text_embeddings: true
   wandb: "offline"
   gradient:
@@ -47,23 +47,23 @@ model:
   fps: 30
   motion_mask_mode: "concat"
   dinov3_model_name: "dinov3-vitl16-pretrain-lvd1689m"
-  dinov3_checkpoint: null           # 本地目录或 Hugging Face model id
+  dinov3_checkpoint: null           # Local directory or Hugging Face model ID.
   text_feature_dim: 4096
-  controlnet_num_layers: 16        # 每个 root/body ControlNet 各 16 层，逐层对齐 16 层 Kimodo
-  detach_root_control_for_body: false  # false=Body loss同时更新Root ControlNet；true=切断该梯度
+  controlnet_num_layers: 16        # Each root/body ControlNet has 16 layers aligned with Kimodo.
+  detach_root_control_for_body: false  # false: body loss updates the root ControlNet; true: stop that gradient.
   hand_hidden_dim: 256
   hand_num_layers: 4
   hand_num_heads: 4
   hand_ffn_dim: 1024
   hand_init_seed: 3407
-  compile: true                    # 固定 shape 训练使用 torch.compile 加速前后向
+  compile: true                    # Use torch.compile to speed up forward/backward passes with fixed shapes.
   compile_mode: "reduce-overhead"
 
 
 training:
   loss:
-    motion_loss_type: mse # kimodo_smooth_l1          # mse（旧逻辑）或 kimodo_smooth_l1（官方分量加权和）
-    kimodo_smooth_l1_weights:       # 仅 kimodo_smooth_l1 生效；设 fk: 0 可关闭FK计算
+    motion_loss_type: mse # kimodo_smooth_l1          # Use mse or the official component-weighted kimodo_smooth_l1 loss.
+    kimodo_smooth_l1_weights:       # Used only by kimodo_smooth_l1; set fk: 0 to skip FK computation.
       root_position: 10.0
       root_heading: 2.0
       joint_position: 10.0
@@ -72,19 +72,19 @@ training:
       foot_contact: 4.0
       fk: 5.0
     mse_weights:
-      root: 2.0                    # 仅 motion_loss_type=mse 时生效
-      body: 1.0                    # 仅 motion_loss_type=mse 时生效
+      root: 2.0                    # Used only when motion_loss_type is mse.
+      body: 1.0                    # Used only when motion_loss_type is mse.
       hand: 1.0
       hand_transition: 0.2
   optimizer:
-    control_backbone_lr: 3.0e-5    # 从 Kimodo 复制的 ControlNet Transformer 层
-    control_adapter_lr: 1.0e-4     # 新初始化 image/token-MLP/shared-attention/fusion-zero 与 timestep embedder
+    control_backbone_lr: 3.0e-5    # ControlNet Transformer layers copied from Kimodo.
+    control_adapter_lr: 1.0e-4     # Newly initialized image/token MLP, shared attention, zero fusion, and timestep embedder.
     hand_lr: 1.0e-4
     weight_decay: 0.01             # Weight decay for regularization
     betas: [0.9, 0.999]            # Adam optimizer beta parameters
     eps: 1.0e-8                    # Adam optimizer epsilon
     fused: true
   scheduler:
-    warmup_ratio: 0.01             # 1000-step warmup，快速激活 zero-init visual residual
+    warmup_ratio: 0.01             # 1000-step warmup to activate the zero-initialized visual residual.
     num_cycles: 0.5                # Number of cosine annealing cycles
-    min_lr_ratio: 0.1              # 训练末期分别衰减到 3e-6 / 1e-5
+    min_lr_ratio: 0.1              # Decay learning rates to 3e-6 / 1e-5 near the end of training.

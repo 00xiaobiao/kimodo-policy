@@ -966,13 +966,13 @@
 #                 ".*_wrist_yaw_joint": 1.0,
 #             },
 #             # damping={
-#             #     ".*_shoulder_pitch_joint": 5.0,  # 从1.0改为5.0
-#             #     ".*_shoulder_roll_joint": 5.0,  # 从1.0改为5.0
-#             #     ".*_shoulder_yaw_joint": 5.0,  # 从1.0改为5.0
-#             #     ".*_elbow_joint": 5.0,  # 从1.0改为5.0
-#             #     ".*_wrist_roll_joint": 0.2,  # 从1.0改为0.2
-#             #     ".*_wrist_pitch_joint": 0.2,  # 从1.0改为0.2
-#             #     ".*_wrist_yaw_joint": 0.2,  # 从1.0改为0.2
+#             #     ".*_shoulder_pitch_joint": 5.0,  # changed from 1.0 to 5.0
+#             #     ".*_shoulder_roll_joint": 5.0,  # changed from 1.0 to 5.0
+#             #     ".*_shoulder_yaw_joint": 5.0,  # changed from 1.0 to 5.0
+#             #     ".*_elbow_joint": 5.0,  # changed from 1.0 to 5.0
+#             #     ".*_wrist_roll_joint": 0.2,  # changed from 1.0 to 0.2
+#             #     ".*_wrist_pitch_joint": 0.2,  # changed from 1.0 to 0.2
+#             #     ".*_wrist_yaw_joint": 0.2,  # changed from 1.0 to 0.2
 #             # },
 #             armature=0.0,
 #         ),
@@ -2280,13 +2280,13 @@ G129_CFG_WITH_DEX3_WHOLEBODY = ArticulationCfg(
                 ".*_wrist_yaw_joint": 1.0,
             },
             # damping={
-            #     ".*_shoulder_pitch_joint": 5.0,  # 从1.0改为5.0
-            #     ".*_shoulder_roll_joint": 5.0,  # 从1.0改为5.0
-            #     ".*_shoulder_yaw_joint": 5.0,  # 从1.0改为5.0
-            #     ".*_elbow_joint": 5.0,  # 从1.0改为5.0
-            #     ".*_wrist_roll_joint": 0.2,  # 从1.0改为0.2
-            #     ".*_wrist_pitch_joint": 0.2,  # 从1.0改为0.2
-            #     ".*_wrist_yaw_joint": 0.2,  # 从1.0改为0.2
+            #     ".*_shoulder_pitch_joint": 5.0,  # changed from 1.0 to 5.0
+            #     ".*_shoulder_roll_joint": 5.0,  # changed from 1.0 to 5.0
+            #     ".*_shoulder_yaw_joint": 5.0,  # changed from 1.0 to 5.0
+            #     ".*_elbow_joint": 5.0,  # changed from 1.0 to 5.0
+            #     ".*_wrist_roll_joint": 0.2,  # changed from 1.0 to 0.2
+            #     ".*_wrist_pitch_joint": 0.2,  # changed from 1.0 to 0.2
+            #     ".*_wrist_yaw_joint": 0.2,  # changed from 1.0 to 0.2
             # },
             armature=0.0,
         ),

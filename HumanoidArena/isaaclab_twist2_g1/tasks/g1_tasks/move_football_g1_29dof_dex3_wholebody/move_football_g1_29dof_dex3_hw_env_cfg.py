@@ -68,7 +68,7 @@ class FootballTableSceneCfg(TableFootballSceneCfgWH):
 
     robot: ArticulationCfg = G1RobotPresets.g1_29dof_dex3_wholebody(
         init_pos=(ROBOT_INIT_X, ROBOT_INIT_Y, ROBOT_INIT_Z),
-        init_rot=(0.7071, 0.0, 0.0, 0.7071),  # 向左旋轉 90° (繞 Z 軸)
+        init_rot=(0.7071, 0.0, 0.0, 0.7071),  # Rotate 90 degrees left about the Z axis
     )
     # robot: ArticulationCfg = G1RobotPresets.g1_29dof_dex3_wholebody(
     #     init_pos=(ROBOT_INIT_X, ROBOT_INIT_Y, ROBOT_INIT_Z),

@@ -44,14 +44,14 @@ def apply_grass_pbr_to_ground(
         print(f"[grass_ground_material] ⚠️ 無法載入 omni.usd 或 pxr，跳過草坪材質套用: {e}")
         return False
 
-    # 解析貼圖目錄
+    # Resolve the texture directory
     if textures_dir is None:
         project_root = os.environ.get("PROJECT_ROOT")
         if not project_root:
             project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         textures_dir = str(Path(project_root) / "assets" / "objects" / "materials" / "grass_turf")
 
-    # 支援 AITextured 命名 (*__Png_albedo.png) 及舊版 grass_albedo.png
+    # Support AITextured naming (*__Png_albedo.png) and the legacy grass_albedo.png
     albedo_path = _find_texture(
         textures_dir,
         ["*__Png_albedo.png", "*_albedo.png", "grass_albedo.png"],
@@ -60,7 +60,7 @@ def apply_grass_pbr_to_ground(
         print(f"[grass_ground_material] ⚠️ Albedo 貼圖未找到，請參考 assets/objects/materials/grass_turf/README.md")
         return False
 
-    # 確保使用絕對路徑（Omniverse 需絕對路徑解析貼圖）
+    # Use an absolute path because Omniverse requires it to resolve textures
     albedo_path = os.path.abspath(albedo_path)
     textures_dir = os.path.abspath(textures_dir)
     print(f"[grass_ground_material] 貼圖目錄: {textures_dir}")
@@ -72,7 +72,7 @@ def apply_grass_pbr_to_ground(
         print(f"[grass_ground_material] ⚠️ 找不到地面 prim: {prim_path}")
         return False
 
-    # 收集所有需綁定材質的 mesh（含 prim 本身及其子孫）
+    # Collect all meshes that need the material, including the prim and its descendants
     def _collect_geom_prims(p):
         prims = []
         for sub in Usd.PrimRange(p):
@@ -150,22 +150,22 @@ def apply_grass_pbr_to_ground(
             return True
         return False
 
-    # Roughness 貼圖（可選，AITextured Roughness contrast 0.8 對應）
+    # Roughness texture (optional, for AITextured Roughness contrast 0.8).
     _roughness_path = _find_texture(
         textures_dir,
         ["*__Png_roughness.png", "*_roughness.png", "grass_roughness.png"],
     )
     roughness_path = os.path.abspath(_roughness_path) if _roughness_path else None
 
-    # 1. 建立 PBR 材質（UsdPreviewSurface + UsdUVTexture）
+    # 1. Create a PBR material (UsdPreviewSurface + UsdUVTexture).
     mtl_path = Sdf.Path("/World/Looks/GrassTurfMaterial")
     mtl = UsdShade.Material.Define(stage, mtl_path)
     shader = UsdShade.Shader.Define(stage, mtl_path.AppendPath("Shader"))
     shader.CreateIdAttr("UsdPreviewSurface")
-    # Metallic 0.0（草地為介電質）
+    # Metallic 0.0 (grass is a dielectric).
     shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
 
-    # Albedo 貼圖（sRGB 色彩空間）
+    # Albedo texture (sRGB color space)
     albedo_tx = UsdShade.Shader.Define(stage, mtl_path.AppendPath("AlbedoTx"))
     albedo_tx.CreateIdAttr("UsdUVTexture")
     albedo_tx.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(albedo_path)
@@ -175,7 +175,7 @@ def apply_grass_pbr_to_ground(
     albedo_out = albedo_tx.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
     shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).ConnectToSource(albedo_out)
 
-    # UV 縮放：PrimvarReader -> UsdTransform2d (scale) -> 貼圖 st
+    # UV Scale: PrimvarReader -> UsdTransform2d (scale) -> texture coordinates st.
     st_reader = UsdShade.Shader.Define(stage, mtl_path.AppendPath("StReader"))
     st_reader.CreateIdAttr("UsdPrimvarReader_float2")
     st_reader.CreateInput("varname", Sdf.ValueTypeNames.Token).Set("st")
@@ -191,12 +191,12 @@ def apply_grass_pbr_to_ground(
 
     albedo_tx.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(uv_out)
 
-    # Roughness 貼圖（可選，AITextured Roughness contrast 0.8）
+    # Roughness texture (optional, AITextured Roughness contrast 0.8).
     if roughness_path:
         roughness_tx = UsdShade.Shader.Define(stage, mtl_path.AppendPath("RoughnessTx"))
         roughness_tx.CreateIdAttr("UsdUVTexture")
         roughness_tx.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(roughness_path)
-        roughness_tx.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")  # Roughness 為灰階 Linear
+        roughness_tx.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")  # Roughness is grayscale and linear
         roughness_tx.CreateInput("wrapS", Sdf.ValueTypeNames.Token).Set("repeat")
         roughness_tx.CreateInput("wrapT", Sdf.ValueTypeNames.Token).Set("repeat")
         roughness_tx.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(uv_out)
@@ -205,7 +205,7 @@ def apply_grass_pbr_to_ground(
     else:
         shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.85)
 
-    # Normal 貼圖（可選，AITextured Normal strength 2.5）
+    # Normal texture (optional, AITextured Normal strength 2.5).
     _normal_path = _find_texture(
         textures_dir,
         ["*__Png_normal.png", "*_normal.png", "grass_normal.png"],
@@ -215,7 +215,7 @@ def apply_grass_pbr_to_ground(
         normal_tx = UsdShade.Shader.Define(stage, mtl_path.AppendPath("NormalTx"))
         normal_tx.CreateIdAttr("UsdUVTexture")
         normal_tx.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(normal_path)
-        normal_tx.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")  # Normal 為 Linear
+        normal_tx.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("raw")  # Normal is linear
         normal_tx.CreateInput("wrapS", Sdf.ValueTypeNames.Token).Set("repeat")
         normal_tx.CreateInput("wrapT", Sdf.ValueTypeNames.Token).Set("repeat")
         normal_tx.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(uv_out)
@@ -224,7 +224,7 @@ def apply_grass_pbr_to_ground(
 
     mtl.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), "surface")
 
-    # 2. 綁定材質到所有 ground mesh（覆蓋預設 checker）
+    # 2. Bind the material to all ground meshes, replacing the default checker
     st_bound_count = 0
     for mesh_prim in target_meshes:
         if _ensure_st(mesh_prim):
@@ -236,7 +236,7 @@ def apply_grass_pbr_to_ground(
         binding_api.Bind(mtl)
         bound_count += 1
 
-    # 3. 若 prim_path 為 GroundPlane，同時套用到 defaultGroundPlane（Isaac Sim 預設可能為後者）
+    # 3. If prim_path is GroundPlane, also apply the material to defaultGroundPlane, which Isaac Sim may use
     if prim_path == "/World/GroundPlane":
         default_prim = stage.GetPrimAtPath("/World/defaultGroundPlane")
         if default_prim and default_prim.IsValid():

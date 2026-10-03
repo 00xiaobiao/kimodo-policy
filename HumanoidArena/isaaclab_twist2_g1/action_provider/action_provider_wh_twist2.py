@@ -1000,7 +1000,7 @@ class TWIST2ActionProvider(ActionProvider):
         if self._use_lerobot_vla:
             self._setup_lerobot_vla(args_cli)
 
-        # 预计算索引张量与复用缓冲
+        # Precompute index tensors and reuse buffers
         device = self.env.device
         if hasattr(self, "arm_joint_mapping") and self.arm_joint_mapping:
             self._arm_target_indices = [self.joint_to_index[name] for name in self.arm_joint_mapping.keys()]
@@ -2178,7 +2178,7 @@ class TWIST2ActionProvider(ActionProvider):
             res = self.redis_pipeline.execute()
             action_body_raw = res[0] if len(res) > 0 else None
 
-            # # 🔍 调试点1：检查Redis原始数据
+            # # Debug point 1: inspect raw Redis data
             # if action_body_raw is None:
             #     print("[XY_DEBUG] ⚠️ action_body_raw is None - no data in Redis")
             # else:
@@ -2224,7 +2224,7 @@ class TWIST2ActionProvider(ActionProvider):
             # action_body[1] = max(0, min(2, action_body[1]))
             # action_body[5] = max(0, min(2, action_body[5]))
 
-            # 🔍 调试点2：检查解析后的数据
+            # Debug point 2: inspect parsed data
             if len(action_body) >= 6:
                 xy_vel = action_body[0:2]
                 z_pos = action_body[2]
@@ -2233,25 +2233,25 @@ class TWIST2ActionProvider(ActionProvider):
                 import math
                 xy_speed = math.sqrt(xy_vel[0]**2 + xy_vel[1]**2)
 
-                # print(f"[ISAAC_XY_DEBUG] Isaac Lab接收到的数据:")
+                # print(f"[ISAAC_XY_DEBUG] data received by Isaac Lab:")
                 # print(f"  XY vel: [{xy_vel[0]:.6f}, {xy_vel[1]:.6f}] m/s (speed: {xy_speed:.6f})")
                 # print(f"  Z pos: {z_pos:.4f} m, Yaw vel: {yaw_vel:.6f} rad/s")
-                # print(f"  完整action_body前6维: {action_body[0:6]}")
+                # print(f"  first six values of action_body: {action_body[0:6]}")
 
-                # 分析速度方向
+                # Analyze the velocity direction
                 # if xy_speed > 0.1:
                 #     angle_deg = math.degrees(math.atan2(xy_vel[1], xy_vel[0]))
-                #     print(f"  速度方向: {angle_deg:.2f}° (0°=+X前方, 90°=+Y左侧)")
+                #     print(f"  velocity direction: {angle_deg:.2f}° (0 degrees = forward (+X), 90 degrees = left (+Y))")
                 #     if abs(xy_vel[0]) > abs(xy_vel[1]) * 2:
-                #         print(f"  ✓ 主要沿X方向（前方）")
+                #         print(f"  Mainly along X (forward)")
                 #     elif abs(xy_vel[1]) > abs(xy_vel[0]) * 2:
-                #         print(f"  ⚠️ 主要沿Y方向（左侧）")
+                #         print(f"  Mainly along Y (left)")
                 #     else:
-                #         print(f"  ⚠️ X和Y速度相近，可能有偏移")
+                #         print(f"  X and Y velocities are similar; there may be an offset")
 
             # Check if action_body is all zeros (no valid data from Redis)
             # This prevents robot from falling when Redis is empty
-            # 🔍 调试点3：检查全0判断逻辑
+            # Debug point 3: inspect the all-zero check
             will_reject = action_body_raw is None or all(x == 0.0 for x in action_body)
             if will_reject:
                 self._clear_stale_live_inputs()
@@ -2353,7 +2353,7 @@ class TWIST2ActionProvider(ActionProvider):
 
             result = torch.tensor(action_body, device=self.env.device, dtype=torch.float32).unsqueeze(0)
 
-            # 🔍 调试点4：检查返回的tensor
+            # Debug point 4: inspect the returned tensor
             # print(f"[XY_DEBUG] ✓ Returning tensor with xy_vel: {result[0, 0:2].cpu().numpy()}")
 
             return result
@@ -2452,8 +2452,8 @@ class TWIST2ActionProvider(ActionProvider):
     def compute_current_observations(self):
         # Proprio from Isaac
         root_state = self.env.scene["robot"].data.root_state_w
-        # 使用局部坐标系的角速度（与其他action provider一致）
-        self.ang_vel = self.env.scene["robot"].data.root_ang_vel_b  # [1,3] 局部坐标系
+        # Use angular velocity in the local frame, consistent with other action providers
+        self.ang_vel = self.env.scene["robot"].data.root_ang_vel_b  # [1, 3] local frame
         quat = root_state[:, 3:7]
         self.joint_pos = self.env.scene["robot"].data.joint_pos
         self.joint_vel = self.env.scene["robot"].data.joint_vel
@@ -2623,7 +2623,7 @@ class TWIST2ActionProvider(ActionProvider):
                 full_action.index_copy_(0, torch.tensor(self.twist2_action_indices, device=self.env.device,
                                                         dtype=torch.long), target_29.squeeze(0))
 
-            # 夹爪/手指（若有）
+            # Gripper/fingers, if present
             hand_or_gripper_applied = False
             if self._apply_vla_gripper_command(full_action):
                 hand_or_gripper_applied = True

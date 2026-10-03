@@ -238,7 +238,7 @@ def _frame_to_pose_fields(
 
     # body_quat_w: official SONIC semantics use processed global root orientation,
     # not the raw stored pelvis quaternion directly.
-    # 跟关节的四元数
+    # Joint quaternion
     body_quat_raw = np.asarray(frame["Pelvis"][1], dtype=np.float32)
     body_quat_proc = _process_root_quat_for_sonic(body_quat_raw)
     body_quat_w = body_quat_proc.reshape(1, 4)

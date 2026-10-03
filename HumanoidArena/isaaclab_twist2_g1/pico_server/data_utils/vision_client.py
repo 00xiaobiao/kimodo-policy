@@ -213,33 +213,33 @@ class VisionClient:
                 try:
                     start_time = time.time()
 
-                    # 接收消息
+                    # Receive a message
                     message = self.socket.recv(zmq.NOBLOCK)
 
-                    if len(message) < 16:  # 至少需要16字节的头部 (width+height+jpeg_len+depth_len)
+                    if len(message) < 16:  # The header requires at least 16 bytes (width+height+jpeg_len+depth_len)
                         continue
 
-                    # 解析头部信息：[宽度][高度][JPEG数据长度][JPEG数据][深度数据长度][深度数据]
+                    # Parse the header fields: [width][height][JPEG length][JPEG data][depth length][depth data]
                     width = struct.unpack('i', message[0:4])[0]
                     height = struct.unpack('i', message[4:8])[0]
                     jpeg_length = struct.unpack('i', message[8:12])[0]
 
-                    # 提取JPEG数据
+                    # Extract the JPEG data
                     jpeg_start = 12
                     jpeg_end = jpeg_start + jpeg_length
 
-                    if len(message) < jpeg_end + 4:  # 需要有深度长度字段
+                    if len(message) < jpeg_end + 4:  # A depth length field is required
                         if verbose:
                             print(f"[Warning] Message too short for depth header")
                         continue
 
                     jpeg_data = message[jpeg_start:jpeg_end]
 
-                    # 解析深度数据长度
+                    # Parse the depth length
                     depth_length = struct.unpack('i', message[jpeg_end:jpeg_end+4])[0]
                     
                     try:
-                        # 使用OpenCV解码JPEG数据
+                        # Decode JPEG data with OpenCV
                         image = cv2.imdecode(np.frombuffer(jpeg_data, dtype=np.uint8), cv2.IMREAD_COLOR)
 
                         if image is None:
@@ -247,11 +247,11 @@ class VisionClient:
                                 print("[Warning] Failed to decode JPEG image")
                             continue
 
-                        # 验证解码后的图像尺寸
+                        # Check the decoded image dimensions
                         if image.shape[0] != height or image.shape[1] != width:
                             if verbose:
                                 print(f"[Warning] Decoded image size {image.shape} doesn't match expected {height}x{width}")
-                            # 但仍继续处理，因为JPEG解码可能产生轻微的尺寸差异
+                            # Continue because JPEG decoding can produce minor dimension differences
 
                     except Exception as e:
                         if verbose:
@@ -294,7 +294,7 @@ class VisionClient:
                     self._update_performance_metrics(print_info)
 
                 except zmq.Again:
-                    # 没有消息，继续
+                    # No message is available; continue waiting
                     time.sleep(0.001)
                     continue
 
@@ -360,8 +360,7 @@ if __name__ == "__main__":
         # Clean up shared memory
         image_shared_memory.unlink()
         depth_shared_memory.unlink()
-        
+
         image_shared_memory.close()
         depth_shared_memory.close()
 
-    

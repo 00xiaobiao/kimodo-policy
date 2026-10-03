@@ -127,16 +127,6 @@ if [[ -n "$SIMPLE_DATA_DIR" ]]; then
   export SIMPLE_DATA_DIR
 fi
 
-if [[ -z "$MODEL_SITE_PACKAGES" ]]; then
-  for candidate in \
-    "/ai/Yichi/0_Systems/miniconda3/envs/MOGE3/lib/python3.10/site-packages" \
-    "/data/local-data/data/conda_envs/patch-policy-ddt/lib/python3.10/site-packages"; do
-    if [[ -d "$candidate" ]]; then
-      MODEL_SITE_PACKAGES="$candidate"
-      break
-    fi
-  done
-fi
 if [[ -n "$MODEL_SITE_PACKAGES" ]]; then
   MODEL_SITE_PACKAGES="$(readlink -m "$MODEL_SITE_PACKAGES")"
   [[ -d "$MODEL_SITE_PACKAGES" ]] || {
@@ -145,7 +135,7 @@ if [[ -n "$MODEL_SITE_PACKAGES" ]]; then
   }
   export KIMODO_MODEL_SITE_PACKAGES="$MODEL_SITE_PACKAGES"
 else
-  echo "Warning: no KIMODO_MODEL_SITE_PACKAGES found; model import may fail" >&2
+  echo "Warning: set KIMODO_MODEL_SITE_PACKAGES if the active SIMPLE environment lacks transformers or safetensors" >&2
 fi
 
 if [[ -z "$EVAL_DATA_ROOT" ]]; then

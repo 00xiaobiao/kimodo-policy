@@ -11,9 +11,9 @@ main:
   dtype: "bf16"
 
   dataset_roots:
-    UnifoLM_WBT_Dataset: "${oc.env:UNIFOLM_ROOT,/data/local-data/data/Humanoid/UnifoLM_WBT_Dataset}"
-    HumanoidEveryday: "${oc.env:HUMANOID_EVERYDAY_ROOT,/data/local-data/data/Humanoid/HumanoidEveryday}"
-    HIW500: "${oc.env:HIW500_ROOT,/data/local-data/data/Humanoid/HIW500-LeRobot}"
+    UnifoLM_WBT_Dataset: "${oc.env:UNIFOLM_ROOT,datasets/UnifoLM_WBT_Dataset}"
+    HumanoidEveryday: "${oc.env:HUMANOID_EVERYDAY_ROOT,datasets/HumanoidEveryday}"
+    HIW500: "${oc.env:HIW500_ROOT,datasets/HIW500}"
 
   dataset_selection:
     UnifoLM_WBT_Dataset:

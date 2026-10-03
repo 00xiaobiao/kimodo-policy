@@ -23,6 +23,15 @@ ADAPTER_BY_SOURCE = {
     SOURCE_SIMPLE: SimpleAdapter,
 }
 
+DATASET_ROOT_ENV_VARS = {
+    SOURCE_HUMANOID_ARENA: "HUMANOID_ARENA_ROOT",
+    SOURCE_HUMANOID_EVERYDAY: "HUMANOID_EVERYDAY_ROOT",
+    SOURCE_HIW500: "HIW500_ROOT",
+    SOURCE_UNIFOLM: "UNIFOLM_ROOT",
+    SOURCE_REAL_WORLD: "REAL_WORLD_ROOT",
+    SOURCE_SIMPLE: "KIMODO_SIMPLE_ROOT",
+}
+
 
 class MultiSourceG1Dataset(data.Dataset):
     """Source-balanced mixed dataset aligned to Kimodo's 417D G1 contract."""
@@ -74,9 +83,17 @@ class MultiSourceG1Dataset(data.Dataset):
         for source_name, selection in selections.items():
             root = roots.get(source_name)
             if root is None:
-                raise KeyError(f"No dataset root configured for selected source {source_name}")
+                env_var = DATASET_ROOT_ENV_VARS[source_name]
+                raise FileNotFoundError(
+                    f"No dataset root configured for selected source {source_name}. "
+                    f"Set {env_var} or main.dataset_roots.{source_name}."
+                )
             if not root.is_dir():
-                raise FileNotFoundError(f"{source_name} dataset root does not exist: {root}")
+                env_var = DATASET_ROOT_ENV_VARS[source_name]
+                raise FileNotFoundError(
+                    f"{source_name} dataset root does not exist or is not a directory: {root}. "
+                    f"Set {env_var} or main.dataset_roots.{source_name}."
+                )
             adapter = ADAPTER_BY_SOURCE[source_name](
                 root=root,
                 selection=selection,
@@ -456,17 +473,27 @@ class MultiSourceG1Dataset(data.Dataset):
         roots = {}
         for name, value in dict(dataset_roots or {}).items():
             canonical = cls._canonical_source_name(name)
+            if value is None or not str(value).strip():
+                continue
             path = Path(value).expanduser()
             if not path.is_absolute():
                 path = PROJECT_ROOT / path
             roots[canonical] = path.resolve()
-        if dataset_root is not None and SOURCE_HUMANOID_ARENA not in roots:
+        if (
+            dataset_root is not None
+            and str(dataset_root).strip()
+            and SOURCE_HUMANOID_ARENA not in roots
+        ):
             path = Path(dataset_root).expanduser()
             if not path.is_absolute():
                 path = PROJECT_ROOT / path
             roots[SOURCE_HUMANOID_ARENA] = path.resolve()
         if not roots:
-            raise ValueError("Configure main.data_root or main.dataset_roots")
+            raise ValueError(
+                "No dataset roots are configured. Set the environment variable for the "
+                "selected source, such as HUMANOID_ARENA_ROOT or KIMODO_SIMPLE_ROOT, "
+                "or configure main.dataset_roots."
+            )
         return roots
 
     @classmethod

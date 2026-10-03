@@ -13,7 +13,7 @@ EpisodeReader使用示例
 import sys
 import os
 
-# 添加项目路径
+# Add the project path.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from episode_reader import EpisodeReader
@@ -25,17 +25,17 @@ def example_basic_usage():
     print("示例 1: 基本使用")
     print("="*60)
 
-    # 加载episode数据
+    # Load episode data.
     episode_path = "/home/hcl4070-1/Desktop/taowen/projects/TWIST2/data/demo_20260114_222032/episode_0001"
     reader = EpisodeReader(episode_path)
 
-    # 打印详细信息
+    # Print detailed information.
     reader.print_info()
 
-    # 获取总帧数
+    # Get the total number of frames.
     print(f"总帧数: {len(reader)}")
 
-    # 获取第一帧数据
+    # Get the first frame.
     frame_0 = reader.get_frame(0)
     print(f"\n第一帧的数据键: {list(frame_0.keys())}")
 
@@ -52,7 +52,7 @@ def example_create_videos():
     output_dir = "output_videos"
     os.makedirs(output_dir, exist_ok=True)
 
-    # 生成前置相机视频
+    # Generate a video from the front camera.
     if reader.has_front_cam:
         print("\n1. 生成前置相机视频...")
         reader.create_video(
@@ -61,7 +61,7 @@ def example_create_videos():
             fps=30
         )
 
-    # 生成世界相机视频
+    # Generate a video from the world camera.
     if reader.has_world_cam:
         print("\n2. 生成世界相机视频...")
         reader.create_video(
@@ -83,13 +83,13 @@ def example_visualize_keypoints():
     output_dir = "output_videos"
     os.makedirs(output_dir, exist_ok=True)
 
-    # 在世界相机上可视化关节点
+    # Visualize joints on the world-camera view.
     if reader.has_world_cam:
         print("\n生成带关节点的世界相机视频...")
         reader.visualize_keypoints_on_world_cam(
             output_path=f"{output_dir}/world_with_keypoints.mp4",
             keypoint_radius=3,
-            keypoint_color=(255, 0, 0),  # 红色 (RGB)
+            keypoint_color=(255, 0, 0),  # Red (RGB).
             show_frame_number=True,
             fps=30
         )
@@ -106,7 +106,7 @@ def example_access_data():
 
     frame_idx = 100
 
-    # 获取图像
+    # Get images.
     print(f"\n1. 获取第{frame_idx}帧的图像")
     if reader.has_front_cam:
         front_img = reader.get_image(frame_idx, "front")
@@ -116,7 +116,7 @@ def example_access_data():
         world_img = reader.get_image(frame_idx, "world")
         print(f"   世界相机图像形状: {world_img.shape}")
 
-    # 获取关节点
+    # Get joints.
     print(f"\n2. 获取关节点")
     keypoints = reader.get_keypoints(frame_idx)
     if keypoints:
@@ -126,13 +126,13 @@ def example_access_data():
         if keypoints[0] is not None:
             print(f"   第一个关节点位置: {keypoints[0]}")
 
-    # 获取SMPLX数据
+    # Get SMPL-X data.
     print(f"\n3. 获取SMPLX数据")
     smplx_data = reader.get_smplx_data(frame_idx)
     if smplx_data:
         print(f"   SMPLX数据键: {list(smplx_data.keys())}")
 
-    # 获取状态和动作
+    # Get states and actions.
     print(f"\n4. 获取状态和动作数据")
     state_body = reader.get_state_body(frame_idx)
     action_body = reader.get_action_body(frame_idx)
@@ -161,7 +161,7 @@ def example_partial_video():
     output_dir = "output_videos"
     os.makedirs(output_dir, exist_ok=True)
 
-    # 只生成前300帧的视频
+    # Generate a video from only the first 300 frames.
     start_frame = 0
     end_frame = 300
 

@@ -50,20 +50,21 @@ ssh -p 43176 root@127.0.0.1
 进入远端 Kimodo 目录并设置资源路径：
 
 ```bash
-cd /ai/Yichi/yunhengwang/Kimodo-Policy/controlnet_v1.2
-export SIMPLE_DATA_DIR=/ai/Yichi/kimodo-policy/simpledata
-export KIMODO_MODEL_SITE_PACKAGES=/ai/Yichi/0_Systems/miniconda3/envs/MOGE3/lib/python3.10/site-packages
+cd "$(git rev-parse --show-toplevel)"
+export SIMPLE_DATA_DIR=/path/to/simpledata
+export KIMODO_MODEL_SITE_PACKAGES=/path/to/model-env/lib/python3.10/site-packages
 ```
 
 评估器使用 `SIMPLE/.venv/bin/python` 运行仿真和 Torch。MOGE3 环境只提供
 训练模型需要的 `transformers`、`safetensors` 等依赖，不替换 SIMPLE 的
-Torch。启动脚本会自动探测 MOGE3，但建议显式导出上面的变量。
+Torch。若 SIMPLE 环境缺少模型依赖，请将上面的
+`KIMODO_MODEL_SITE_PACKAGES` 设置为包含 `transformers` 和 `safetensors` 的环境目录。
 
-本机房的远端环境若默认 PATH 找不到 `ninja`，或 `CC/CXX` 指向不存在的
+如果 PATH 找不到 `ninja`，或 `CC/CXX` 指向不存在的
 Conda 编译器，可在同一 tmux 会话中使用以下已验证配置：
 
 ```bash
-export PATH="/ai/Yichi/0_Systems/miniconda3/envs/MOGE3/bin:$PATH"
+export PATH="$CONDA_PREFIX/bin:$PATH"
 export CC=/usr/bin/gcc
 export CXX=/usr/bin/g++
 ```
@@ -85,7 +86,7 @@ bash evaluation/simple_eval_signal_task_sonic.sh \
   --gpus 4,5,6 \
   --seeds 0 \
   --episodes 10 \
-  --simple-data-dir /ai/Yichi/kimodo-policy/simpledata \
+  --simple-data-dir "$SIMPLE_DATA_DIR" \
   --dtype fp32 \
   --diffusion-steps 10 \
   --execution-frames 15 \
@@ -112,7 +113,7 @@ bash evaluation/simple_eval_signal_task_sonic.sh \
   --levels 0,1,2 \
   --seeds 0 \
   --episodes 10 \
-  --simple-data-dir /ai/Yichi/kimodo-policy/simpledata \
+  --simple-data-dir "$SIMPLE_DATA_DIR" \
   --dtype fp32 \
   --diffusion-steps 10 \
   --execution-frames 15 \
@@ -163,9 +164,9 @@ Level 2: 10 个 episode
 三个等级的数据来自：
 
 ```text
-/ai/Yichi/kimodo-policy/simpledata/simple-eval/<TASK>/dr-level-0/
-/ai/Yichi/kimodo-policy/simpledata/simple-eval/<TASK>/dr-level-1/
-/ai/Yichi/kimodo-policy/simpledata/simple-eval/<TASK>/dr-level-2/
+/simple-eval/<TASK>/dr-level-0/
+/simple-eval/<TASK>/dr-level-1/
+/simple-eval/<TASK>/dr-level-2/
 ```
 
 部分数据集使用 `level-0`、`level-1`、`level-2` 命名；脚本两种命名都支持。
@@ -209,7 +210,7 @@ Level 0。
 ### 环境和数据
 
 `--simple-data-dir PATH`：SIMPLE 资源根目录，必须包含机器人、场景、材质和
-assets。当前主机使用 `/ai/Yichi/kimodo-policy/simpledata`。
+assets。通过 `SIMPLE_DATA_DIR` 设置该目录。
 
 `--eval-data-root PATH`：Level 评估数据根目录，默认是
 `$SIMPLE_DATA_DIR/simple-eval`。只有评估数据不在该位置时才需要显式指定。
@@ -273,7 +274,7 @@ bash evaluation/simple_eval_signal_task_sonic.sh \
   --checkpoint log/experiments/simple_single_gbs64_20w_controlnet4_detach_true_mse_G1WholebodyCloseDoorTeleop-v0/2026-08-28_23-55-15/checkpoint_100000 \
   --gpus 4,5,6 \
   --episodes 10 \
-  --simple-data-dir /ai/Yichi/kimodo-policy/simpledata \
+  --simple-data-dir "$SIMPLE_DATA_DIR" \
   --dtype fp32 \
   --diffusion-steps 10 \
   --execution-frames 15 \
@@ -380,7 +381,7 @@ Level 0/1/2 共 30 回合：Level 0 为 5/10，Level 1 为 4/10，Level 2 为
 结果目录（只用于查看，不作为新运行的输出目录）：
 
 ```text
-/ai/Yichi/yunhengwang/Kimodo-Policy/controlnet_v1.2/eval_results/simple_table1_15/G1WholebodyBendPickMP-v0
+./eval_results/simple_table1_15/G1WholebodyBendPickMP-v0
 ```
 
 其中 `launch_manifest.json`、`launch.sh` 和 `run_config.txt` 保存了本次启动

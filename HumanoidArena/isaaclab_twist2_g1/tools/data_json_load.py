@@ -10,7 +10,7 @@ def convert_nested_lists_to_tensor(obj):
     if isinstance(obj, dict):
         return {k: convert_nested_lists_to_tensor(v) for k, v in obj.items()}
     elif isinstance(obj, list):
-        # 判断是否是 list[list[number]]
+        # Check whether the value is list[list[number]]
         if all(isinstance(item, list) and all(isinstance(x, (int, float)) for x in item) for item in obj):
             return torch.tensor(obj, dtype=torch.float32)
         else:
@@ -71,7 +71,7 @@ def load_robot_data(json_path):
         task_name = sim_state_json.get("task_name","")
         if task_name=="":
             raise ValueError("task_name is None")
-        # 如果 sim_state 是 JSON 字符串则解析
+        # Parse sim_state if it is a JSON string
         if not sim_state_raw:
             raise ValueError("sim_state_raw is None")
         if isinstance(sim_state_raw, str):
@@ -110,7 +110,7 @@ def load_robot_data2(json_path):
 
     if task_name=="":
         raise ValueError("task_name is None")
-    # 如果 sim_state 是 JSON 字符串则解析
+    # Parse sim_state if it is a JSON string
     if not sim_state_raw:
         raise ValueError("sim_state_raw is None")
     if isinstance(sim_state_raw, str):
@@ -118,7 +118,7 @@ def load_robot_data2(json_path):
     else:
         sim_state_dict = sim_state_raw
 
-    # 转换 sim_state 所有符合条件的嵌套 list -> tensor
+    # Convert matching nested lists in sim_state to tensors
     sim_state = convert_nested_lists_to_tensor(sim_state_dict)
 
     if not data:
@@ -151,10 +151,10 @@ def load_robot_data2(json_path):
 
 
 def parse_nested_sim_state(json_str: str):
-    # 第一步：解析外层 JSON
+    # Step 1: parse the outer JSON
     outer = json.loads(json_str)
 
-    # 第二步：解析内层 JSON（init_state 是字符串）
+    # Step 2: parse the inner JSON (init_state is a string)
     if "init_state" in outer and isinstance(outer["init_state"], str):
         outer["init_state"] = json.loads(outer["init_state"])
 
@@ -178,7 +178,7 @@ def get_data_json_list(file_path):
     elif file_path.is_dir():
         data_json_list = get_file_path(file_path)
 
-    # 按照episode_后面的数字排序
+    # Sort by the number following episode_
     def extract_episode_number(path):
         match = re.search(r'episode_(\d+)', str(path))
         return int(match.group(1)) if match else float('inf')

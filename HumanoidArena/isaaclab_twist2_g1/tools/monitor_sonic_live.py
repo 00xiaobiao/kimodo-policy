@@ -65,7 +65,7 @@ def monitor():
     socket.setsockopt_string(zmq.SUBSCRIBE, "")
     socket.setsockopt(zmq.RCVTIMEO, 1000)
 
-    # 历史数据用于计算变化
+    # History is used to calculate changes
     smpl_joints_history = deque(maxlen=10)
     body_quat_history = deque(maxlen=10)
     joint_pos_history = deque(maxlen=10)
@@ -90,23 +90,23 @@ def monitor():
 
             frame_count += 1
 
-            # 提取数据
+            # Extract data
             smpl_joints = data.get("smpl_joints", np.zeros((1, 24, 3)))[-1]  # (24, 3)
             body_quat = data.get("body_quat_w", np.zeros((1, 4)))[-1]  # (4,)
             joint_pos = data.get("joint_pos", np.zeros((1, 29)))[-1]  # (29,)
 
-            # 存入历史
+            # Add data to history
             smpl_joints_history.append(smpl_joints)
             body_quat_history.append(body_quat)
             joint_pos_history.append(joint_pos)
 
-            # 每秒报告一次
+            # Report once per second
             current_time = time.time()
             if current_time - last_report_time >= 1.0:
                 elapsed = current_time - last_report_time
                 fps = fps_counter / elapsed
 
-                # 计算变化幅度
+                # Calculate the magnitude of change
                 if len(smpl_joints_history) >= 2:
                     smpl_diff = np.abs(smpl_joints_history[-1] - smpl_joints_history[0]).max()
                     quat_diff = np.abs(body_quat_history[-1] - body_quat_history[0]).max()
@@ -114,12 +114,12 @@ def monitor():
                 else:
                     smpl_diff = quat_diff = joint_diff = 0.0
 
-                # 计算数据范围
+                # Calculate the data range
                 smpl_range = f"[{smpl_joints.min():.3f}, {smpl_joints.max():.3f}]"
                 joint_range = f"[{joint_pos.min():.3f}, {joint_pos.max():.3f}]"
 
-                # 清屏并打印
-                print("\033[2J\033[H")  # ANSI清屏
+                # Clear the screen and print
+                print("\033[2J\033[H")  # ANSI screen clear
                 print("=" * 80)
                 print(f"SONIC实时监控 | 帧: {frame_count} | FPS: {fps:.1f}")
                 print("=" * 80)
@@ -128,7 +128,7 @@ def monitor():
                 print(f"  Body Quat 变化幅度:   {quat_diff:.4f}  当前: {body_quat}")
                 print(f"  Joint Pos 变化幅度:   {joint_diff:.4f}  范围: {joint_range}")
 
-                # 状态指示
+                # Status indicator
                 print(f"\n🎯 状态:")
                 if smpl_diff < 0.001:
                     print(f"  ⚠️  SMPL数据几乎不变 - 请在VR中做动作！")
@@ -144,7 +144,7 @@ def monitor():
                 else:
                     print(f"  ✅ 关节位置正常变化")
 
-                # 关键关节监控（右手肩膀、肘部、手腕）
+                # Monitor key joints (right shoulder, elbow, and wrist)
                 print(f"\n🤖 关键关节位置（右手）:")
                 print(f"  右肩pitch [12]: {joint_pos[12]:+.3f}")
                 print(f"  右肩roll  [16]: {joint_pos[16]:+.3f}")

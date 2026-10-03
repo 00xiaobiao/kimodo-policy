@@ -214,33 +214,33 @@ class EpisodeWriter():
         """
         print("==>  Starting EpisodeWriter shutdown...")
         
-        # 如果还有未保存的数据，先保存
+        # Save any remaining pending data
         # If there is still unsaved data, save it first
         if not self.is_available:  # If self.is_available is False, it means there is still data not saved.
             print("==>  Saving unfinished episode...")
             self.save_episode()
-            # 等待保存完成
+            # Wait for saving to finish
             # Wait for save to complete
             while not self.is_available:
                 time.sleep(0.01)
         
-        # 停止工作线程
+        # Stop the worker thread
         # Stop worker thread
         print("==> Stopping worker thread...")
         self.stop_worker = True
         
-        # 等待队列处理完成
+        # Wait for the queue to finish processing
         # Wait for queue processing to complete
         try:
             self.item_data_queue.join()
         except Exception as e:
             print(f"==>  Error waiting for queue completion: {e}")
         
-        # 等待工作线程结束
+        # Wait for the worker thread to exit
         # Wait for worker thread to finish
         if self.worker_thread and self.worker_thread.is_alive():
             print("==>  Waiting for worker thread to finish...")
-            self.worker_thread.join(timeout=5.0)  # 5秒超时
+            self.worker_thread.join(timeout=5.0)  # 5-second timeout
             if self.worker_thread.is_alive():
                 print("==>  Warning: Worker thread did not finish within timeout")
         

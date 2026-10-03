@@ -608,7 +608,7 @@ class ImageServer:
                 # show the concatenated images
                 # cv2.imshow(f'{self.camera_name} Camera View', camera_image)
                 # key = cv2.waitKey(1) & 0xFF
-                # if key == ord('q') or key == 27:  # 'q' 或 ESC 键退出
+                # if key == ord('q') or key == 27:  # 'q' or ESC to exit
                 #     print("[Image Server] User pressed quit key")
                 #     break
 

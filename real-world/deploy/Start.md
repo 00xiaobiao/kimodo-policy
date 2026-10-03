@@ -21,8 +21,7 @@
 
   在工作站打开第二个终端：
 
-  cd /data/local-data/data/code/yunhengwang/kimodo-polocy/controlnet_v1.2/real-world/
-  GR00T-WholeBodyControl/gear_sonic_deploy
+  cd "$(git rev-parse --show-toplevel)/real-world/GR00T-WholeBodyControl/gear_sonic_deploy"
 
   ./deploy.sh \
       --cp policy/release/model \
@@ -53,9 +52,9 @@
 
   在第三个终端执行：
 
-  cd /data/local-data/data/code/yunhengwang/kimodo-polocy/controlnet_v1.2
+  cd "$(git rev-parse --show-toplevel)"
 
-  /home/CONNECT/yfang870/miniconda3/envs/kimodo/bin/python \
+  python \
       real-world/deploy/real_world_server.py \
       --checkpoint /path/to/your/kimodo/checkpoint \
       --text-embedding-cache data/cache/HumanoidArena \
@@ -88,9 +87,9 @@
 
   第四个终端执行：
 
-  cd /data/local-data/data/code/yunhengwang/kimodo-polocy/controlnet_v1.2
+  cd "$(git rev-parse --show-toplevel)"
 
-  /home/CONNECT/yfang870/miniconda3/envs/kimodo/bin/python \
+  python \
       real-world/deploy/run_kimodo_sonic.py \
       --server-url http://127.0.0.1:18080 \
       --task "place the bottle in the box" \
@@ -104,7 +103,7 @@
 
   确认 dry-run 正常后执行：
 
-  /home/CONNECT/yfang870/miniconda3/envs/kimodo/bin/python \
+  python \
       real-world/deploy/run_kimodo_sonic.py \
       --server-url http://127.0.0.1:18080 \
       --task "place the bottle in the box" \
@@ -133,7 +132,7 @@
 
   如果上一步正常，去掉 --no-publish，但不要加 --auto-start：
 
-  /home/CONNECT/yfang870/miniconda3/envs/kimodo/bin/python \
+  python \
       real-world/deploy/run_kimodo_sonic.py \
       --server-url http://127.0.0.1:18080 \
       --task "place the bottle in the box" \
@@ -156,7 +155,7 @@
 
   完整形式：
 
-  /home/CONNECT/yfang870/miniconda3/envs/kimodo/bin/python \
+  python \
       real-world/deploy/run_kimodo_sonic.py \
       --server-url http://127.0.0.1:18080 \
       --task "place the bottle in the box" \

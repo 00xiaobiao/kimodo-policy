@@ -241,7 +241,7 @@
             "uid": "13",
             "label": "lemon",
             "name": "lemon",
-            "usd_path": "/home/songlin/workspace/projects/SIMPLE/data/assets/graspnet/ruled_models/013_ruled.usd",
+            "usd_path": "assets/graspnet/ruled_models/013_ruled.usd",
             "description": "todo"
         },
         "distractors": {
@@ -250,7 +250,7 @@
                 "uid": "0",
                 "label": "cracker_box",
                 "name": "cracker box",
-                "usd_path": "/home/songlin/workspace/projects/SIMPLE/data/assets/graspnet/ruled_models/000_ruled.usd",
+                "usd_path": "assets/graspnet/ruled_models/000_ruled.usd",
                 "description": "todo"
             },
             "1": {
@@ -258,7 +258,7 @@
                 "uid": "1",
                 "label": "sugar_box",
                 "name": "sugar box",
-                "usd_path": "/home/songlin/workspace/projects/SIMPLE/data/assets/graspnet/ruled_models/001_ruled.usd",
+                "usd_path": "assets/graspnet/ruled_models/001_ruled.usd",
                 "description": "todo"
             },
             "14": {
@@ -266,7 +266,7 @@
                 "uid": "14",
                 "label": "peach",
                 "name": "peach",
-                "usd_path": "/home/songlin/workspace/projects/SIMPLE/data/assets/graspnet/ruled_models/014_ruled.usd",
+                "usd_path": "assets/graspnet/ruled_models/014_ruled.usd",
                 "description": "todo"
             }
         },
@@ -646,7 +646,7 @@
                     "uid": "13",
                     "label": "lemon",
                     "name": "lemon",
-                    "usd_path": "/home/songlin/workspace/projects/SIMPLE/data/assets/graspnet/ruled_models/013_ruled.usd",
+                    "usd_path": "assets/graspnet/ruled_models/013_ruled.usd",
                     "description": "todo"
                 },
                 "pose": {
@@ -675,7 +675,7 @@
                     "uid": "0",
                     "label": "cracker_box",
                     "name": "cracker box",
-                    "usd_path": "/home/songlin/workspace/projects/SIMPLE/data/assets/graspnet/ruled_models/000_ruled.usd",
+                    "usd_path": "assets/graspnet/ruled_models/000_ruled.usd",
                     "description": "todo"
                 },
                 "pose": {
@@ -704,7 +704,7 @@
                     "uid": "1",
                     "label": "sugar_box",
                     "name": "sugar box",
-                    "usd_path": "/home/songlin/workspace/projects/SIMPLE/data/assets/graspnet/ruled_models/001_ruled.usd",
+                    "usd_path": "assets/graspnet/ruled_models/001_ruled.usd",
                     "description": "todo"
                 },
                 "pose": {
@@ -733,7 +733,7 @@
                     "uid": "14",
                     "label": "peach",
                     "name": "peach",
-                    "usd_path": "/home/songlin/workspace/projects/SIMPLE/data/assets/graspnet/ruled_models/014_ruled.usd",
+                    "usd_path": "assets/graspnet/ruled_models/014_ruled.usd",
                     "description": "todo"
                 },
                 "pose": {

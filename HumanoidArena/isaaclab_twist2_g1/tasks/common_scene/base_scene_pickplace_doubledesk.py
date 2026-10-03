@@ -90,7 +90,7 @@ class DoubleTableSceneCfg(InteractiveSceneCfg): # inherit from the interactive s
       prim_path="/World/light",
       init_state=AssetBaseCfg.InitialStateCfg(
           pos=[-4, -1, 18],
-          rot=[1.0, 0.0, 0.0, 0.0],  # 示例四元数，表示一个倾斜方向
+          rot=[1.0, 0.0, 0.0, 0.0],  # Example quaternion representing a tilted direction
       ),
       spawn=sim_utils.DistantLightCfg(
           color=(0.75, 0.75, 0.75),

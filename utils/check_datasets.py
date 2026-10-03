@@ -675,10 +675,10 @@ def main() -> int:
 if __name__ == "__main__":
     raise SystemExit(main())
 
-# cd /mnt/workspace/vla/users/xujunzhe/yunhengwang/kimodo-policy/kimodo-polocy/controlnet_v1.2
-# export UNIFOLM_ROOT=/mnt/workspace/vla/users/xujunzhe/yunhengwang/DataSet/Humanoid/UnifoLM_WBT_Dataset \
-# export HUMANOID_EVERYDAY_ROOT=/mnt/workspace/vla/users/xujunzhe/yunhengwang/DataSet/Humanoid/humanoid-everyday \
-# export HIW500_ROOT=/mnt/workspace/vla/users/xujunzhe/yunhengwang/DataSet/Humanoid/HIW-500-LeRobot \
+# cd /path/to/controlnet_v1.2
+# export UNIFOLM_ROOT=/path/to/UnifoLM_WBT_Dataset \
+# export HUMANOID_EVERYDAY_ROOT=/path/to/HumanoidEveryday \
+# export HIW500_ROOT=/path/to/HIW500 \
 
 # python utils/check_datasets.py \
 #     --config scripts/experiments/pre_training/419h_gbs1024_100w_controlnet8_detach_false_mse.yaml \

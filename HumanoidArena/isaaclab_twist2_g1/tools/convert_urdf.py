@@ -32,10 +32,10 @@ import argparse
 
 from isaaclab.app import AppLauncher
 
-# 添加命令行参数解析
+# Add command-line argument parsing
 parser = argparse.ArgumentParser(description="URDF转USD格式的工具")
-# parser.add_argument("input", type=str, default="/home/unitree/newDisk/URDF/urdf-to-usd/g1withdex1/g1_29dof_with_dex1_rev_1_0.urdf", help="输入URDF文件的路径")
-# parser.add_argument("output", type=str, default="/home/unitree/Code/isaaclab_demo/usd/g1_body29_hand14.usd", help="输出USD文件的路径")
+# parser.add_argument("input", type=str, default="/home/unitree/newDisk/URDF/urdf-to-usd/g1withdex1/g1_29dof_with_dex1_rev_1_0.urdf", help="Path to the input URDF file")
+# parser.add_argument("output", type=str, default="/home/unitree/Code/isaaclab_demo/usd/g1_body29_hand14.usd", help="Path to the output USD file")
 parser.add_argument(
     "--merge-joints",
     action="store_true",
@@ -63,12 +63,12 @@ parser.add_argument(
     help="关节驱动的控制类型",
 )
 
-# 添加AppLauncher的命令行参数
+# Add AppLauncher command-line arguments
 AppLauncher.add_app_launcher_args(parser)
-# 解析命令行参数
+# Parse command-line arguments
 args_cli = parser.parse_args()
 
-# 启动omniverse应用
+# Launch the Omniverse application
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
@@ -87,7 +87,7 @@ from isaaclab.utils.dict import print_dict
 
 
 def main():
-    # 检查输入文件路径是否有效
+    # Check whether the input file path is valid
     urdf_path = "/home/unitree/newDisk/URDF/urdf-to-usd/g1withinspire_hand/g1_29dof_with_inpire_rev_1_0.urdf" #args_cli.input
     print(urdf_path)
     if not os.path.isabs(urdf_path):
@@ -95,12 +95,12 @@ def main():
     if not check_file_path(urdf_path):
         raise ValueError(f"无效的文件路径: {urdf_path}")
     
-    # 创建输出文件路径
+    # Create the output file path
     dest_path = "/home/unitree/newDisk/URDF/wholevody_with_inspire/g1_29dof_with_inspire_rev_1_0.usd"
     if not os.path.isabs(dest_path):
         dest_path = os.path.abspath(dest_path)
 
-    # 创建URDF转换器配置
+    # Create the URDF importer configuration
     urdf_converter_cfg = UrdfConverterCfg(
         asset_path=urdf_path,
         usd_dir=os.path.dirname(dest_path),
@@ -117,7 +117,7 @@ def main():
         ),
     )
 
-    # 打印配置信息
+    # Print configuration information
     print("-" * 80)
     print("-" * 80)
     print(f"输入URDF文件: {urdf_path}")
@@ -126,37 +126,37 @@ def main():
     print("-" * 80)
     print("-" * 80)
 
-    # 创建URDF转换器并导入文件
+    # Create the URDF importer and import the file
     urdf_converter = UrdfConverter(urdf_converter_cfg)
-    # 打印输出信息
+    # Print output information
     print("URDF导入器输出:")
     print(f"生成的USD文件: {urdf_converter.usd_path}")
     print("-" * 80)
     print("-" * 80)
 
-    # 检查是否有GUI需要更新:
-    # 获取设置接口
+    # Check whether the GUI needs an update:
+    # Get the settings interface
     carb_settings_iface = carb.settings.get_settings()
-    # 读取本地GUI是否启用的标志
+    # Read the flag indicating whether the local GUI is enabled
     local_gui = carb_settings_iface.get("/app/window/enabled")
-    # 读取直播GUI是否启用的标志
+    # Read the flag indicating whether the live GUI is enabled
     livestream_gui = carb_settings_iface.get("/app/livestream/enabled")
 
-    # 如果启用了GUI，则运行模拟场景
+    # Run the simulated scene if the GUI is enabled
     if local_gui or livestream_gui:
-        # 打开USD场景
+        # Open the USD scene
         stage_utils.open_stage(urdf_converter.usd_path)
-        # 重新初始化模拟
+        # Reinitialize the simulation
         app = omni.kit.app.get_app_interface()
-        # 运行模拟
+        # Run the simulation
         with contextlib.suppress(KeyboardInterrupt):
             while app.is_running():
-                # 执行模拟步骤
+                # Run a simulation step
                 app.update()
 
 
 if __name__ == "__main__":
-    # 运行主函数
+    # Run the main function
     main()
-    # 关闭模拟应用
+    # Close the simulation application
     simulation_app.close()

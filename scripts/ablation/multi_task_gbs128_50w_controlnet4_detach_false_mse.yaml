@@ -10,7 +10,7 @@ main:
   dtype: "bf16"
 
   dataset_roots:
-    HumanoidArena: "${oc.env:HUMANOID_ARENA_ROOT,/data/local-data/data/Humanoid/HumanoidArena_dataset_v3_1}"
+    HumanoidArena: "${oc.env:HUMANOID_ARENA_ROOT,datasets/HumanoidArena_dataset_v3_1}"
 
   dataset_selection:
     HumanoidArena:

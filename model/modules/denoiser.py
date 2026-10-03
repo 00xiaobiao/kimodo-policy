@@ -23,13 +23,13 @@ class TwostageDenoiser(nn.Module):
         ckpt_path: Optional[str] = None,
     ):
         super().__init__()
-        # 1. 加载配置
+        # 1. Load the configuration.
         cfg = OmegaConf.load(os.path.join(ckpt_path, "config.yaml")).denoiser
         self.motion_rep = motion_rep
         self.motion_mask_mode = motion_mask_mode
         input_dim = motion_rep.motion_rep_dim
         will_concatenate = motion_mask_mode == "concat"
-        # 2. 加载根节点去噪网络
+        # 2. Load the root denoising network.
         root_input_dim = input_dim * 2 if will_concatenate else input_dim
         root_output_dim = motion_rep.global_root_dim
         self.root_model = TransformerEncoderBlock(
@@ -49,9 +49,9 @@ class TwostageDenoiser(nn.Module):
             num_text_tokens_override=cfg.num_text_tokens_override,
             input_first_heading_angle=cfg.input_first_heading_angle
         )
-        # 3. 加载身体节点去噪网络
-        # global_root_dim: (全局x, 全局y, 全局z, cos θ, sin θ)
-        # local_root_dim: (旋转角速度, 平移x, 平移z, 全局高度Y)
+        # 3. Load the body denoising network.
+        # global_root_dim: global x/y/z, cos(theta), and sin(theta).
+        # local_root_dim: angular velocity, translation x/z, and global height y.
         local_motion_rep_dim = input_dim - motion_rep.global_root_dim + motion_rep.local_root_dim
         body_input_dim = local_motion_rep_dim + (
             input_dim if will_concatenate else 0 )  # body stage always takes in local root info for motion (but still the global mask)
@@ -73,7 +73,7 @@ class TwostageDenoiser(nn.Module):
             num_text_tokens_override=cfg.num_text_tokens_override,
             input_first_heading_angle=cfg.input_first_heading_angle
         )   
-        # 4. 加载kimodo预训练权重
+        # 4. Load the Kimodo pretrained weights.
         if ckpt_path:
             self._load_ckpt(ckpt_path)
 

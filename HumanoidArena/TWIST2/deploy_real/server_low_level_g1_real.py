@@ -204,7 +204,7 @@ class RealTimePolicyController(object):
 
                 obs_proprio = np.concatenate([
                     ang_vel * self.ang_vel_scale,
-                    rpy[:2], # 只使用 roll 和 pitch
+                    rpy[:2],  # Use roll and pitch only.
                     (dof_pos - self.default_dof_pos) * self.dof_pos_scale,
                     obs_dof_vel * self.dof_vel_scale,
                     self.last_action
@@ -228,7 +228,7 @@ class RealTimePolicyController(object):
                 # execute the pipeline once here for setting the keys
                 self.redis_pipeline.execute()
 
-                # 5. 从 Redis 接收模仿观察
+                # 5. Receive imitation observations from Redis.
                 keys = ["action_body_unitree_g1_with_hands", "action_hand_left_unitree_g1_with_hands", "action_hand_right_unitree_g1_with_hands", "action_neck_unitree_g1_with_hands"]
                 for key in keys:
                     self.redis_pipeline.get(key)
@@ -342,7 +342,7 @@ def main():
     args = parser.parse_args()
 
     
-    # 验证文件存在
+    # Check that the file exists.
     if not os.path.exists(args.policy):
         print(f"Error: Policy file {args.policy} does not exist")
         return
@@ -360,7 +360,7 @@ def main():
     print(f"  Record proprio: {args.record_proprio}")
     print(f"  Smooth body: {args.smooth_body}")
     
-    # 安全提示
+    # Safety notice.
     print("\n" + "="*50)
     print("SAFETY WARNING:")
     print("You are about to run a policy on a real robot.")

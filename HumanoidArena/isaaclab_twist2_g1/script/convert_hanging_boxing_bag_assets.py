@@ -35,15 +35,15 @@ from isaaclab.sim.schemas import schemas_cfg
 
 
 # =============================================================================
-# 沙袋 mesh 變換參數（可快速測試調整）
-# - BAG_TRANSLATION: 相對於 bag link 原點（掛載點）的偏移。Isaac Sim +Z 向上，
-#   沙袋應在掛點下方，故 Z 為負，如 (0,0,-0.5) 表示 mesh 中心在掛點下方 0.5m
-# - BAG_ROTATION: 四元數 (w,x,y,z)。若 OBJ 長軸為 X，用 (0.7071,0,-0.7071,0) 繞 Y -90° 使長軸對齊 -Z
-#   若長軸為 Y：試 (0.7071,-0.7071,0,0) 或 (0.7071,0.7071,0,0)
-# - BAG_SCALE: 縮放
+# Punching-bag mesh transform parameters (quickly adjustable for testing)
+# - BAG_TRANSLATION: offset from the bag link origin (attachment point). Isaac Sim uses +Z up,
+#   the bag should hang below the attachment point, so Z is negative; (0,0,-0.5) places the mesh center 0.5 m below it
+# - BAG_ROTATION: quaternion (w, x, y, z). If the OBJ long axis is X, rotate it -90 degrees about Y with (0.7071,0,-0.7071,0) to align it with -Z
+#   if its long axis is Y, try (0.7071,-0.7071,0,0) or (0.7071,0.7071,0,0)
+# - BAG_SCALE: Scale
 # =============================================================================
-BAG_TRANSLATION = (0.0, 0.0, -0.5)  # 負 Z = 向下（掛在錨點下方）
-BAG_ROTATION = (0.7071, 0.7071, 0.0, 0.0)  # 繞 Y -90°：長軸 X → -Z（向下）
+BAG_TRANSLATION = (0.0, 0.0, -0.5)  # Negative Z points down, below the anchor
+BAG_ROTATION = (0.7071, 0.7071, 0.0, 0.0)  # Rotate -90 degrees about Y: long axis X -> -Z (down)
 BAG_SCALE = (0.15, 0.15, 0.15)
 
 

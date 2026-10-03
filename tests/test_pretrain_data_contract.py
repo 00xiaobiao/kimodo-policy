@@ -12,7 +12,7 @@ from skeleton.definitions import G1Skeleton34
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-STATS_PATH = PROJECT_ROOT.parent / "checkpoints/Kimodo-G1-RP-v1/stats/motion"
+STATS_PATH = PROJECT_ROOT / "checkpoints/Kimodo-G1-RP-v1/stats/motion"
 
 
 class _ContractImageEncoder(nn.Module):

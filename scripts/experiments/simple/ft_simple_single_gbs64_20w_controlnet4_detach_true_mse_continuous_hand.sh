@@ -26,7 +26,10 @@ fi
 # Accept both TASK CHECKPOINT and CHECKPOINT TASK, matching the HumanoidArena
 # fine-tuning launchers. A checkpoint is unambiguously a directory containing
 # the two files below, while a SIMPLE task is a directory below SIMPLE_ROOT.
-SIMPLE_ROOT="${KIMODO_SIMPLE_ROOT:-/data/local-data/data/Humanoid/Simple}"
+SIMPLE_ROOT="${KIMODO_SIMPLE_ROOT:-datasets/Simple}"
+if [[ "${SIMPLE_ROOT}" != /* ]]; then
+  SIMPLE_ROOT="${PROJECT_ROOT}/${SIMPLE_ROOT}"
+fi
 if [[ -n "${1:-}" && -d "${1}" && -f "${1}/training_state.pt" && -f "${1}/config.json" ]]; then
   INIT_CHECKPOINT="${1}"
   TASK="${2:-${KIMODO_SIMPLE_TASK:-}}"
@@ -38,6 +41,11 @@ fi
 if [[ -z "${TASK}" || "${TASK}" == */* ]]; then
   echo "TASK must be one SIMPLE task directory name, got: ${TASK}" >&2
   usage >&2
+  exit 2
+fi
+if [[ ! -d "${SIMPLE_ROOT}" ]]; then
+  echo "SIMPLE dataset root does not exist or is not a directory: ${SIMPLE_ROOT}" >&2
+  echo "Set KIMODO_SIMPLE_ROOT to the downloaded SIMPLE dataset root." >&2
   exit 2
 fi
 if [[ ! -d "${SIMPLE_ROOT}/${TASK}" ]]; then
@@ -54,6 +62,9 @@ if [[ ! -f "${INIT_CHECKPOINT}/training_state.pt" || ! -f "${INIT_CHECKPOINT}/co
   echo "Initialization checkpoint is incomplete: ${INIT_CHECKPOINT}" >&2
   exit 2
 fi
+if [[ "${INIT_CHECKPOINT}" != /* ]]; then
+  INIT_CHECKPOINT="$(cd -- "${INIT_CHECKPOINT}" && pwd)"
+fi
 
 if [[ -n "${KIMODO_ENV:-}" ]]; then
   ACCELERATE_BIN="${KIMODO_ENV}/bin/accelerate"
@@ -69,6 +80,9 @@ CONFIG_PATH="${KIMODO_CONFIG:-${SCRIPT_DIR}/ft_simple_single_gbs64_20w_controlne
 if [[ ! -f "${CONFIG_PATH}" ]]; then
   echo "Training config does not exist: ${CONFIG_PATH}" >&2
   exit 2
+fi
+if [[ "${CONFIG_PATH}" != /* ]]; then
+  CONFIG_PATH="${PWD}/${CONFIG_PATH}"
 fi
 
 GPU_LIST="${KIMODO_GPUS:-0,1,2,3}"

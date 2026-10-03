@@ -14,24 +14,24 @@ from isaaclab.utils import configclass
 
 project_root = os.environ.get("PROJECT_ROOT")
 
-# Layout: 統一在此調整機器人、拳擊沙袋的初始位置
-# 機器人已向左旋轉 90° (init_rot=(0.7071,0,0,0.7071))，朝 +Y 方向
+# Layout: Configure the initial robot and punching-bag positions here
+# The robot is rotated 90 degrees left (init_rot=(0.7071,0,0,0.7071)) and faces +Y
 ROBOT_INIT_X = -1.9
 ROBOT_INIT_Y = -5.2
-ROBOT_INIT_Z = 0.8  # 機器人站立高度
-BAG_DISTANCE = 1.2  # 沙袋在機器人前方距離（揮拳舒適距離）
+ROBOT_INIT_Z = 0.8  # Robot standing height
+BAG_DISTANCE = 1.2  # Distance from the robot to the bag for comfortable punches
 
-# 90° 左旋後：原 (dx,dy) → (-dy, dx)
-# Bag: 原 (BAG_DISTANCE,0) → (0, BAG_DISTANCE)
+# 90° After a 90-degree left rotation: original (dx,dy) → (-dy, dx)
+# Bag: original (BAG_DISTANCE, 0) -> (0, BAG_DISTANCE)
 BAG_OFFSET_X = 0.0
 BAG_OFFSET_Y = BAG_DISTANCE
 
-# 拳擊沙袋尺度與朝向
-# 朝向已 baking 在 USD 中（convert_boxing_bag_assets.py 用 MeshConverter rotation 旋轉）
-# 若模型平躺：長軸為 X 時用 rotation=(0.7071,0,0.7071,0) 繞 Y 軸 90°
+# Punching-bag scale and orientation
+# orientation is baked into the USD by MeshConverter in convert_boxing_bag_assets.py
+# If the model lies flat with its long axis along X, use rotation=(0.7071,0,0.7071,0) rotate 90 degrees about Y
 BAG_SCALE = (0.15, 0.15, 0.15)
-BAG_ROT_UPRIGHT = (0.7071, 0.7071, 0, 0)  # 已在 USD 中 upright，此處 identity 即可
-BAG_HEIGHT_APPROX = 1.2  # 沙袋約 1.2m 高，底部貼地時中心 z = half_height
+BAG_ROT_UPRIGHT = (0.7071, 0.7071, 0, 0)  # The model is upright in the USD, so identity is sufficient here
+BAG_HEIGHT_APPROX = 1.2  # The bag is about 1.2 m tall; when its base touches the ground, its center is at half_height
 
 
 @configclass
@@ -72,17 +72,17 @@ class TableBoxingBagSceneCfgWH(InteractiveSceneCfg):
         ),
     )
 
-    # Boxing bag - dynamic rigid body，受擊時會晃動，更貼近真實遙操作數據
-    # 尺度與朝向：參照 football 球門，OBJ 多為 cm，scale 0.01；旋轉使直立
+    # Boxing bag - dynamic rigid body. It swings when struck, better matching real teleoperation data.
+    # Scale and orientation follow the football goal; OBJ units are usually cm, so scale by 0.01 and rotate upright
     object = RigidObjectCfg(
         prim_path="/World/envs/env_.*/Object",
         init_state=RigidObjectCfg.InitialStateCfg(
             pos=[ROBOT_INIT_X + BAG_OFFSET_X, ROBOT_INIT_Y + BAG_OFFSET_Y, BAG_HEIGHT_APPROX / 2.0],
-            rot=BAG_ROT_UPRIGHT,  # 繞 Y 軸 90° 使平躺模型直立
+            rot=BAG_ROT_UPRIGHT,  # Rotate 90 degrees about Y to stand the flat model upright
         ),
         spawn=UsdFileCfg(
             usd_path=f"{project_root}/assets/boxing_bag/boxing_bag_physics.usd",
-            scale=BAG_SCALE,  # OBJ in meters (Blender 預設)，參照 football ball
+            scale=BAG_SCALE,  # OBJ in meters (Blender default), following the football
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 rigid_body_enabled=True,
                 kinematic_enabled=False,

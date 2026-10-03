@@ -11,6 +11,7 @@ import time
 
 from omni.isaac.core.prims import RigidPrim, GeometryPrim, XFormPrim
 import omni.isaac.core.utils.stage as isaacsim_stage
+from simple.utils import resolve_data_path
 
 world = World()
 # world.reset()
@@ -30,7 +31,7 @@ obj = world.scene.add(
     )
 ) """
 
-object_usd_path = "/home/songlin/workspace/projects/SIMPLE/data/assets/graspnet/ruled_models/000_ruled.usd"
+object_usd_path = resolve_data_path("assets/graspnet/ruled_models/000_ruled.usd")
 object_prim_path = "/World/object"
 isaacsim_stage.add_reference_to_stage(usd_path=object_usd_path, prim_path=object_prim_path)
 

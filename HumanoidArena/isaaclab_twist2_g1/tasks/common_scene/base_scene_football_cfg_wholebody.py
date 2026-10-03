@@ -16,23 +16,23 @@ from tasks.common_config import CameraBaseCfg
 
 project_root = os.environ.get("PROJECT_ROOT")
 
-# Layout: 統一在此調整機器人、球、球門的初始位置
-# 機器人已向左旋轉 90° (init_rot=(0.7071,0,0,0.7071))，朝 +Y 方向
-# 球與球門的相對位置已同步旋轉，保持與機器人的相對位姿
+# Layout: Configure the initial robot, ball, and goal positions here
+# The robot is rotated 90 degrees left and faces +Y; init_rot=(0.7071,0,0,0.7071)
+# The ball and goal positions are rotated together to preserve their poses relative to the robot
 ROBOT_INIT_X = 0.0
 ROBOT_INIT_Y = 0.0
-ROBOT_INIT_Z = 0.8  # 機器人站立高度
-GOAL_DISTANCE = 3.0  # 球門與機器人距離（沿機器人朝向）
-BALL_DISTANCE = 1.0  # 足球在機器人前方距離
-GOAL_Z = 0.65  # 球門高度（Z 座標）
-GOAL_CENTER_Y_OFFSET = 2.5  # 球門中心相對於機器人朝向的橫向偏移
+ROBOT_INIT_Z = 0.8  # Robot standing height
+GOAL_DISTANCE = 3.0  # Distance from the robot to the goal along its facing direction
+BALL_DISTANCE = 1.0  # Distance of the football in front of the robot
+GOAL_Z = 0.65  # Goal height (Z coordinate)
+GOAL_CENTER_Y_OFFSET = 2.5  # Lateral offset of the goal center relative to the robot heading
 GOAL_COLLISION_ENABLED = True
 GOAL_CONTACT_OFFSET = 0.001
 GOAL_REST_OFFSET = 0.0
 
-# 90° 左旋後：原 (dx,dy) → (-dy, dx)，機器人朝 +Y
-# Ball: 原 (1,0) → (0, 1)
-# Goal: 原 (6, 2.5) → (-2.5, 6)
+# 90° After a 90-degree left rotation: original (dx, dy) -> (-dy, dx); the robot faces +Y
+# Ball: original (1, 0) -> (0, 1)
+# Goal: original (6, 2.5) -> (-2.5, 6)
 BALL_OFFSET_X = 0.0  # -dy
 BALL_OFFSET_Y = BALL_DISTANCE  # dx
 GOAL_OFFSET_X = -GOAL_CENTER_Y_OFFSET  # -dy
@@ -61,7 +61,7 @@ GOAL_BACKDROP_COLOR = (0.35, 0.35, 0.35)
 # FIFA standard football specifications:
 # - Circumference: 68-70 cm -> diameter ~22 cm, radius = 0.11 m
 # - Mass: 410-450 g -> 0.43 kg
-# - Restitution (bounciness): FIFA 合格足球約 0.7–0.8，設 0.75 接近真實觸感
+# - Restitution (bounciness): FIFA-approved footballs are about 0.7-0.8; 0.75 feels realistic
 # ImageToStl STL/USD typically uses mm units -> scale 0.001 for 220mm ball
 
 
@@ -71,7 +71,7 @@ class TableFootballSceneCfgWH(InteractiveSceneCfg):
     足球場景：完全移除 warehouse / room_walls / box，僅保留 ground + 球 + 球門 + 燈光 + 相機。
     """
 
-    # Football - 在機器人前方 BALL_DISTANCE 處（隨機器人 90° 左旋同步旋轉）
+    # Football - BALL_DISTANCE in front of the robot, rotated with the robot's 90-degree left turn
     object = RigidObjectCfg(
         prim_path="/World/envs/env_.*/Object",
         init_state=RigidObjectCfg.InitialStateCfg(
@@ -93,12 +93,12 @@ class TableFootballSceneCfgWH(InteractiveSceneCfg):
                 contact_offset=0.005,
                 rest_offset=0.0,
             ),
-            # UsdFileCfg 不支援 physics_material，需於 reset 後由 apply_football_physics_material() 動態套用
+            # UsdFileCfg does not support physics_material; apply it dynamically after reset with apply_football_physics_material()
         ),
     )
 
-    # Ground plane - 10×10m 草地渲染區域（非 UV），UV 維持 150×150
-    # 使用 Cuboid 取代 GroundPlane 以限制渲染範圍為 10×10m，視覺 PBR 由 apply_grass_pbr_to_ground() 動態套用
+    # Ground plane - 10×10m grass rendering area (not UV); keep UV at 150x150
+    # Use a Cuboid instead of GroundPlane to limit rendering to 10x10 m; apply visual PBR with apply_grass_pbr_to_ground()
     ground = RigidObjectCfg(
         prim_path="/World/GroundPlane",
         init_state=RigidObjectCfg.InitialStateCfg(
@@ -122,7 +122,7 @@ class TableFootballSceneCfgWH(InteractiveSceneCfg):
         ),
     )
 
-    # Goal net 1 - 機器人正前方，球門開口朝向機器人
+    # Goal net 1 - Directly in front of the robot, with the goal opening facing it
     goal_net = AssetBaseCfg(
         prim_path="/World/envs/env_.*/GoalNet",
         init_state=AssetBaseCfg.InitialStateCfg(
@@ -145,12 +145,12 @@ class TableFootballSceneCfgWH(InteractiveSceneCfg):
         ),
     )
 
-    # Goal net 2 - 對稱於另一側，球門開口朝向場中央
+    # Goal net 2 - Symmetric on the opposite side, with the goal opening facing the field center
     goal_net_2 = AssetBaseCfg(
         prim_path="/World/envs/env_.*/GoalNet2",
         init_state=AssetBaseCfg.InitialStateCfg(
             pos=[GOAL_NET_2_ORIGIN[0], GOAL_NET_2_ORIGIN[1], GOAL_Z],
-            rot=[0.0, 0.0, 0.0, 1.0],  # 180° 繞 Z，開口朝中心
+            rot=[0.0, 0.0, 0.0, 1.0],  # 180° Rotate about Z so the opening faces the center
         ),
         spawn=UsdFileCfg(
             usd_path=f"{project_root}/assets/objects/small_warehouse/football_scene/interaction_obj/football_goal/football_goal_physics.usd",

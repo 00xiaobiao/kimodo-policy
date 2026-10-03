@@ -12,7 +12,7 @@ PYTHON_BIN="${PYTHON_BIN:-${ISAACLAB_PYTHON}}"
 REPLAY_FILE="${REPLAY_FILE:-}"
 REPLAY_MODE="${REPLAY_MODE:-direct_replay}"   # inference_replay | direct_replay
 REPLAY_LOOP="${REPLAY_LOOP:-0}"               # 1 | 0
-TASK_NAME="${TASK_NAME:-}"       # 留空则从 replay 文件读取
+TASK_NAME="${TASK_NAME:-}"       # leave empty to read the value from the replay file
 ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-}"
 
 RUN_DEVICE="${RUN_DEVICE:-cpu}"

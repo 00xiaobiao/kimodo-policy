@@ -89,7 +89,7 @@ def main():
     try:
         env_cfg = MoveFootballG129Dex3WholebodyEnvCfg()
         env_cfg.scene.num_envs = args.num_envs
-        # 同步 AppLauncher 的 --device 到 sim（避免出現 fabric cpu 而非 fabric gpu）
+        # Sync AppLauncher --device with sim to avoid using fabric CPU instead of fabric GPU
         sim_device = getattr(args, "device", "cuda")
         if sim_device == "cuda":
             sim_device = "cuda:0"
@@ -127,7 +127,7 @@ def main():
         for key in scene_keys:
             print(f"      - {key}")
 
-        # 嘗試列出幾個關鍵元素（如果存在）
+        # Try listing a few key elements if present
         interesting = [
             k
             for k in scene_keys
@@ -147,14 +147,14 @@ def main():
 
         traceback.print_exc()
 
-    # Reset and run simulation (只用 sim.step 來看場景與物理效果)
+    # Reset and run simulation (use only sim.step to inspect the scene and physics)
     print("\n[4] Running simulation (scene visualization)...")
     try:
         env.reset()
         print("   ✓ Environment reset")
         foot_log_path = env_cfg.log_foot_collision_status()
         print(f"   [foot_collision] validation logged to: {foot_log_path}")
-        # 套用草坪 PBR 材質（需在 reset 後）
+        # Apply the grass PBR material after reset
         try:
             apply_grass_pbr_to_ground(prim_path="/World/GroundPlane", uv_scale=(150.0, 150.0))
         except Exception as e:
@@ -163,7 +163,7 @@ def main():
             apply_football_physics_material(restitution=0.75)
         except Exception as e:
             print(f"   [football_physics] 跳過: {e}")
-        # 簡化測試標線：球門前 7.32m 標線 + 機器人周圍 2m 圓圈
+        # Simplified test markings: a 7.32 m line in front of the goal and a 2 m circle around the robot
         try:
             import omni.usd
             stage = omni.usd.get_context().get_stage()
@@ -180,7 +180,7 @@ def main():
         step = 0
         try:
             while True:
-                # 直接驅動底層模擬並渲染，可視化當前 football 場景
+                # Drive the simulation directly and render the current football scene
                 env.sim.step(render=True)
 
                 if args.no_limit:

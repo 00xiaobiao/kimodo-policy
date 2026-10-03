@@ -9,12 +9,12 @@
 import math
 from typing import Tuple
 
-# 標線寬度與厚度 (m)
+# Line width and thickness (m)
 DEFAULT_LINE_WIDTH = 0.12
 DEFAULT_LINE_HEIGHT = 0.005
 DEFAULT_LINE_COLOR = (127.0 / 255.0, 127.0 / 255.0, 127.0 / 255.0)
 
-# 小型球場佈局 - 從 base_scene_football_cfg_wholebody 同步（goal_y = 球門 y，grass_half = 草地半寬）
+# Compact field layout synced with base_scene_football_cfg_wholebody (goal_y is the goal y; grass_half is half the grass width)
 def _get_football_layout():
     """從場景配置讀取佈局，若失敗則用 fallback。"""
     try:
@@ -29,11 +29,11 @@ def _get_football_layout():
         return 6.0, 7.0
 
 _LAYOUT_GOAL_Y, _LAYOUT_GRASS_HALF = _get_football_layout()
-# 單位為米：球門線略在球門前，邊線距草地邊緣留距
+# Units are meters: the goal line is slightly in front of the goal, and sidelines are inset from the grass edge
 SMALL_PITCH_GOAL_Y = _LAYOUT_GOAL_Y - 0.5
 SMALL_PITCH_GRASS_HALF = _LAYOUT_GRASS_HALF - 0.5
 
-# FIFA 標準球場尺寸 (m，供 create_pitch_lines_in_stage 使用)
+# FIFA standard field dimensions in meters for create_pitch_lines_in_stage
 FIFA_LINE_WIDTH = 0.12
 FIFA_PITCH_LENGTH = 105.0
 FIFA_PITCH_WIDTH = 68.0
@@ -119,7 +119,7 @@ def create_robot_circle(
     cx, cy = center[0] * scale, center[1] * scale
     radius = radius * scale
 
-    # 環形 mesh：內外兩圈頂點，直接以 (x,y,z) 定義圓弧，無需 scale/rotate
+    # Ring mesh: define the arc with inner and outer vertices in (x, y, z), without scaling or rotation
     r_in = radius - w / 2
     r_out = radius + w / 2
     z = h / 2
@@ -182,24 +182,24 @@ def _create_rect_ring_mesh(
     gx, gy = 半寬、半長；w = 線寬。
     """
     from pxr import Gf, Sdf, UsdGeom, UsdShade, Vt
-    # 外圈四角（逆時針）
+    # Four outer corners (counterclockwise)
     o0 = Gf.Vec3f(-gx - w / 2, -gy - w / 2, z)
     o1 = Gf.Vec3f(gx + w / 2, -gy - w / 2, z)
     o2 = Gf.Vec3f(gx + w / 2, gy + w / 2, z)
     o3 = Gf.Vec3f(-gx - w / 2, gy + w / 2, z)
-    # 內圈四角（逆時針）
+    # Four inner corners (counterclockwise)
     i0 = Gf.Vec3f(-gx + w / 2, -gy + w / 2, z)
     i1 = Gf.Vec3f(gx - w / 2, -gy + w / 2, z)
     i2 = Gf.Vec3f(gx - w / 2, gy - w / 2, z)
     i3 = Gf.Vec3f(-gx + w / 2, gy - w / 2, z)
     points = Vt.Vec3fArray([o0, o1, o2, o3, i0, i1, i2, i3])
     face_vertex_counts = [4, 4, 4, 4]
-    # 頂點順序使法線朝 +Z，從上方可見（避免 backface culling）
+    # Vertex order points normals toward +Z so the surface is visible from above (avoids backface culling)
     face_vertex_indices = [
-        0, 4, 5, 1,   # 下邊
-        1, 5, 6, 2,   # 右邊
-        2, 6, 7, 3,   # 上邊
-        3, 7, 4, 0,   # 左邊
+        0, 4, 5, 1,   # Bottom edge
+        1, 5, 6, 2,   # Right edge
+        2, 6, 7, 3,   # Top edge
+        3, 7, 4, 0,   # Left edge
     ]
     path = f"{parent_path}/{name}"
     mesh = UsdGeom.Mesh.Define(stage, path)
@@ -258,7 +258,7 @@ def create_small_pitch_boundary(
         for child in list(parent.GetChildren()):
             stage.RemovePrim(child.GetPath())
 
-    # 單一矩形環狀 mesh：四邊一體、角落無重疊，形成完整矩形框
+    # Single rectangular ring mesh: one connected piece with no overlapping corners
     _create_rect_ring_mesh(
         stage, parent_path, "pitch_boundary",
         grass_half_u, goal_y_u, w, z,
@@ -411,11 +411,11 @@ def create_pitch_lines_in_stage(
         print(f"[pitch_lines] ⚠️ 無法載入 pxr，跳過標線建立: {e}")
         return False
 
-    w = line_width  # 不隨 scale 縮放，保持正常寬度
+    w = line_width  # Do not scale with the field; keep the normal width
     h = line_height
     cx, cy = center
 
-    # 場地半長、半寬
+    # Half-length and half-width of the field
     half_len = (FIFA_PITCH_LENGTH / 2) * scale
     half_wid = (FIFA_PITCH_WIDTH / 2) * scale
     penalty_len = FIFA_PENALTY_LENGTH * scale
@@ -451,10 +451,10 @@ def create_pitch_lines_in_stage(
         """
         path = f"{parent_path}/{name}"
         cube = UsdGeom.Cube.Define(stage, path)
-        cube.CreateSizeAttr(1.0)  # 單位立方體 (-0.5,-0.5,-0.5) 到 (0.5,0.5,0.5)
+        cube.CreateSizeAttr(1.0)  # Unit cube from (-0.5, -0.5, -0.5) to (0.5, 0.5, 0.5)
         xform = UsdGeom.Xformable(cube.GetPrim())
         if axis_mode == "y_up":
-            # 地面 XZ，Y 為上。標線平鋪於 XZ，Scale(length_x, h, width_z)，繞 Y 旋轉
+            # Ground lies in XZ with Y up. Lay lines on XZ, scale by (length_x, h, width_z), and rotate about Y
             scale_op = xform.AddScaleOp()
             scale_op.Set(Gf.Vec3d(length, h, width))
             rot_op = xform.AddRotateYOp()
@@ -462,14 +462,14 @@ def create_pitch_lines_in_stage(
             trans_op = xform.AddTranslateOp()
             trans_op.Set(Gf.Vec3d(px, h / 2, py))
         else:
-            # 地面 XY，Z 為上（Isaac Sim 預設）
+            # Ground lies in XY with Z up (Isaac Sim default)
             scale_op = xform.AddScaleOp()
             scale_op.Set(Gf.Vec3d(length, width, h))
             rot_op = xform.AddRotateZOp()
             rot_op.Set(math.degrees(angle))
             trans_op = xform.AddTranslateOp()
             trans_op.Set(Gf.Vec3d(px, py, h / 2))
-        # 材質
+        # Material
         mat_path = f"{path}_mat"
         mat = UsdShade.Material.Define(stage, mat_path)
         shader = UsdShade.Shader.Define(stage, f"{mat_path}/PBRShader")
@@ -484,23 +484,23 @@ def create_pitch_lines_in_stage(
         binding.Bind(mat)
         UsdGeom.Gprim(cube.GetPrim()).CreateDisplayColorAttr([Gf.Vec3f(*line_color)])
 
-    # 確保父 prim 存在（置於 env_0 下與球/球門同層，確保視埠渲染）
+    # Ensure the parent prim exists under env_0 at the same level as the ball and goal for viewport rendering
     parent = stage.GetPrimAtPath(parent_path)
     if not parent.IsValid():
         UsdGeom.Xform.Define(stage, parent_path)
 
-    # 邊線與球門線（外框四條）
-    # 球門線 (68m)：在 Y = cy±half_len，沿 X 方向
+    # Sidelines and goal lines (four outer edges)
+    # Goal lines (68 m): at Y = cy +/- half_len, along X
     _add_line("line_goal_top", FIFA_PITCH_WIDTH * scale, w, cx, cy + half_len, 0.0)
     _add_line("line_goal_bottom", FIFA_PITCH_WIDTH * scale, w, cx, cy - half_len, 0.0)
-    # 邊線 (105m)：在 X = cx±half_wid，沿 Y 方向
+    # Sidelines (105 m): at X = cx +/- half_wid, along Y
     _add_line("line_touch_left", FIFA_PITCH_LENGTH * scale, w, cx - half_wid, cy, math.pi / 2)
     _add_line("line_touch_right", FIFA_PITCH_LENGTH * scale, w, cx + half_wid, cy, math.pi / 2)
 
-    # 中線：沿 X，長度 68m
+    # Halfway line along X, 68 m long
     _add_line("line_center", FIFA_PITCH_WIDTH * scale, w, cx, cy, 0.0)
 
-    # 中圈（用多段近似）
+    # Center circle (approximated with line segments)
     n_arc = 24
     for i in range(n_arc):
         a1 = 2 * math.pi * i / n_arc
@@ -515,43 +515,43 @@ def create_pitch_lines_in_stage(
         seg_angle = (a1 + a2) / 2 + math.pi / 2
         _add_line(f"center_arc_{i}", seg_len, w, mid_x, mid_y, seg_angle)
 
-    # 禁區 + 球門區（上下球門各一；禁區 16.5m 深 x 40.3m 寬，球門區 5.5m 深 x 18.32m 寬）
-    # top=+Y 端（攻方球門），bottom=-Y 端
+    # Penalty and goal areas at both ends (penalty area: 16.5 m deep x 40.3 m wide; goal area: 5.5 m deep x 18.32 m wide)
+    # top is the +Y end (attacking goal); bottom is the -Y end
     for side, sgn in [("bottom", -1), ("top", 1)]:
         goal_line_y = cy + sgn * half_len
-        pen_front_y = goal_line_y - sgn * penalty_len  # 禁區前線朝向中線
+        pen_front_y = goal_line_y - sgn * penalty_len  # Penalty-area fronts face the halfway line
         pen_center_y = (goal_line_y + pen_front_y) / 2
-        # 禁區前線（平行球門線，沿 X）、禁區左右側線（沿 Y）
+        # Penalty-area front (parallel to the goal line, along X) and side lines (along Y)
         _add_line(f"penalty_front_{side}", penalty_wid * 2, w, cx, pen_front_y, 0.0)
         _add_line(f"penalty_side_left_{side}", penalty_len, w, cx - penalty_wid, pen_center_y, math.pi / 2)
         _add_line(f"penalty_side_right_{side}", penalty_len, w, cx + penalty_wid, pen_center_y, math.pi / 2)
-        # 球門區
+        # Goal area
         goal_front_y = goal_line_y - sgn * goal_len
         goal_center_y = (goal_line_y + goal_front_y) / 2
         _add_line(f"goal_front_{side}", goal_wid * 2, w, cx, goal_front_y, 0.0)
         _add_line(f"goal_side_left_{side}", goal_len, w, cx - goal_wid, goal_center_y, math.pi / 2)
         _add_line(f"goal_side_right_{side}", goal_len, w, cx + goal_wid, goal_center_y, math.pi / 2)
 
-        # 罰球弧（以罰球點為圓心 9.15m，僅畫禁區外的弧，弧線朝中場）
+        # Penalty arc (9.15 m radius around the penalty spot; draw only the arc outside the penalty area, facing midfield)
         penalty_spot_y = goal_line_y - sgn * penalty_spot_dist
         d_over_r = (penalty_len - penalty_spot_dist) / penalty_arc_radius  # 5.5/9.15
         d_over_r = min(max(d_over_r, 0.0), 1.0)
         alpha = math.asin(d_over_r)
-        if sgn > 0:  # top 球門：弧朝中場 (-Y)，需 sin(θ) < -d/r
+        if sgn > 0:  # top goal: arc faces midfield (-Y), so sin(theta) < -d/r
             arc_start = math.pi + alpha
             arc_end = 2 * math.pi - alpha
-        else:  # bottom 球門：弧朝中場 (+Y)，需 sin(θ) > d/r
+        else:  # bottom goal: arc faces midfield (+Y), so sin(theta) > d/r
             arc_start = alpha
             arc_end = math.pi - alpha
         _add_arc_segments(f"penalty_arc_{side}", cx, penalty_spot_y, penalty_arc_radius, arc_start, arc_end, n_seg=16)
 
-    # 角球弧（四角各 1/4 圓，半徑 1m，弧線在場內）
-    # 角位：(x,y) = (cx±half_wid, cy±half_len)
+    # Corner arcs (one quarter-circle at each corner, radius 1 m, inside the field)
+    # Corner coordinates: (x, y) = (cx +/- half_wid, cy +/- half_len)
     corners = [
-        ("tl", cx - half_wid, cy + half_len, 0, -math.pi / 2),           # 左上
-        ("tr", cx + half_wid, cy + half_len, math.pi, math.pi / 2),       # 右上
-        ("bl", cx - half_wid, cy - half_len, -math.pi / 2, 0),            # 左下
-        ("br", cx + half_wid, cy - half_len, math.pi / 2, math.pi),       # 右下
+        ("tl", cx - half_wid, cy + half_len, 0, -math.pi / 2),           # Top left
+        ("tr", cx + half_wid, cy + half_len, math.pi, math.pi / 2),       # Top right
+        ("bl", cx - half_wid, cy - half_len, -math.pi / 2, 0),            # Bottom left
+        ("br", cx + half_wid, cy - half_len, math.pi / 2, math.pi),       # Bottom right
     ]
     for cname, corn_x, corn_y, a_start, a_end in corners:
         _add_arc_segments(f"corner_arc_{cname}", corn_x, corn_y, corner_arc_radius, a_start, a_end, n_seg=8)

@@ -41,7 +41,7 @@ class JointVisualizerIntegration:
         self.update_frequency = update_frequency
         self.step_count = 0
 
-        # 创建可视化器（在主线程中）
+        # Create the visualizer on the main thread
         print(f"[JointVizIntegration] Creating visualizer in main thread...")
         try:
             self.visualizer = JointPositionVisualizer(
@@ -56,12 +56,12 @@ class JointVisualizerIntegration:
             traceback.print_exc()
             raise
 
-        # 更新关节名称
+        # Update joint names
         if hasattr(robot.data, 'joint_names'):
             self.visualizer.joint_names = robot.data.joint_names
             print(f"[JointVizIntegration] Updated joint names: {len(robot.data.joint_names)} joints")
 
-        # 启动非阻塞模式（不使用线程，在主线程中更新）
+        # Start non-blocking mode without a thread; update on the main thread
         print(f"[JointVizIntegration] Starting visualizer in non-blocking mode...")
         try:
             self.visualizer.start_non_blocking()
@@ -86,7 +86,7 @@ class JointVisualizerIntegration:
         self.step_count += 1
 
         if self.step_count % self.update_frequency == 0:
-            # 获取目标位置和当前位置
+            # Get target and current positions
             target_pos = self.robot.data.joint_pos_target[self.env_id].cpu().numpy()
             current_pos = self.robot.data.joint_pos[self.env_id].cpu().numpy()
 
@@ -101,22 +101,22 @@ class JointVisualizerIntegration:
         return self.visualizer.get_statistics()
 
 
-# 使用示例：
-# 在你的 sim_main.py 中添加以下代码：
+# Usage example:
+# Add the following code to sim_main.py:
 #
 # from tools.joint_visualizer_integration import JointVisualizerIntegration
 #
-# # 在创建环境后：
+# # After creating the environment:
 # if args.visualize_joints:
 #     joint_viz = JointVisualizerIntegration(env.scene["robot"], env_id=0)
 #
-# # 在主循环中：
+# # In the main loop:
 # while simulation_app.is_running():
 #     obs, reward, terminated, truncated, info = env.step(actions)
 #
 #     if args.visualize_joints:
 #         joint_viz.update()
 #
-#     # 每1000步打印统计
+#     # Print statistics every 1000 steps
 #     if args.visualize_joints and step_count % 1000 == 0:
 #         joint_viz.print_statistics()

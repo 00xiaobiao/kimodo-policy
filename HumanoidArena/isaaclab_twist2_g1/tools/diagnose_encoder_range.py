@@ -5,7 +5,7 @@
 
 import numpy as np
 
-# 从日志中提取的encoder输入范围
+# Encoder input ranges extracted from logs
 encoder_input_min = -31.945160
 encoder_input_max = 29.832436
 

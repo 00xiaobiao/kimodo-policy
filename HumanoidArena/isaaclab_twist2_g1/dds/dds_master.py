@@ -165,5 +165,5 @@ class DDSManager:
             obj.stop_communication()    
             self.publishing_running=False
             self.subscribing_running=False
-# 全局单例实例
+# Global singleton instance
 dds_manager = DDSManager()

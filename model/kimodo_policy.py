@@ -65,8 +65,8 @@ class KimodoPolicyConfig:
     motion_mask_mode: str = "concat"
     dinov3_model_name: str = "dinov3-vitl16-pretrain-lvd1689m"
     dinov3_checkpoint: Optional[str] = None
-    action_chunk: int = 50    # 预测的未来帧数
-    action_history: int = 100 # 作为约束的历史帧数
+    action_chunk: int = 50    # Number of future frames to predict
+    action_history: int = 100 # Number of history frames used as constraints
     load_text_encoder: bool = True
     controlnet_num_layers: int = 8
     detach_root_control_for_body: bool = False
@@ -142,13 +142,15 @@ class KimodoPolicy(nn.Module):
         self._hand_observation_mode()
         config = self.config
         self.fps = config.fps
-        checkpoint_path = os.path.abspath(
-            os.path.join(os.path.dirname(os.path.dirname(__file__)), "..", "checkpoints")
-        )
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        checkpoint_path = os.path.join(project_root, "checkpoints")
         model_dir = config.kimodo_checkpoint or os.path.join(
             checkpoint_path, "Kimodo-G1-RP-v1"
         )
-        model_dir = os.path.abspath(os.path.expanduser(model_dir))
+        model_dir = os.path.expanduser(str(model_dir))
+        if not os.path.isabs(model_dir):
+            model_dir = os.path.join(project_root, model_dir)
+        model_dir = os.path.abspath(model_dir)
         for required_file in ("config.yaml", "model.safetensors"):
             required_path = os.path.join(model_dir, required_file)
             if not os.path.isfile(required_path):
@@ -158,21 +160,38 @@ class KimodoPolicy(nn.Module):
         image_checkpoint = config.dinov3_checkpoint or os.path.join(
             checkpoint_path, config.dinov3_model_name
         )
+        if config.dinov3_checkpoint is not None:
+            image_checkpoint = os.path.expanduser(str(image_checkpoint))
+            if os.path.isabs(image_checkpoint):
+                if not os.path.isdir(image_checkpoint):
+                    raise FileNotFoundError(
+                        "DINOv3 checkpoint path does not exist or is not a directory: "
+                        f"{image_checkpoint}. Check model.dinov3_checkpoint."
+                    )
+            else:
+                local_image_checkpoint = os.path.join(project_root, image_checkpoint)
+                if os.path.isdir(local_image_checkpoint):
+                    image_checkpoint = local_image_checkpoint
+                elif image_checkpoint.startswith(("./", "../", "checkpoints/", "datasets/")):
+                    raise FileNotFoundError(
+                        "DINOv3 checkpoint path does not exist or is not a directory: "
+                        f"{local_image_checkpoint}. Check model.dinov3_checkpoint."
+                    )
         if config.dinov3_checkpoint is None and not os.path.isdir(image_checkpoint):
             raise FileNotFoundError(
                 f"DINOv3 checkpoint not found at {image_checkpoint}. Set model.dinov3_checkpoint "
                 "to a local Hugging Face checkpoint directory or model id."
             )
-        # 1. G1 机器人骨骼结构
+        # 1. G1 robot skeleton.
         self.g1_skeleton_34 = G1Skeleton34()
-        # 2. motion 转化器
+        # 2. Motion representation.
         self.representation = KimodoMotionRep(skeleton=self.g1_skeleton_34, fps=self.fps, stats_path=os.path.join(model_dir, "stats/motion"))
-        # 3. 去噪网络
+        # 3. Denoising network.
         self.denoiser = TwostageDenoiser(motion_rep=self.representation, motion_mask_mode=config.motion_mask_mode, ckpt_path=model_dir)
-        # 4. 去噪器
+        # 4. Diffusion denoiser.
         self.diffusion = Diffusion(num_base_steps=OmegaConf.load(os.path.join(model_dir, "config.yaml")).num_base_steps)
         self.sampler = DDIMSampler(self.diffusion)
-        # 5. text encoder & 冻结。训练可直接使用预计算 embedding，避免 8B LLM 常驻显存。
+        # 5. Freeze the text encoder. Training can use precomputed embeddings to avoid keeping the 8B LLM in memory.
         self.text_encoder = None
         if config.load_text_encoder:
             from .modules.llm2vec.llm2vec_wreapper import LLM2VecEncoder
@@ -180,7 +199,7 @@ class KimodoPolicy(nn.Module):
             self.text_encoder = LLM2VecEncoder(checkpoint_path=checkpoint_path)
             for p in self.text_encoder.model.parameters():
                 p.requires_grad = False
-        # 6. 冻结 Kimodo 主体并训练 ControlNet
+        # 6. Freeze the Kimodo backbone and train the ControlNet.
         for p in self.denoiser.parameters():
             p.requires_grad = False
         self.image_encoder = DINOv3Encoder(checkpoint_path=image_checkpoint)
@@ -599,7 +618,7 @@ class KimodoPolicy(nn.Module):
         text_feat: Optional[torch.Tensor] = None,
         text_length: Optional[torch.Tensor] = None,
     ):
-        # 0. 基本配置
+        # 0. Basic configuration.
         B, T, _ = gt_motion.shape
         device = gt_motion.device
         H = self.config.action_history  # 100
@@ -681,16 +700,16 @@ class KimodoPolicy(nn.Module):
                 raise ValueError(
                     "continuous future hand targets must contain values within [0, 1]"
                 )
-        # 1. 标准化完整 motion
+        # 1. Normalize the full motion sequence.
         x_start_full = self.representation.normalize(gt_motion)  # [B, T, 417]
         normalized_condition = self.representation.normalize(condition_motion)
-        # 3. 时间步采样
+        # 3. Sample diffusion timesteps.
         t = torch.randint(0, self.diffusion.num_base_steps, (B,), device=device)
-        # 4. 完整序列加噪；历史帧由 Kimodo motion constraint 硬覆盖
+        # 4. Noise the full sequence; Kimodo's motion constraint overwrites history frames.
         x_t = self.diffusion.q_sample(x_start_full, t, torch.randn_like(x_start_full))
         history_mask = gt_mask[:, :H]   # [B, H]
-        x_pad_mask_full = gt_mask.clone()  # history + chunk 都按 gt_mask 有效性参与 attention
-        # 5. 组织 observed_motion 和 motion_mask（前 H 帧有约束，后 C 帧无约束）
+        x_pad_mask_full = gt_mask.clone()  # Both history and chunk use gt_mask validity in attention
+        # 5. Build observed_motion and motion_mask (the first H frames are constrained; the next C are not).
         observed_motion = torch.zeros_like(x_start_full)
         observed_motion[:, :H] = normalized_condition[:, :H]
         motion_mask = torch.zeros_like(x_start_full)
@@ -698,7 +717,7 @@ class KimodoPolicy(nn.Module):
             dtype=x_start_full.dtype
         )
         observed_motion = observed_motion.masked_fill(motion_mask == 0, 0)
-        # 6. 文本编码。训练优先使用 Dataset 返回的预计算 embedding。
+        # 6. Encode text. Training prefers precomputed embeddings returned by the dataset.
         if text_feat is None:
             if self.text_encoder is None:
                 raise RuntimeError("Text encoder is disabled; provide precomputed text_feat")
@@ -710,14 +729,14 @@ class KimodoPolicy(nn.Module):
             )
         maxlen = text_feat.shape[1]
         text_pad_mask = self._length_mask(text_length, maxlen, device)
-        # 7. 图像编码 (DINOv3 冻结)
+        # 7. Encode images with frozen DINOv3.
         with torch.no_grad():
             image_feat = self.image_encoder(egoview)
         image_feat = image_feat.to(dtype=next(self.controlnet.parameters()).dtype)
-        # 8. ControlNet 前向（可训练）
+        # 8. Run the trainable ControlNet.
         root_control_tokens, body_control_tokens = self.controlnet(t, image_feat, T, H)
-        # 9. 冻结的 denoiser 前向。每个注入层用当前 future motion hidden
-        # 作为 Query 读取对应的 visual tokens，梯度回传到 ControlNet。
+        # 9. Run the frozen denoiser. At each injection layer, the current future-motion hidden state
+        # queries the visual tokens, and gradients flow back to the ControlNet.
         heading_slice = self.representation.slice_dict["global_root_heading"]
         heading_history_mask = (
             history_mask
@@ -750,7 +769,7 @@ class KimodoPolicy(nn.Module):
             pred_clean, body_hidden = denoiser_output
         else:
             pred_clean = denoiser_output
-        # 10. 计算 loss（只对 chunk 的有效帧）
+        # 10. Compute the loss only for valid frames in the chunk.
         pred_chunk = pred_clean[:, H:]
         x_start_chunk = x_start_full[:, H:]
         chunk_valid = gt_mask[:, H:]

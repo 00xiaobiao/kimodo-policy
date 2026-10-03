@@ -112,7 +112,7 @@ def setup_logging(rank, save_path):
 
 
 def build_model_and_optimizer(config):
-    # 1. 创建模型
+    # 1. Build the model.
     loss_config = config.training.loss
     mse_weights = loss_config.get("mse_weights", {}) or {}
     kimodo_smooth_l1_weights = config.training.loss.get(
@@ -176,7 +176,7 @@ def build_model_and_optimizer(config):
             mode=config.model.get("compile_mode", "reduce-overhead"),
             dynamic=False,
         )
-    # 2. 创建 scheduler（cosine with warmup，支持最小 lr）
+    # 2. Build the scheduler (cosine with warmup and a minimum learning rate).
     sig_gpu_max_training_steps = config.main.max_steps
     min_lr_ratio  = config.training.scheduler.get("min_lr_ratio", 0.0)
     num_cycles    = config.training.scheduler.num_cycles
@@ -606,7 +606,7 @@ def prepare_text_embeddings(config, dataset, accelerator):
         from model.modules.llm2vec.llm2vec_wreapper import LLM2VecEncoder
 
         checkpoint_path = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "..", "checkpoints")
+            os.path.join(os.path.dirname(__file__), "checkpoints")
         )
         encoder = LLM2VecEncoder(checkpoint_path=checkpoint_path).to(accelerator.device)
         encoder.eval()
@@ -1152,7 +1152,7 @@ def _load_rank_rng_state(
 
 
 def learning(config_path=None, resume=None, init_checkpoint=None):
-    # 1. 加载配置参数 & 加载保存根目录
+    # 1. Load configuration and prepare the output root.
     config_path = config_path or os.path.join(os.path.dirname(__file__), "train.yaml")
     config = OmegaConf.load(config_path)
     if not os.path.isabs(config.main.save_root):
@@ -1170,7 +1170,7 @@ def learning(config_path=None, resume=None, init_checkpoint=None):
         _validate_resume_config(config, resume)
     if init_checkpoint:
         _validate_init_checkpoint_config(config, init_checkpoint)
-    # 2. 配置分布式
+    # 2. Configure distributed training.
     distributed_timeout_seconds = int(
         config.main.get("distributed_timeout_seconds", 3600)
     )
@@ -1206,13 +1206,13 @@ def learning(config_path=None, resume=None, init_checkpoint=None):
         save_path = os.path.join(config.main.save_root, run_name[0])
     os.makedirs(save_path, exist_ok=True)
     setup_logging(rank, save_path)
-    # 3. 加载数据
+    # 3. Load the dataset.
     train_dataset = build_dataset(config)
     prepare_pretrain_motion_cache(config, train_dataset, accelerator, config_path)
     apply_pretrain_data_fraction(config, train_dataset, accelerator)
     if config.main.get("precompute_text_embeddings", True):
         prepare_text_embeddings(config, train_dataset, accelerator)
-    # 4. 加载模型和优化器
+    # 4. Load the model and optimizer.
     set_seed(config.main.seed, device_specific=False)
     model, optimizer, scheduler, max_training_steps = build_model_and_optimizer(config)
     initialization_metadata = None
@@ -1273,12 +1273,12 @@ def learning(config_path=None, resume=None, init_checkpoint=None):
         world_size=world_size,
         resume_step=global_step,
     )
-    # 5. 分布式分发（Accelerate 负责 dataloader shard）
+    # 5. Distribute training (Accelerate shards the dataloader).
     model, optimizer, scheduler, train_dataloader = accelerator.prepare(
         model, optimizer, scheduler, train_dataloader
     )
     model.train()
-    # 7. 初始化 wandb (仅在主进程)
+    # 7. Initialize wandb on the main process.
     if rank == 0:
         if config.main.wandb == "offline":
             wandb.init(
@@ -1296,7 +1296,7 @@ def learning(config_path=None, resume=None, init_checkpoint=None):
                 dir=save_path
             )
     torch.cuda.empty_cache()
-    # 8. 训练
+    # 8. Train.
     if rank == 0:
         print("Start Training ...")
     initial_step = global_step
@@ -1318,7 +1318,7 @@ def learning(config_path=None, resume=None, init_checkpoint=None):
     accumulated_hand_transition_loss = 0.0
     accumulation_count = 0
     while global_step < max_training_steps:
-        ## 8.1 加载一个 batch
+        ## 8.1 Load a batch.
         data_start_time = time.perf_counter()
         try:
             batch = next(data_iter)
@@ -1326,7 +1326,7 @@ def learning(config_path=None, resume=None, init_checkpoint=None):
             data_iter = iter(train_dataloader)
             batch = next(data_iter)
         data_time = time.perf_counter() - data_start_time
-        ## 8.2 预处理 batch
+        ## 8.2 Preprocess the batch.
         device = accelerator.device
         egoview   = batch["egoview"].to(device, non_blocking=True)
         gt_motion = batch["gt_motion"].to(device, non_blocking=True)
@@ -1348,7 +1348,7 @@ def learning(config_path=None, resume=None, init_checkpoint=None):
             text_embedding = text_embedding.to(device, non_blocking=True)
         if text_length is not None:
             text_length = text_length.to(device, non_blocking=True)
-        ## 8.3 前向传播 + 反向传播
+        ## 8.3 Run the forward and backward passes.
         compute_start_time = time.perf_counter()
         control_grad_statistics = None
         hand_grad_statistics = None
@@ -1427,7 +1427,7 @@ def learning(config_path=None, resume=None, init_checkpoint=None):
                 scheduler.step()
                 global_step += 1
         compute_time = time.perf_counter() - compute_start_time
-        ## 8.4 记录日志
+        ## 8.4 Log metrics.
         if accelerator.sync_gradients:
             avg_loss = accumulated_loss / accumulation_count
             avg_motion_loss = accumulated_motion_loss / accumulation_count
@@ -1532,7 +1532,7 @@ def learning(config_path=None, resume=None, init_checkpoint=None):
             accumulated_hand_state_loss = 0.0
             accumulated_hand_transition_loss = 0.0
             accumulation_count = 0
-        ## 8.5 按步数保存 checkpoint
+        ## 8.5 Save a checkpoint at the configured step interval.
         if global_step > 0 and global_step % config.main.save_steps == 0 and accelerator.sync_gradients:
             if rank == 0:
                 logging.info(f"Saving checkpoint at step {global_step}...")
@@ -1591,7 +1591,7 @@ def learning(config_path=None, resume=None, init_checkpoint=None):
                 os.replace(temporary_config_path, config_path)
             accelerator.wait_for_everyone()
 
-    # 9. 关闭 wandb
+    # 9. Close wandb.
     if rank == 0:
         wandb.finish()
     accelerator.end_training()

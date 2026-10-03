@@ -19,6 +19,9 @@ if [[ ! -f "${CONFIG_PATH}" ]]; then
   echo "Training config does not exist: ${CONFIG_PATH}" >&2
   exit 2
 fi
+if [[ "${CONFIG_PATH}" != /* ]]; then
+  CONFIG_PATH="${PWD}/${CONFIG_PATH}"
+fi
 
 # Real-world training is initialized from a compatible Kimodo checkpoint.
 # Accept either the first positional argument or KIMODO_INIT_CHECKPOINT.
@@ -32,6 +35,9 @@ if [[ ! -f "${INIT_CHECKPOINT}/training_state.pt" || ! -f "${INIT_CHECKPOINT}/co
   echo "Initialization checkpoint is incomplete: ${INIT_CHECKPOINT}" >&2
   echo "Expected training_state.pt and config.json in that directory." >&2
   exit 2
+fi
+if [[ "${INIT_CHECKPOINT}" != /* ]]; then
+  INIT_CHECKPOINT="$(cd -- "${INIT_CHECKPOINT}" && pwd)"
 fi
 
 # The second positional argument overrides REAL_WORLD_DATASET.  The default
@@ -68,7 +74,7 @@ cd "${PROJECT_ROOT}"
 # Example:
 # conda activate kimodo
 # export KIMODO_ENV="$CONDA_PREFIX"
-# export REAL_WORLD_ROOT=/data/local-data/data/code/yunhengwang/kimodo-polocy/controlnet_v1.2/real-world
+# export REAL_WORLD_ROOT=real-world
 # export REAL_WORLD_DATASET=01_SitSofa
 # KIMODO_GPUS=4,5,6,7 \
 # KIMODO_INIT_CHECKPOINT=/path/to/pretrain/checkpoint_STEP \

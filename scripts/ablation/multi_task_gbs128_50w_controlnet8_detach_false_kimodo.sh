@@ -42,5 +42,5 @@ cd "${PROJECT_ROOT}"
 # conda activate kimodo-env
 # export KIMODO_ENV="$CONDA_PREFIX"
 # KIMODO_GPUS=4,5,6,7 \
-# HUMANOID_ARENA_ROOT=/mnt/workspace/vla/users/xujunzhe/yunhengwang/DataSet/Humanoid/HumanoidArena_dataset_v3_1 \
+# HUMANOID_ARENA_ROOT=/path/to/HumanoidArena_dataset_v3_1 \
 # bash scripts/ablation/multi_task_gbs128_50w_controlnet8_detach_false_kimodo.sh

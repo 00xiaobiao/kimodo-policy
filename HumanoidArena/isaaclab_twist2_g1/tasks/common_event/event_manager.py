@@ -86,20 +86,20 @@ class BatchObjectEvent:
         
         for obj_name in self.object_names:
             try:
-                # 获取该物体的pose_range配置
+                # Get this object's pose_range configuration
                 if isinstance(self.pose_ranges, dict) and obj_name in self.pose_ranges:
                     pose_range = self.pose_ranges[obj_name]
                 elif isinstance(self.pose_ranges, dict) and "x" in self.pose_ranges:
-                    # 单个配置，所有物体使用相同配置
+                    # Single configuration shared by all objects
                     pose_range = self.pose_ranges
                 else:
                     pose_range = {}
                 
-                # 获取该物体的velocity_range配置
+                # Get this object's velocity_range configuration
                 if isinstance(self.velocity_ranges, dict) and obj_name in self.velocity_ranges:
                     velocity_range = self.velocity_ranges[obj_name]
                 elif isinstance(self.velocity_ranges, dict) and "linear" in self.velocity_ranges:
-                    # 单个配置，所有物体使用相同配置
+                    # Single configuration shared by all objects
                     velocity_range = self.velocity_ranges
                 else:
                     velocity_range = {}

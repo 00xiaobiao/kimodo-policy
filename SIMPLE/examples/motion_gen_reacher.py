@@ -13,6 +13,7 @@
 import torch
 
 # Standard Library
+import os
 from typing import Dict, Optional
 try:
     # Third Party
@@ -236,8 +237,13 @@ def add_robot_to_scene(
             )
             robot_path = f"/World/vega_1"
             import omni.isaac.core.utils.stage as isaacsim_stage
+            usd_path = os.environ.get("VEGA_USD_PATH", "")
+            if not usd_path or not os.path.isfile(usd_path):
+                raise FileNotFoundError(
+                    "Set VEGA_USD_PATH to an existing Vega USD asset file."
+                )
             a = isaacsim_stage.add_reference_to_stage(
-                usd_path="/home/songlin/Desktop/vega_1.usd",
+                usd_path=usd_path,
                 prim_path="/World",
             )
         else:

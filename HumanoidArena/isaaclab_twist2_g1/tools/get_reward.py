@@ -1,5 +1,5 @@
 #
-# 实用函数：如何获取奖励值
+# Utility example: how to get the reward
 ##
 from __future__ import annotations
 

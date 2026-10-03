@@ -11,8 +11,8 @@ class Button:
     self.on_pressed = False
     self.on_released = False
     self.data = 0
-    self.click_count = 0  # 记录连续点击次数
-    self.last_pressed_time = 0  # 上次按下时间
+    self.click_count = 0  # Track the consecutive click count
+    self.last_pressed_time = 0  # Time of the previous press
 
   def __call__(self, data) -> None:
     current_time = time.perf_counter()
@@ -23,18 +23,18 @@ class Button:
     self.on_released = not self.pressed and self.data != 0
 
     # print('after',self.data)
-            # 处理连续点击
+            # Handle consecutive clicks
     if self.on_pressed:
         # print('on_pressed')
         # print('on_pressed current_time',current_time)
         # print('on_pressed last_pressed_time',self.last_pressed_time)
         # print('on_pressed diff',current_time-self.last_pressed_time)
 
-        if current_time - self.last_pressed_time <= 0.3:  # 0.1 秒以内的连续点击
+        if current_time - self.last_pressed_time <= 0.3:  # Consecutive clicks within 0.1 seconds
             self.click_count += 1
             # print(self.click_count)
         else:
-            self.click_count = 0  # 超过时间间隔，重置计数器
+            self.click_count = 0  # Reset the counter after the timeout
         self.last_pressed_time = current_time
     self.data = data
     
@@ -92,8 +92,8 @@ class Joystick:
     self.rx = Axis()
     self.ry = Axis()
     
-    self.last_active_time = time.perf_counter()  # 最后一次活动时间
-    self.inactive_timeout = 0.5  # 超时时间（单位：秒）
+    self.last_active_time = time.perf_counter()  # Time of the last activity
+    self.inactive_timeout = 0.5  # Timeout in seconds
   def update(self):
     """
     Update the current handle key based on the original data
@@ -134,18 +134,18 @@ class Joystick:
     self.ly( struct.unpack('f', bytes(wireless_remote[20:24]))[0] )
     
     
-    # 检查是否有按键按下
+    # Check whether any button is pressed
     if any([
         self.LT.pressed, self.RT.pressed, self.back.pressed, self.start.pressed,
         self.LB.pressed, self.RB.pressed, self.left.pressed, self.down.pressed,
         self.right.pressed, self.up.pressed, self.Y.pressed, self.X.pressed,
         self.B.pressed, self.A.pressed
     ]):
-        self.last_active_time = time.perf_counter()  # 更新最后一次活动时间
+        self.last_active_time = time.perf_counter()  # Update the last activity time.
     elif time.perf_counter() - self.last_active_time > self.inactive_timeout:
-        # 超过设定的超时时间未按下任何键，重置所有按键的点击计数
+        # If no key is pressed before the timeout, reset click counts for all keys
         self.reset_all_click_counts()
-        self.last_active_time = time.perf_counter()  # 重置最后活动时间
+        self.last_active_time = time.perf_counter()  # Reset the last activity time
 
   def reset_all_click_counts(self):
         """重置所有按键的连续点击计数器"""
@@ -248,4 +248,3 @@ class LogicJoystick(PyGameJoystick):
     # self.right(1 if self._joystick.get_axis(0) > 0.5 else 0)
     # self.lx(self._joystick.get_hat(0)[1])
     # self.ly(self._joystick.get_hat(0)[1])
-

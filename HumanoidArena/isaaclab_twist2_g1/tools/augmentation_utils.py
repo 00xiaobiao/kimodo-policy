@@ -16,7 +16,7 @@ def _get_stage():
     return omni.usd.get_context().get_stage()
 
 # ------------------------------
-# 通用安全设置属性函数，避免重复创建属性
+# Set attributes safely to avoid creating duplicates
 def safe_set_attr(prim, attr_name, value, usd_type):
     attr = prim.GetAttribute(attr_name)
     if not attr.IsValid():
@@ -76,7 +76,7 @@ def _set_if_factory_exists(light, factory_name: str, value: Any) -> None:
         factory().Set(value)
 
 # ------------------------------
-# 修改光源属性（颜色、强度、旋转、位置等）
+# Modify light properties such as color, intensity, rotation, and position
 def update_light(
     prim_path: str,
     color=(1.0, 1.0, 1.0),
@@ -114,20 +114,20 @@ def update_light(
 
     _set_xform_attrs(prim, rotation=rotation, position=position)
 
-    # 识别光源类型并创建对应接口
+    # Detect the light type and create the corresponding interface
     light = _as_light_api(prim, type_name, UsdLux)
     if light is None:
-        # 未知光源类型使用通用接口
+        # Use a generic interface for unknown light types
         print(f"[update_light] ⚠️ 未知光源类型 {type_name}，使用通用接口设置 color 和 intensity")
         safe_set_attr(prim, "color", Gf.Vec3f(*color), Sdf.ValueTypeNames.Color3f)
         safe_set_attr(prim, "intensity", intensity, Sdf.ValueTypeNames.Float)
         return
 
-    # 通用属性设置
+    # Set general properties
     light.CreateColorAttr().Set(Gf.Vec3f(*color))
     light.CreateIntensityAttr().Set(intensity)
 
-    # 有条件地设置其他属性
+    # Set additional properties when applicable
     if enabled is not None:
         _set_if_factory_exists(light, "CreateEnableAttr", bool(enabled))
 
@@ -609,7 +609,7 @@ def randomize_rect_lights_by_path_keywords(
 
 
 # ------------------------------
-# 修改相机属性，支持焦距、传感器尺寸、曝光、焦点距离等
+# Modify camera properties such as focal length, sensor size, exposure, and focus distance
 def augment_camera_appearance(
     camera_path: str,
     focal_length: float = None,
@@ -656,7 +656,7 @@ def augment_camera_appearance(
 
     print(f"[augment_camera_appearance] ✅ 设置相机 {camera_path} 属性完成")
 
-# --- 新增：批量修改相机（根据名称关键词匹配） ---
+# --- New: modify cameras in batches by matching name keywords ---
 def batch_augment_cameras_by_name(
     names,
     focal_length=None,
@@ -695,7 +695,7 @@ def batch_augment_cameras_by_name(
         print("[batch_augment_cameras_by_name] ⚠️ 没有找到匹配的相机")
         return
 
-    # 参数展开工具
+    # Parameter expansion helper
     def normalize(param, default=None):
         if isinstance(param, (list, tuple)):
             if len(param) == len(matched_prims):

@@ -4,7 +4,7 @@ import argparse
 import glob
 
 
-# 1. 必须在导入任何 pxr 模块前启动 SimulationApp
+# 1. Start SimulationApp before importing any pxr modules
 from isaacsim import SimulationApp
 simulation_app = SimulationApp({"headless": True})
 
@@ -25,28 +25,28 @@ def convert_obj_to_isaac_usd(obj_path, usd_output_path):
     meshes_path = world_path.AppendPath("Meshes")
     meshes_xform = UsdGeom.Xform.Define(stage, meshes_path)
 
-    # --- 3. visual (作为容器引入 OBJ) ---
+    # --- 3. visual (as a container for the OBJ) ---
     visual_path = meshes_path.AppendPath("visual")
-    # 关键修改：使用 Xform 而不是 Mesh，避免产生"没有顶点的空Mesh"
+    # Key change: use Xform instead of Mesh to avoid an empty mesh with no vertices
     visual_prim = UsdGeom.Xform.Define(stage, visual_path).GetPrim()
     visual_prim.GetReferences().AddReference(obj_path)
 
-    # --- 4. collision (作为容器引入 OBJ) ---
+    # --- 4. collision (as a container for the OBJ) ---
     collision_path = meshes_path.AppendPath("collision")
     collision_prim = UsdGeom.Xform.Define(stage, collision_path).GetPrim()
     collision_prim.GetReferences().AddReference(obj_path)
 
-    # --- 5. 给 collision 赋予物理属性 ---
-    # 物理引擎会自动递归寻找 collision 容器内部的网格数据
+    # --- 5. Assign physics properties to collision ---
+    # The physics engine recursively searches for mesh data inside the collision container
     UsdPhysics.CollisionAPI.Apply(collision_prim)
     mesh_collision_api = UsdPhysics.MeshCollisionAPI.Apply(collision_prim)
-    # 对于 Objaverse 的复杂模型，使用凸包(convexHull)近似碰撞效果最好且不报错
+    # For complex Objaverse models, a convex hull approximates collisions well and avoids errors
     mesh_collision_api.CreateApproximationAttr().Set(UsdPhysics.Tokens.convexHull)
 
-    # --- 6. 隐藏 collision 避免渲染重叠 ---
+    # --- 6. Hide collision to avoid overlapping renders ---
     UsdGeom.Imageable(collision_prim).CreateVisibilityAttr().Set(UsdGeom.Tokens.invisible)
 
-    # 保存并退出
+    # Save and exit
     stage.GetRootLayer().Save()
     print(f"Success: Saved USD with correct hierarchy to {usd_output_path}")
 

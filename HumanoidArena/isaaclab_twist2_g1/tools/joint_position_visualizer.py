@@ -42,13 +42,13 @@ class JointPositionVisualizer:
         self.window_size = window_size
         self.update_interval = update_interval
 
-        # 数据缓冲区
+        # Data buffers
         self.target_positions = [deque(maxlen=window_size) for _ in range(num_joints)]
         self.current_positions = [deque(maxlen=window_size) for _ in range(num_joints)]
         self.errors = [deque(maxlen=window_size) for _ in range(num_joints)]
         self.timestamps = deque(maxlen=window_size)
 
-        # 关节名称（G1 29DOF）
+        # Joint names (G1 29 DOF)
         self.joint_names = [
             # Legs (12)
             "L_hip_pitch", "L_hip_roll", "L_hip_yaw", "L_knee", "L_ankle_pitch", "L_ankle_roll",
@@ -62,18 +62,18 @@ class JointPositionVisualizer:
             "R_wrist_roll", "R_wrist_pitch", "R_wrist_yaw",
         ]
 
-        # 当前显示的关节索引
+        # Indices of the currently displayed joints
         self.current_joint_idx = 0
-        self.joints_per_plot = 6  # 每个图显示6个关节
+        self.joints_per_plot = 6  # Display 6 joints per plot
 
-        # 线程锁
+        # Thread lock
         self.lock = threading.Lock()
 
-        # 统计信息
+        # Statistics
         self.max_error = np.zeros(num_joints)
         self.mean_error = np.zeros(num_joints)
 
-        # 初始化图形
+        # Initialize the figure
         self._init_plot()
 
     def _init_plot(self):
@@ -91,7 +91,7 @@ class JointPositionVisualizer:
         self.fig.suptitle('Joint Position Tracking (Press Left/Right to navigate)', fontsize=14)
         self.axes = self.axes.flatten()
 
-        # 初始化每个子图
+        # Initialize each subplot
         self.lines_target = []
         self.lines_current = []
         self.lines_error = []
@@ -115,7 +115,7 @@ class JointPositionVisualizer:
             ax.set_xlim(0, 10)
             ax.set_ylim(-1, 1)
 
-        # 键盘事件
+        # Keyboard events
         self.fig.canvas.mpl_connect('key_press_event', self._on_key_press)
 
         plt.tight_layout(pad=2.0)
@@ -149,7 +149,7 @@ class JointPositionVisualizer:
                 error = target_pos[i] - current_pos[i]
                 self.errors[i].append(error)
 
-                # 更新统计
+                # Update statistics
                 self.max_error[i] = max(self.max_error[i], abs(error))
                 if len(self.errors[i]) > 0:
                     self.mean_error[i] = np.mean(np.abs(list(self.errors[i])))
@@ -166,35 +166,35 @@ class JointPositionVisualizer:
                 joint_idx = self.current_joint_idx + i
 
                 if joint_idx >= self.num_joints:
-                    # 隐藏多余的子图
+                    # Hide unused subplots
                     self.axes[i].set_visible(False)
                     continue
 
                 self.axes[i].set_visible(True)
 
-                # 获取数据
+                # Get data
                 target = np.array(self.target_positions[joint_idx])
                 current = np.array(self.current_positions[joint_idx])
                 error = np.array(self.errors[joint_idx])
 
-                # 更新线条
+                # Update the lines
                 self.lines_target[i].set_data(times, target)
                 self.lines_current[i].set_data(times, current)
                 self.lines_error[i].set_data(times, error)
 
-                # 更新标题（包含统计信息）
+                # Update the title, including statistics
                 joint_name = self.joint_names[joint_idx] if joint_idx < len(self.joint_names) else f"Joint_{joint_idx}"
                 title = f"{joint_name}\nMax Err: {self.max_error[joint_idx]:.4f} | Mean Err: {self.mean_error[joint_idx]:.4f}"
                 self.axes[i].set_title(title, fontsize=10)
 
-                # 自动调整y轴范围
+                # Automatically adjust the y-axis range
                 if len(target) > 0:
                     all_data = np.concatenate([target, current, error])
                     y_min, y_max = all_data.min(), all_data.max()
                     margin = (y_max - y_min) * 0.1 + 0.01
                     self.axes[i].set_ylim(y_min - margin, y_max + margin)
 
-                # 自动调整x轴范围
+                # Automatically adjust the x-axis range
                 if len(times) > 0:
                     self.axes[i].set_xlim(times[0], times[-1])
 
@@ -245,33 +245,33 @@ class JointPositionVisualizer:
         print("="*80 + "\n")
 
 
-# 示例用法
+# Usage example
 if __name__ == "__main__":
     import time
 
-    # 创建可视化器
+    # Create the visualizer
     viz = JointPositionVisualizer(num_joints=29, window_size=200)
 
-    # 启动非阻塞可视化
+    # Start non-blocking visualization
     viz.start_non_blocking()
 
-    # 模拟数据更新
+    # Simulate data updates
     print("Simulating joint tracking...")
     print("Press Ctrl+C to stop")
 
     try:
         t = 0
         while True:
-            # 生成模拟数据
+            # Generate simulated data
             target = np.sin(t * 0.1 + np.arange(29) * 0.2)
-            current = target + np.random.randn(29) * 0.05  # 添加噪声
+            current = target + np.random.randn(29) * 0.05  # Add noise
 
             viz.update_data(target, current, timestamp=t)
 
             t += 1
             time.sleep(0.02)  # 50Hz
 
-            # 每100步打印统计
+            # Print statistics every 100 steps
             if t % 100 == 0:
                 viz.print_statistics()
 

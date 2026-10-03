@@ -46,11 +46,11 @@ class MultiCameraVisionClient:
         self.num_cameras = num_cameras
         self.running = True
 
-        # Front camera (第一人称视角)
+        # Front camera (first-person view).
         self.front_rgb_shape = (360, 640, 3)
         self.front_depth_shape = (360, 640)
 
-        # World camera (第三人称视角) - optional
+        # World camera (third-person view) - optional.
         self.world_rgb_shape = (360, 640, 3)
         self.world_depth_shape = (360, 640)
 
@@ -132,7 +132,7 @@ class MultiCameraVisionClient:
             unit_test=False
         )
 
-        # Port 5556: World camera (第三人称) - optional
+    # Port 5556: optional world camera (third-person view).
         if self.world_rgb_shm is not None:
             try:
                 print("[MultiCameraVisionClient] Attempting to connect to world camera on port 5556...")
@@ -263,11 +263,11 @@ def main(args):
     # Create recorder with enhanced data keys
     recording = False
     save_data_keys = [
-        'front_rgb',        # 第一人称RGB
-        'front_depth',      # 第一人称深度
-        'world_rgb',        # 第三人称RGB
-        'world_depth',      # 第三人称深度
-        'smplx_data',       # SMPLX人体姿态
+        'front_rgb',        # First-person RGB image.
+        'front_depth',      # First-person depth image.
+        'world_rgb',        # Third-person RGB image.
+        'world_depth',      # Third-person depth image.
+        'smplx_data',       # SMPL-X body pose.
     ]
 
     task_dir = os.path.join(args.data_folder, args.task_name)
@@ -360,11 +360,11 @@ def main(args):
                 try:
                     all_images = vision_manager.get_all_images()
 
-                    # Front camera (第一人称) - always required
+                    # Front camera (first-person view) - always required
                     data_dict["front_rgb"] = all_images['front']['rgb']
                     data_dict["front_depth"] = all_images['front']['depth']
 
-                    # World camera (第三人称) - optional
+                    # World camera (third-person view) - optional.
                     if 'world' in all_images:
                         data_dict["world_rgb"] = all_images['world']['rgb']
                         data_dict["world_depth"] = all_images['world']['depth']

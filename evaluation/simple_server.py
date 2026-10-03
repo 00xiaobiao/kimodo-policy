@@ -547,7 +547,6 @@ def _add_model_dependency_paths() -> None:
     configured = os.environ.get("KIMODO_MODEL_SITE_PACKAGES", "").strip()
     if configured:
         candidates.append(configured)
-    candidates.append("/data/local-data/data/conda_envs/patch-policy-ddt/lib/python3.10/site-packages")
     for candidate in candidates:
         path = Path(candidate).expanduser()
         if path.is_dir() and str(path) not in sys.path:

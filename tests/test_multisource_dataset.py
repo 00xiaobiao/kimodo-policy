@@ -1030,6 +1030,13 @@ class MultiSourceDatasetTest(unittest.TestCase):
             },
         )
 
+    def test_missing_selected_dataset_root_names_environment_variable(self):
+        with self.assertRaisesRegex(FileNotFoundError, "HUMANOID_ARENA_ROOT"):
+            MultiSourceG1Dataset(
+                dataset_roots={SOURCE_HUMANOID_ARENA: "/path/that/does/not/exist"},
+                dataset_selection={SOURCE_HUMANOID_ARENA: {}},
+            )
+
     def test_explicitly_disabling_every_source_is_an_error(self):
         roots = {
             SOURCE_HUMANOID_ARENA: Path("arena"),

@@ -21,7 +21,7 @@ import numpy as np
 import zmq
 from collections import deque
 import matplotlib
-matplotlib.use('Agg')  # 不显示窗口
+matplotlib.use('Agg')  # Do not display a window
 import matplotlib.pyplot as plt
 
 _HEADER_SIZE = 1280
@@ -56,18 +56,18 @@ def analyze_periodicity(signal, fps=50):
     if len(signal) < 50:
         return None, None
 
-    # 去除均值
+    # Remove the mean
     signal = signal - np.mean(signal)
 
     # FFT
     fft = np.fft.fft(signal)
     freqs = np.fft.fftfreq(len(signal), 1.0/fps)
 
-    # 只看正频率
+    # Use positive frequencies only
     positive_freqs = freqs[:len(freqs)//2]
     positive_fft = np.abs(fft[:len(fft)//2])
 
-    # 找主频率（排除DC分量）
+    # Find the dominant frequency, excluding the DC component
     if len(positive_freqs) > 1:
         main_freq_idx = np.argmax(positive_fft[1:]) + 1
         main_freq = positive_freqs[main_freq_idx]
@@ -79,7 +79,7 @@ def detect_periodic_motion():
     """检测周期性运动"""
     ZMQ_HOST = "localhost"
     ZMQ_PORT = 5556
-    BUFFER_SIZE = 200  # 4秒数据（50Hz）
+    BUFFER_SIZE = 200  # 4 seconds of data (50 Hz)
 
     print("=" * 80)
     print("SONIC周期性运动检测")
@@ -94,16 +94,16 @@ def detect_periodic_motion():
     socket.setsockopt_string(zmq.SUBSCRIBE, "")
     socket.setsockopt(zmq.RCVTIMEO, 1000)
 
-    # 数据缓冲
+    # Data buffers
     smpl_joints_history = deque(maxlen=BUFFER_SIZE)
     body_quat_history = deque(maxlen=BUFFER_SIZE)
     joint_pos_history = deque(maxlen=BUFFER_SIZE)
 
-    # 提取特定关节的历史（右手相关）
+    # Extract history for selected joints related to the right hand
     right_shoulder_pitch_history = deque(maxlen=BUFFER_SIZE)  # joint_pos[12]
     right_elbow_history = deque(maxlen=BUFFER_SIZE)  # joint_pos[22]
 
-    # SMPL右手腕位置历史
+    # SMPL right-wrist position history
     smpl_right_wrist_x_history = deque(maxlen=BUFFER_SIZE)  # smpl_joints[20, 0]
 
     frame_count = 0
@@ -124,33 +124,33 @@ def detect_periodic_motion():
 
             frame_count += 1
 
-            # 提取数据
+            # Extract data
             smpl_joints = data.get("smpl_joints", np.zeros((1, 24, 3)))[-1]  # (24, 3)
             body_quat = data.get("body_quat_w", np.zeros((1, 4)))[-1]  # (4,)
             joint_pos = data.get("joint_pos", np.zeros((1, 29)))[-1]  # (29,)
 
-            # 存入历史
+            # Add data to history
             smpl_joints_history.append(smpl_joints)
             body_quat_history.append(body_quat)
             joint_pos_history.append(joint_pos)
 
-            # 提取关键关节
+            # Extract key joints
             right_shoulder_pitch_history.append(joint_pos[12])
             right_elbow_history.append(joint_pos[22])
-            smpl_right_wrist_x_history.append(smpl_joints[20, 0])  # 右手腕X坐标
+            smpl_right_wrist_x_history.append(smpl_joints[20, 0])  # Right-wrist X coordinate
 
-            # 每秒报告一次
+            # Report once per second
             if frame_count % 50 == 0:
                 elapsed = time.time() - start_time
                 print(f"已采集 {frame_count} 帧 ({elapsed:.1f}秒)")
 
-                # 如果数据足够，进行周期性分析
+                # Analyze periodic motion when enough data is available
                 if len(smpl_right_wrist_x_history) >= 100:
                     print("\n" + "=" * 80)
                     print("周期性分析（最近2秒数据）")
                     print("=" * 80)
 
-                    # 分析SMPL右手腕X坐标
+                    # Analyze the SMPL right-wrist X coordinate
                     signal = np.array(list(smpl_right_wrist_x_history))
                     freq, power = analyze_periodicity(signal)
                     std = np.std(signal)
@@ -167,7 +167,7 @@ def detect_periodic_motion():
                     else:
                         print(f"   ❌ 未检测到明显周期性")
 
-                    # 分析joint_pos右肩pitch
+                    # Analyze the right shoulder pitch in joint_pos
                     signal = np.array(list(right_shoulder_pitch_history))
                     freq, power = analyze_periodicity(signal)
                     std = np.std(signal)
@@ -184,7 +184,7 @@ def detect_periodic_motion():
                     else:
                         print(f"   ❌ 未检测到明显周期性")
 
-                    # 分析joint_pos右肘
+                    # Analyze the right elbow in joint_pos
                     signal = np.array(list(right_elbow_history))
                     freq, power = analyze_periodicity(signal)
                     std = np.std(signal)
@@ -207,30 +207,30 @@ def detect_periodic_motion():
     except KeyboardInterrupt:
         print("\n\n停止采集")
 
-        # 最终分析
+        # Final analysis
         if len(smpl_right_wrist_x_history) >= 50:
             print("\n" + "=" * 80)
             print("最终分析报告")
             print("=" * 80)
 
-            # 绘制时间序列图
+            # Plot the time-series data
             fig, axes = plt.subplots(3, 1, figsize=(12, 8))
 
-            # SMPL右手腕X
+            # SMPL right-wrist X
             signal1 = np.array(list(smpl_right_wrist_x_history))
             axes[0].plot(signal1)
             axes[0].set_title('SMPL Right Wrist X Coordinate')
             axes[0].set_ylabel('Position (m)')
             axes[0].grid(True)
 
-            # G1右肩pitch
+            # G1 right-shoulder pitch
             signal2 = np.array(list(right_shoulder_pitch_history))
             axes[1].plot(signal2)
             axes[1].set_title('G1 Right Shoulder Pitch (joint_pos[12])')
             axes[1].set_ylabel('Angle (rad)')
             axes[1].grid(True)
 
-            # G1右肘
+            # G1 right elbow
             signal3 = np.array(list(right_elbow_history))
             axes[2].plot(signal3)
             axes[2].set_title('G1 Right Elbow (joint_pos[22])')
@@ -242,13 +242,13 @@ def detect_periodic_motion():
             plt.savefig('periodic_motion_analysis.png', dpi=150)
             print("\n📈 时间序列图已保存到: periodic_motion_analysis.png")
 
-            # 数值分析
+            # Numerical analysis
             print(f"\n📊 数值统计:")
             print(f"   SMPL右手腕X: 范围[{signal1.min():.3f}, {signal1.max():.3f}], 标准差={np.std(signal1):.4f}")
             print(f"   G1右肩pitch: 范围[{signal2.min():.3f}, {signal2.max():.3f}], 标准差={np.std(signal2):.4f}")
             print(f"   G1右肘:      范围[{signal3.min():.3f}, {signal3.max():.3f}], 标准差={np.std(signal3):.4f}")
 
-            # 判断
+            # Evaluate
             print(f"\n🔍 诊断结果:")
             smpl_has_variation = np.std(signal1) > 0.01
             g1_shoulder_has_variation = np.std(signal2) > 0.01

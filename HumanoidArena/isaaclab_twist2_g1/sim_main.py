@@ -285,7 +285,7 @@ if args_cli.enable_dex3_dds and args_cli.enable_dex1_dds and args_cli.enable_ins
     sys.exit(1)
 
 
-# import pinocchio  # 注释掉：与 NumPy 2.x 不兼容，且当前未使用
+# import pinocchio  # commented out because it is incompatible with NumPy 2.x and currently unused
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
@@ -1195,8 +1195,8 @@ def main():
     env.action_provider = action_provider
     print(f"[sim_main] Set action_provider on env: {type(action_provider)}")
 
-    # 立即启动录制（在第一次 get_action() 之前）
-    # 这确保从 env.reset() 后就开始捕获所有状态，避免随机序列不同步
+    # Start recording immediately, before the first get_action() call
+    # This captures all states immediately after env.reset() and keeps random sequences synchronized
     if hasattr(action_provider, '_should_start_recording_on_first_call'):
         if action_provider._should_start_recording_on_first_call:
             print("\n" + "="*80)

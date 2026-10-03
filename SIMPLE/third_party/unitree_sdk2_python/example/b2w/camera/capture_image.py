@@ -12,18 +12,18 @@ if __name__ == "__main__":
     else:
         ChannelFactoryInitialize(0)
 
-    # 创建前置相机客户端
+    # Create the front-camera client
     front_client = FrontVideoClient()
     front_client.SetTimeout(3.0)
     front_client.Init()
 
-    # 创建后置相机客户端
+    # Create the rear-camera client
     back_client = BackVideoClient()
     back_client.SetTimeout(3.0)
     back_client.Init()
 
     print("##################Get Front Camera Image###################")
-    # 获取前置相机图像
+    # Get an image from the front camera
     front_code, front_data = front_client.GetImageSample()
 
     if front_code != 0:
@@ -36,7 +36,7 @@ if __name__ == "__main__":
             f.write(bytes(front_data))
 
     print("##################Get Back Camera Image###################")
-    # 获取后置相机图像
+    # Get an image from the rear camera
     back_code, back_data = back_client.GetImageSample()
 
     if back_code != 0:

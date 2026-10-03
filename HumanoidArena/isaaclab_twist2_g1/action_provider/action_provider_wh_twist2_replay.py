@@ -569,7 +569,7 @@ class ReplayActionProvider(ActionProvider):
     #             initial_qvel_tensor = torch.from_numpy(initial_qvel).to(self.env.device, dtype=torch.float32).unsqueeze(0)
     #             full_initial_vel = torch.zeros_like(full_initial_pos)
     #             full_initial_vel[0, self.twist2_action_indices] = initial_qvel_tensor
-    #             print(f"[{self.name}]   ✓ Set joint vel (前5个): {initial_qvel[:5]}")
+    #             print(f"[{self.name}]   ✓ Set joint vel (first five): {initial_qvel[:5]}")
     #         else:
     #             full_initial_vel = torch.zeros_like(full_initial_pos)
     #             print(f"[{self.name}]   ⚠️  No joint vel data, using zeros")
@@ -579,7 +579,7 @@ class ReplayActionProvider(ActionProvider):
     #             position=full_initial_pos,
     #             velocity=full_initial_vel
     #         )
-    #         print(f"[{self.name}]   ✓ Set joint pos (actual, 前5个): {initial_qpos[:5]}")
+    #         print(f"[{self.name}]   ✓ Set joint pos (actual, first five): {initial_qpos[:5]}")
     #     elif self.replay_data_qpos is not None:
     #         # Fallback to target positions if actual positions not available
     #         print(f"[{self.name}]   ⚠️  WARNING: Using target positions (qpos) for initialization - actual positions (qpos_actual) not available")
@@ -596,7 +596,7 @@ class ReplayActionProvider(ActionProvider):
     #             position=full_initial_pos,
     #             velocity=full_initial_vel
     #         )
-    #         print(f"[{self.name}]   ✓ Set joint pos (target, 前5个): {initial_qpos[:5]}")
+    #         print(f"[{self.name}]   ✓ Set joint pos (target, first five): {initial_qpos[:5]}")
     #     else:
     #         print(f"[{self.name}]   ⚠️  WARNING: No joint position data available")
     #

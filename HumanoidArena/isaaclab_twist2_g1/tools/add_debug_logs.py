@@ -15,9 +15,9 @@
 import os
 import sys
 
-# 要插入的调试代码片段
+# Debug code snippets to insert
 DEBUG_SNIPPETS = {
-    # 在_fetch_zmq_pose()函数中，接收到smpl_joints后
+    # After receiving smpl_joints in _fetch_zmq_pose()
     "after_smpl_joints_received": '''
         # [DEBUG] 检查SMPL joints的变化
         if hasattr(self, '_prev_smpl_joints_frame'):
@@ -26,7 +26,7 @@ DEBUG_SNIPPETS = {
         self._prev_smpl_joints_frame = frame.copy()
 ''',
 
-    # 在_run_gear_sonic()函数中，构建encoder输入后
+    # After building the encoder input in _run_gear_sonic()
     "after_encoder_input_built": '''
         # [DEBUG] 检查encoder输入的变化
         if hasattr(self, '_prev_encoder_input'):
@@ -38,7 +38,7 @@ DEBUG_SNIPPETS = {
         self._prev_encoder_input = encoder_input.copy()
 ''',
 
-    # 在encoder推理后
+    # After encoder inference
     "after_encoder_inference": '''
         # [DEBUG] 检查latent的变化
         if hasattr(self, '_prev_latent'):
@@ -47,7 +47,7 @@ DEBUG_SNIPPETS = {
         self._prev_latent = latent.copy()
 ''',
 
-    # 在decoder推理后
+    # After decoder inference
     "after_decoder_inference": '''
         # [DEBUG] 检查action的变化
         if hasattr(self, '_prev_action_raw'):
@@ -61,7 +61,7 @@ DEBUG_SNIPPETS = {
         print(f"[DEBUG_ROBOT] joint_vel前5维: {self._robot_joint_vel_hist[-1, :5]}")
 ''',
 
-    # 在最终输出前
+    # Before the final output
     "before_final_output": '''
         # [DEBUG] 检查最终targets的变化
         if hasattr(self, '_prev_sonic_targets'):
@@ -82,42 +82,42 @@ def add_debug_logs():
         print(f"   请确保在tools/目录下运行此脚本")
         return
 
-    # 读取文件
+    # Read the file
     with open(file_path, 'r', encoding='utf-8') as f:
         lines = f.readlines()
 
-    # 查找插入位置并插入调试代码
+    # Find insertion points and add debug code
     insertions = []
 
-    # 1. 在smpl_joints接收后（约638行）
+    # 1. After receiving smpl_joints (around line 638)
     for i, line in enumerate(lines):
         if 'self._smpl_joints_buf[-1] = frame' in line:
             insertions.append((i+1, DEBUG_SNIPPETS["after_smpl_joints_received"]))
             print(f"✓ 找到插入点1: 第{i+1}行 (SMPL joints接收后)")
             break
 
-    # 2. 在encoder输入构建后（约874行）
+    # 2. After building the encoder input (around line 874)
     for i, line in enumerate(lines):
         if 'print(f"[SONIC] Encoder input shape: {encoder_input.shape}' in line:
             insertions.append((i+1, DEBUG_SNIPPETS["after_encoder_input_built"]))
             print(f"✓ 找到插入点2: 第{i+1}行 (Encoder输入构建后)")
             break
 
-    # 3. 在encoder推理后（约930行）
+    # 3. After encoder inference(around line 930)
     for i, line in enumerate(lines):
         if 'print(f"[SONIC] ✓ Encoder output latent shape: {latent.shape}")' in line:
             insertions.append((i+1, DEBUG_SNIPPETS["after_encoder_inference"]))
             print(f"✓ 找到插入点3: 第{i+1}行 (Encoder推理后)")
             break
 
-    # 4. 在decoder推理后（约960行）
+    # 4. After decoder inference(around line 960)
     for i, line in enumerate(lines):
         if 'print(f"[SONIC] ✓ Decoder output action shape: {action_raw.shape}")' in line:
             insertions.append((i+1, DEBUG_SNIPPETS["after_decoder_inference"]))
             print(f"✓ 找到插入点4: 第{i+1}行 (Decoder推理后)")
             break
 
-    # 5. 在最终输出前（约1000行）
+    # 5. Before the final output(around line 1000)
     for i, line in enumerate(lines):
         if 'sonic_targets = SONIC_DEFAULT_POS + action_scaled' in line:
             insertions.append((i+1, DEBUG_SNIPPETS["before_final_output"]))
@@ -129,13 +129,13 @@ def add_debug_logs():
         print(f"   文件可能已被修改，请检查")
         return
 
-    # 按行号倒序插入（避免行号偏移）
+    # Insert in descending line-number order to avoid shifting later locations
     insertions.sort(reverse=True)
 
     for line_num, code in insertions:
         lines.insert(line_num, code + '\n')
 
-    # 写回文件
+    # Write the file
     output_path = file_path + ".debug"
     with open(output_path, 'w', encoding='utf-8') as f:
         f.writelines(lines)

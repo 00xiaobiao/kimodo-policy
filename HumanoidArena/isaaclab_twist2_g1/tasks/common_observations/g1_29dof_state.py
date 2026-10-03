@@ -191,11 +191,11 @@ def get_gravity_quaternion_from_root_state(env: ManagerBasedRLEnv):
     pose = env.scene["robot"].data.body_link_pose_w  # [num_links, 7] (pos + quat)
     vel = env.scene["robot"].data.body_link_vel_w    # [num_links, 6] (lin_vel + ang_vel)
 
-    # 取出IMU位置+旋转
+    # Extract IMU position and rotation
     pelvis_pose = pose[:, imu_pelvis_idx, :]  # [B, 7]
     torso_pose = pose[:, imu_torso_idx, :]
 
-    # 取出IMU线速度+角速度
+    # Extract IMU linear and angular velocity
     pelvis_vel = vel[:, imu_pelvis_idx, :]    # [B, 6]
     torso_vel = vel[:, imu_torso_idx, :]
     return pelvis_pose, pelvis_vel, torso_pose, torso_vel

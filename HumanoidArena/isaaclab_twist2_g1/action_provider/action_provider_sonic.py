@@ -110,7 +110,7 @@ except ImportError:
     print("[SonicActionProvider] WARNING: onnxruntime not found.")
 
 # ---------------------------------------------------------------------------
-# ZMQ pose 消息解析（Protocol v3，1280-byte JSON header + binary payload）
+        # Parse ZMQ pose messages (Protocol v3: 1280-byte JSON header + binary payload).
 # ---------------------------------------------------------------------------
 _HEADER_SIZE = 1280
 project_root = os.environ.get("PROJECT_ROOT")
@@ -164,18 +164,18 @@ def quat_to_rotation_6d(quat: np.ndarray) -> np.ndarray:
     """
     w, x, y, z = quat[..., 0], quat[..., 1], quat[..., 2], quat[..., 3]
 
-    # 四元数转旋转矩阵（前2列）
-    # 第0列
+    # Convert a quaternion to a rotation matrix (first two columns)
+    # Column 0
     r00 = 1 - 2*(y*y + z*z)
     r10 = 2*(x*y + w*z)
     r20 = 2*(x*z - w*y)
 
-    # 第1列
+    # Column 1
     r01 = 2*(x*y - w*z)
     r11 = 1 - 2*(x*x + z*z)
     r21 = 2*(y*z + w*x)
 
-    # 按行展开：[第0行的前2列, 第1行的前2列, 第2行的前2列]
+        # Flatten by row: [the first two columns of rows 0, 1, and 2].
     rot6d = np.stack([r00, r01, r10, r11, r20, r21], axis=-1)
 
     return rot6d.astype(np.float32)
@@ -699,9 +699,9 @@ def _pico_single_frame_from_body_poses(
 
 
 # ---------------------------------------------------------------------------
-# SONIC 关节顺序（SONIC IsaacLab order，对应 GR00T 部署代码中的 IsaacLab order）
-# 注意：SONIC encoder/decoder 输入输出都是这个顺序，不需要转换
-# 这个顺序对应 TWIST2 的 old_action_joints_names
+# SONIC joint order(SONIC IsaacLab order, matching the GR00T deployment code)
+# The SONIC encoder and decoder use this order for inputs and outputs, so no conversion is needed
+# This order matches TWIST2 old_action_joints_names
 # ---------------------------------------------------------------------------
 SONIC_ISAACLAB_JOINT_ORDER = [
     "left_hip_pitch_joint",
@@ -735,9 +735,9 @@ SONIC_ISAACLAB_JOINT_ORDER = [
     "right_wrist_yaw_joint",
 ]
 
-# SONIC 默认站立姿态（按 SONIC IsaacLab order）
-# 参考 GR00T policy_parameters.hpp 中的 default_angles（MuJoCo order）
-# 已转换为 SONIC IsaacLab order
+# SONIC default standing pose(SONIC IsaacLab order)
+# Based on default_angles in GR00T policy_parameters.hpp (MuJoCo order)
+# Converted to SONIC IsaacLab order
 SONIC_DEFAULT_POS = np.array([
     -0.312,  # left_hip_pitch_joint
     -0.312,  # right_hip_pitch_joint
@@ -770,10 +770,10 @@ SONIC_DEFAULT_POS = np.array([
     0.0,     # right_wrist_yaw_joint
 ], dtype=np.float32)
 
-# SONIC 动作缩放系数（按 SONIC IsaacLab order）
-# 参考 GR00T policy_parameters.hpp 中的 g1_action_scale（MuJoCo order）
-# 已转换为 SONIC IsaacLab order
-# 公式: action_scale = 0.25 * effort_limit / stiffness
+# SONIC action scale(SONIC IsaacLab order)
+# Based on g1_action_scale in GR00T policy_parameters.hpp (MuJoCo order)
+# Converted to SONIC IsaacLab order
+# Formula: action_scale = 0.25 * effort_limit / stiffness
 G1_ACTION_SCALE_ISAACLAB = np.array([
     0.3506614566,  # 0: left_hip_pitch_joint
     0.3506614566,  # 1: right_hip_pitch_joint
@@ -886,7 +886,7 @@ SONIC_EFFORT_LIMIT = np.array([
     25.0, 25.0, 5.0, 5.0, 5.0, 5.0,
 ], dtype=np.float32)
 
-# SMPL 参数维度
+# SMPL parameter dimensions
 _N_SMPL_JOINTS = 24   # smpl_joints: (N, 24, 3)
 _N_SMPL_POSES  = 21   # smpl_pose:   (N, 21, 3)
 _STEP1_FRAMES = 10
@@ -1483,12 +1483,12 @@ class SonicActionProvider(ActionProvider):
         self.device = env.device
         self.task_name = getattr(args_cli, "task", "sonic")
 
-        # Debug/perf knobs (默认关闭高频打印，否则会把控制环拖到个位数 Hz)
-        # - SONIC_DEBUG=1: 打开详细日志
-        # - SONIC_LOG_EVERY=50: 每 N 帧打印一次（仍会在前几帧打印）
+        # Debug/perf knobs (Disabled by default; frequent logging can reduce the control loop to single-digit Hz)
+        # - SONIC_DEBUG=1: Enable verbose logging
+        # - SONIC_LOG_EVERY=50: Log every N frames, including the first few frames
         self._sonic_debug = bool(int(os.environ.get("SONIC_DEBUG", "0") or "0"))
         self._sonic_log_every = int(os.environ.get("SONIC_LOG_EVERY", "50") or 50)
-        # 也允许通过 CLI 参数覆盖（若 sim_main.py 透传了这些字段）
+        # These values can also be overridden with CLI arguments if sim_main.py forwards them
         self._sonic_debug = bool(getattr(args_cli, "sonic_debug", self._sonic_debug))
         self._sonic_log_every = int(getattr(args_cli, "sonic_log_every", self._sonic_log_every))
         self._enable_rtf_monitor = getattr(args_cli, "enable_rtf_monitor", False)
@@ -1709,7 +1709,7 @@ class SonicActionProvider(ActionProvider):
         self._latest_executed_source_control_step = -1
         self._last_raw_frame_index = -1
         self._command_edge_this_frame = "none"
-        # self._sonic_warmup_steps = int(getattr(args_cli, "sonic_warmup_steps", 50))  # warmup 已注释，仅用 history_ready
+        # self._sonic_warmup_steps = int(getattr(args_cli, "sonic_warmup_steps", 50))  # warmup is commented out; only history_ready is used
         self._sonic_warmup_steps = 0
         self._sonic_smooth_steps = int(getattr(args_cli, "sonic_smooth_steps", 20))
         raw_output_delay_steps = getattr(
@@ -1804,20 +1804,20 @@ class SonicActionProvider(ActionProvider):
         all_names = list(self.env.scene["robot"].data.joint_names)
         idx_map = {n: i for i, n in enumerate(all_names)}
 
-        # 使用 SONIC IsaacLab 关节顺序
+        # Use the SONIC IsaacLab joint order
         missing = [n for n in SONIC_ISAACLAB_JOINT_ORDER if n not in idx_map]
         if missing:
             raise ValueError(f"[SonicActionProvider] joints missing: {missing}")
 
-        # SONIC IsaacLab 关节索引（用于读取/写入 Isaac Lab）
+        # SONIC IsaacLab joint indices for reading from and writing to Isaac Lab
         self._sonic_idx = torch.tensor(
             [idx_map[n] for n in SONIC_ISAACLAB_JOINT_ORDER],
             dtype=torch.long, device=self.device)
 
-        # 默认姿态（Isaac Lab 完整关节）
+        # Default pose for all Isaac Lab joints
         self._default_pos = self.env.scene["robot"].data.default_joint_pos.clone()
 
-        # 调试：打印默认姿态
+        # Debug: print the default pose
         print(f"\n[DEBUG] Isaac Lab default_joint_pos (full):")
         default_sonic = self._default_pos[0, self._sonic_idx].cpu().numpy()
         print(f"  left_shoulder_pitch (idx 11): {default_sonic[11]:.3f}")
@@ -1828,7 +1828,7 @@ class SonicActionProvider(ActionProvider):
         print(f"  right_elbow (idx 22): {default_sonic[22]:.3f}")
         self._init_sonic_target_np = default_sonic.astype(np.float32).copy()
 
-        # SONIC 默认姿态（SONIC IsaacLab order）
+# SONIC default pose (SONIC IsaacLab order).
         self._sonic_default_np = SONIC_DEFAULT_POS.copy()
 
         if self.enable_dex3:
@@ -2639,7 +2639,7 @@ class SonicActionProvider(ActionProvider):
         return self._run_gear_sonic()
 
     def _setup_buffers(self):
-        # SMPL 历史帧缓冲（encoder 需要 10 帧）
+        # SMPL history buffer; the encoder needs 10 frames
         self._smpl_joints_buf = np.zeros(
             (_STEP1_FRAMES, _N_SMPL_JOINTS, 3), dtype=np.float32)   # (10, 24, 3)
         self._smpl_pose_buf   = np.zeros(
@@ -2655,12 +2655,12 @@ class SonicActionProvider(ActionProvider):
         )
         self._ref_window_valid = False
 
-        # 机器人状态历史缓冲（SONIC IsaacLab order）
-        # 用于 encoder 输入（step5 采样）和 decoder 输入（step1 连续10帧）
+        # Robot state history buffer (SONIC IsaacLab order)
+        # Used for encoder input (step 5 sampling) and decoder input (10 consecutive frames at step 1)
         self._robot_joint_pos_hist = np.zeros((_STEP1_FRAMES, 29), dtype=np.float32)
         self._robot_joint_vel_hist = np.zeros((_STEP1_FRAMES, 29), dtype=np.float32)
 
-        # 参考 motion 历史缓冲（来自 ZMQ replay/reference，而不是当前仿真机器人）
+        # Reference motion history buffer from ZMQ replay/reference, not the simulated robot
         self._motion_joint_pos_hist = np.tile(
             self._sonic_default_np[np.newaxis], (_STEP5_HISTORY_LEN, 1)
         )
@@ -2670,7 +2670,7 @@ class SonicActionProvider(ActionProvider):
             np.array([1., 0., 0., 1., 0., 0.], dtype=np.float32), (_STEP5_HISTORY_LEN, 1)
         )
 
-        # Decoder 需要的额外历史缓冲
+        # Additional history buffer required by the decoder
         # his_base_angular_velocity_10frame_step1: (10, 3)
         self._ang_vel_hist    = np.zeros((_STEP1_FRAMES, 3),  dtype=np.float32)
         # his_gravity_dir_10frame_step1: (10, 3)
@@ -2679,23 +2679,23 @@ class SonicActionProvider(ActionProvider):
         self._last_action_hist = np.tile(
             self._sonic_default_np[np.newaxis], (_STEP1_FRAMES, 1))  # (10, 29)
 
-        # 手部关节目标
+        # Hand joint targets
         self._left_hand_target  = np.zeros(7, dtype=np.float32)
         self._right_hand_target = np.zeros(7, dtype=np.float32)
         self._left_hand_binary_state = False
         self._right_hand_binary_state = False
         self._vla_semantic_history_fill = 0
 
-        # VR 3点姿态缓冲（来自 SMPL，用于 encoder 输入）
+        # VR three-point pose buffer from SMPL, used as encoder input
         # vr_position: (9,) - 3 points × 3D position [L-Wrist, R-Wrist, Neck]
         # vr_orientation: (12,) - 3 points × 4D quat wxyz
         self._vr_3pt_position = np.zeros(9, dtype=np.float32)
         self._vr_3pt_orientation = np.zeros(12, dtype=np.float32)
 
-        # encoder 输出的 latent（首次推理前为零）
+        # Encoder latent output, zero before the first inference
         self._latent = None
 
-        # SMPL数据有效性标志（用于检测是否接收到有效的遥操数据）
+        # SMPL data validity flag for checking whether valid teleoperation data has arrived
         self._smpl_data_valid = False
         self._frame_count = 0
         self._smpl_history_fill = 0
@@ -3391,7 +3391,7 @@ class SonicActionProvider(ActionProvider):
             "source_control_step": -1,
         }
         self._last_raw_frame_index = -1
-        # print(f"[SONIC] on_env_reset: frame_count reset, warmup={self._sonic_warmup_steps}")  # warmup 已注释
+        # print(f"[SONIC] on_env_reset: frame_count reset, warmup={self._sonic_warmup_steps}")  # warmup is commented out
         print(f"[SONIC] on_env_reset: frame_count and history reset")
 
     def on_env_objects_reset(self):
@@ -4177,7 +4177,7 @@ class SonicActionProvider(ActionProvider):
         self._smpl_history_fill = _STEP1_FRAMES
 
     # ------------------------------------------------------------------
-    # Per-step: 读取 POSE（ZMQ 或 Redis）
+    # Per step: read POSE (ZMQ or Redis)
     # ------------------------------------------------------------------
 
     def _fetch_zmq_pose(self):
@@ -4385,7 +4385,7 @@ class SonicActionProvider(ActionProvider):
             self._smpl_ts_history.append(current_ts)
             if len(self._smpl_ts_history) > 10:
                 self._smpl_ts_history.pop(0)
-            # 每 25 帧打印一次时间间隔
+            # Log the interval every 25 frames
             if debug_log and len(self._smpl_ts_history) >= 2:
                 intervals = [
                     (self._smpl_ts_history[i] - self._smpl_ts_history[i - 1]) * 1000
@@ -4454,7 +4454,7 @@ class SonicActionProvider(ActionProvider):
         ref_quat_wxyz = None
         aligned_ref_quat_wxyz = None
 
-        # smpl_joints: (N, 24, 3) - 本地 provider 采用最新帧滚动历史
+        # smpl_joints: (N, 24, 3) - The local provider rolls history forward with the latest frame
         if "smpl_joints" in data:
             sj = data["smpl_joints"].astype(np.float32)  # (N, 24, 3)
             raw_smpl_joints_window = sj if sj.ndim > 2 else sj[np.newaxis, ...]
@@ -4473,7 +4473,7 @@ class SonicActionProvider(ActionProvider):
                     self._ref_window_valid = True
             got_pose_frame = True
 
-        # smpl_pose: (N, 21, 3) - 本地 provider 采用最新帧滚动历史
+        # smpl_pose: (N, 21, 3) - The local provider rolls history forward with the latest frame
         if "smpl_pose" in data:
             sp = data["smpl_pose"].astype(np.float32)    # (N, 21, 3)
             frame = sp[-1] if sp.ndim > 2 else sp
@@ -4482,10 +4482,10 @@ class SonicActionProvider(ActionProvider):
                 self._smpl_pose_buf = np.roll(self._smpl_pose_buf, -1, axis=0)
                 self._smpl_pose_buf[-1] = frame
 
-        # body_quat_w: (N, 4) → 转换为6D旋转表示
-        # 本地 provider 采用最新参考帧滚动历史；直接覆盖整窗会破坏本地时间基准
-        # motion_anchor_orientation 是机器人局部坐标系下的相对旋转
-        # 公式: base_to_ref = base^(-1) * ref
+        # body_quat_w: (N, 4) → Convert to a 6D rotation representation
+        # The local provider rolls history forward with the latest reference frame; replacing the full window would break its local time basis
+        # motion_anchor_orientation is a relative rotation in the robot local frame
+        # Formula: base_to_ref = inverse(base) * ref
         if "body_quat_w" in data:
             bq = data["body_quat_w"].astype(np.float32)  # (N, 4) wxyz
             raw_body_quat_window = bq if bq.ndim > 1 else bq[np.newaxis, ...]
@@ -4494,7 +4494,7 @@ class SonicActionProvider(ActionProvider):
                 print(f"[{tag}] body_quat_w shape: {bq.shape}, latest: {ref_quat_wxyz}")
             got_pose_frame = True
 
-            # 获取机器人当前朝向（从Isaac Lab）
+            # Get the current robot orientation from Isaac Lab
             robot = self.env.scene["robot"].data
             base_quat_wxyz = robot.root_state_w[0, 3:7].cpu().numpy().astype(np.float32)  # [w,x,y,z]
 
@@ -4616,7 +4616,7 @@ class SonicActionProvider(ActionProvider):
                     f"smpl_valid={self._smpl_data_valid}"
                 )
 
-        # 机器人关节状态（来自 ZMQ，用于 obs 构建）
+        # Robot joint states from ZMQ, used to build observations
         if "joint_pos" in data:
             jp = data["joint_pos"].astype(np.float32)
             raw_joint_pos_window = jp if jp.ndim > 1 else jp[np.newaxis, ...]
@@ -4680,7 +4680,7 @@ class SonicActionProvider(ActionProvider):
                     for key, value in payload.items()
                 }
 
-        # 手部关节
+        # Hand joints
         if "left_hand_joints" in data and consume_pose_frame:
             lh = data["left_hand_joints"].flatten().astype(np.float32)
             self._left_hand_target[:len(lh)] = lh[:7]
@@ -4688,7 +4688,7 @@ class SonicActionProvider(ActionProvider):
             rh = data["right_hand_joints"].flatten().astype(np.float32)
             self._right_hand_target[:len(rh)] = rh[:7]
 
-        # VR 3点姿态（来自 SMPL，用于 encoder 输入）
+        # VR three-point pose from SMPL, used as encoder input
         if "vr_position" in data and consume_pose_frame:
             vr_pos = data["vr_position"].astype(np.float32)  # (9,)
             self._vr_3pt_position = vr_pos.flatten()
@@ -4951,7 +4951,7 @@ class SonicActionProvider(ActionProvider):
         self._apply_pose_data(data, "redis_joint29")
 
     # ------------------------------------------------------------------
-    # GEAR-SONIC encoder + decoder 推理
+    # Run GEAR-SONIC encoder and decoder inference
     # ------------------------------------------------------------------
 
     def _run_gear_sonic(self) -> np.ndarray:
@@ -5014,13 +5014,13 @@ class SonicActionProvider(ActionProvider):
 
         try:
             t0 = time.perf_counter()
-            # 从Isaac Lab读取当前机器人状态
+            # Read the current robot state from Isaac Lab
             robot = self.env.scene["robot"].data
             joint_pos_sonic = robot.joint_pos[0, self._sonic_idx].cpu().numpy()  # (29,)
             joint_vel_sonic = robot.joint_vel[0, self._sonic_idx].cpu().numpy()  # (29,)
             joint_pos_sonic = joint_pos_sonic - self._sonic_default_np
 
-            # 更新历史缓冲区
+            # Update the history buffers
             self._robot_joint_pos_hist = np.roll(self._robot_joint_pos_hist, -1, axis=0)
             self._robot_joint_pos_hist[-1] = joint_pos_sonic
             self._robot_joint_vel_hist = np.roll(self._robot_joint_vel_hist, -1, axis=0)
@@ -5125,7 +5125,7 @@ class SonicActionProvider(ActionProvider):
                 motion_wrist_pos = wrist_window.reshape(-1)
                 reference_joint_window = None
 
-            # 拼接所有观察值
+            # Concatenate all observations
             encoder_input = np.concatenate([
                 encoder_mode,                           # 4
                 motion_joint_pos_step5_full,            # 290
@@ -5187,7 +5187,7 @@ class SonicActionProvider(ActionProvider):
                         f"to match C++ implementation"
                     )
 
-            # Encoder推理
+            # Run encoder inference
             enc_inputs = {
                 self._encoder.get_inputs()[0].name: encoder_input
             }
@@ -5199,21 +5199,21 @@ class SonicActionProvider(ActionProvider):
                 print(f"[SONIC] ✓ Encoder output latent shape: {latent.shape}")
                 print(f"[SONIC] Latent range: [{latent.min():.4f}, {latent.max():.4f}]")
 
-            # Decoder 输入：994维 policy observation 向量
+            # Decoder input: 994D policy observation vector
             # = token_state(64) + ang_vel_hist(30) + joint_pos_hist(290)
             #   + joint_vel_hist(290) + last_action_hist(290) + grav_dir_hist(30)
             ang_vel = robot.root_ang_vel_b[0].cpu().numpy()    # (3,)
             base_quat_wxyz = robot.root_state_w[0, 3:7].cpu().numpy().astype(np.float32)
             proj_grav = gravity_dir_from_base_quat_wxyz(base_quat_wxyz)
 
-            # 更新 decoder 历史缓冲区
+            # Update the decoder history buffer
             self._ang_vel_hist   = np.roll(self._ang_vel_hist,   -1, axis=0)
             self._ang_vel_hist[-1] = ang_vel
             self._grav_dir_hist  = np.roll(self._grav_dir_hist,  -1, axis=0)
             self._grav_dir_hist[-1] = proj_grav
             # NOTE: last_action_hist will be updated AFTER decoder inference with raw action
 
-            # 构建 994 维 decoder 输入
+            # Build the 994D decoder input
             dec_obs = np.concatenate([
                 latent.flatten(),                          # token_state: 64
                 self._ang_vel_hist.flatten(),              # his_base_angular_velocity
@@ -5241,13 +5241,13 @@ class SonicActionProvider(ActionProvider):
             if do_log:
                 print(f"[SONIC] Raw sonic range (after clip): [{raw_sonic.min():.4f}, {raw_sonic.max():.4f}]")
 
-            # deploy 记录的是 policy 原始输出，不做本地 clip；同时它出现在下一拍历史里。
-            # 本地这里保持相同相位，但写入 unclipped raw action 以匹配 C++。
+            # The deployed policy records raw outputs without local clipping; these values also appear in the next history window.
+            # Keep the same phase locally and store the unclipped raw action to match C++.
             self._last_action_hist = np.roll(self._last_action_hist, -1, axis=0)
             self._last_action_hist[-1] = raw_sonic_unclipped
 
-            # 后处理：per-joint action_scale + default（SONIC IsaacLab order）
-            # 参考 GR00T g1_deploy_onnx_ref.cpp:2824
+            # Post-process with per-joint action_scale and default pose (SONIC IsaacLab order)
+            # See GR00T g1_deploy_onnx_ref.cpp:2824
             # target = action * action_scale + default_angle
             target_sonic = raw_sonic * G1_ACTION_SCALE_ISAACLAB + self._sonic_default_np
             self._latest_decoder_target = target_sonic.astype(np.float32, copy=True)
@@ -5411,7 +5411,7 @@ class SonicActionProvider(ActionProvider):
                 self._rtf_wall_time_start = time.perf_counter()
                 self._rtf_sim_time_start = env.sim.current_time
 
-            # 1. 读取 POSE（ZMQ 或 Redis）
+            # 1. Read POSE (ZMQ or Redis)
             t_step0 = time.perf_counter()
             t_fetch0 = time.perf_counter()
             if self._replay_enabled:
@@ -5478,7 +5478,7 @@ class SonicActionProvider(ActionProvider):
                 # print(f"[SONIC_29_QPOS_RANGE] min={sonic_targets.min():.6f}, max={sonic_targets.max():.6f}")
                 # print("=" * 120)
 
-            # 3. 构建完整 Isaac 动作
+            # 3. Build the complete Isaac action
             full_action = self._default_pos.clone().squeeze(0)
             sonic_t = torch.tensor(sonic_targets, dtype=torch.float32, device=self.device)
             full_action.index_copy_(0, self._sonic_idx, sonic_t)
@@ -5490,7 +5490,7 @@ class SonicActionProvider(ActionProvider):
                 else np.zeros((29,), dtype=np.float32)
             )
 
-            # 4. 手部关节
+            # 4. Hand joints
             self._apply_hand_targets(full_action)
             if use_body_effort:
                 self._ensure_effort_mode_runtime_config(env)
@@ -5515,7 +5515,7 @@ class SonicActionProvider(ActionProvider):
             if self._recording_enabled_for_current_mode():
                 self._update_recording_display_state()
 
-            # 5. 步进仿真（decimation）
+            # 5. Step the simulation (decimation)
             t_sim0 = time.perf_counter()
             for _ in range(self._decimation):
                 if self.enable_dex3:
@@ -5705,7 +5705,7 @@ class SonicActionProvider(ActionProvider):
                     return
             except Exception:
                 pass
-        # fallback: ZMQ 手部数据
+        # fallback: ZMQ hand data
         if hasattr(self, "_left_hand_idx") and self._left_hand_idx.numel() > 0:
             full_action.index_copy_(
                 0, self._left_hand_idx,

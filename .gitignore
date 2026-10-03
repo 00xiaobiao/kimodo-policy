@@ -13,6 +13,7 @@
 /SIMPLE/.uv-python/
 
 # Local caches and generated artifacts
+/draw/
 __pycache__/
 *.py[cod]
 .pytest_cache/

@@ -11,7 +11,7 @@ PYTHON_BIN="python"
 REPLAY_FILE="/home/dreams/Users/taowen/HumanoidArena/isaaclab_twist2_g1/recording_data/HOI_double_desk/twist2/zz/Isaac-Move-PickPlace-DoubleDesk-G129-Dex3-Wholebody_1776343243956570.npz"
 REPLAY_MODE="direct"   # inference | direct
 REPLAY_LOOP=0             # 1 | 0
-TASK_NAME=""              # 留空则从 replay 文件读取
+TASK_NAME=""              # leave empty to read the value from the replay file
 ENV_CONFIG_YAML="${ENV_CONFIG_YAML:-tasks/common_env_config/doubledesk_twist2.yaml}"
 RUN_DEVICE="cpu"
 ROBOT_TYPE="g129"
@@ -118,13 +118,13 @@ fi
 
 exec "${cmd[@]}"
 
-# 可切换：
-#一般沙袋: tasks/common_env_config/boxing_bag_twist2.yaml
-#吊挂沙袋: tasks/common_env_config/boxing_bag_hanging_twist2.yaml
-#足球: tasks/common_env_config/football_twist2.yaml
-#单足球: tasks/common_env_config/football_single_twist2.yaml
-#双桌面拾放: tasks/common_env_config/doubledesk_twist2.yaml
-#Push-T: tasks/common_env_config/push_t_twist2.yaml
-#三级台阶平台：tasks/common_env_config/three_step_platform_twist2.yaml
-#开门：tasks/common_env_config/opendoor_twist2.yaml
-#小推车：tasks/common_env_config/pickplace_small_trolley_twist2.yaml
+# Available task configurations:
+# Single football: tasks/common_env_config/boxing_bag_twist2.yaml
+# Single football: tasks/common_env_config/boxing_bag_hanging_twist2.yaml
+# Single football: tasks/common_env_config/football_twist2.yaml
+# Single football: tasks/common_env_config/football_single_twist2.yaml
+# Single football: tasks/common_env_config/doubledesk_twist2.yaml
+# Single football: tasks/common_env_config/push_t_twist2.yaml
+# Three-step platform: tasks/common_env_config/three_step_platform_twist2.yaml
+# Door opening: tasks/common_env_config/opendoor_twist2.yaml
+# Small trolley: tasks/common_env_config/pickplace_small_trolley_twist2.yaml

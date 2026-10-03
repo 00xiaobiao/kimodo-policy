@@ -11,7 +11,7 @@ main:
   dtype: "bf16"
 
   dataset_roots:
-    RealWorld: "${oc.env:REAL_WORLD_ROOT,/data/local-data/data/code/yunhengwang/kimodo-polocy/controlnet_v1.2/real-world}"
+    RealWorld: "${oc.env:REAL_WORLD_ROOT,real-world}"
 
   dataset_selection:
     RealWorld:

@@ -2,7 +2,7 @@ import json, time
 import xrobotoolkit_sdk as xrt
 from datetime import datetime
 
-xrt.init()  # 建链、启动心跳与服务端反馈流
+xrt.init()  # Connect, start the heartbeat, and receive server feedback
 
 dev_id = "TestDevice"  # your device ID in unity app
 

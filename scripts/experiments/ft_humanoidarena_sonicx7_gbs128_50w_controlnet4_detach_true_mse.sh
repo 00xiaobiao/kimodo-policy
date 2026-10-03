@@ -22,6 +22,9 @@ if [[ ! -f "${CONFIG_PATH}" ]]; then
   echo "Training config does not exist: ${CONFIG_PATH}" >&2
   exit 2
 fi
+if [[ "${CONFIG_PATH}" != /* ]]; then
+  CONFIG_PATH="${PWD}/${CONFIG_PATH}"
+fi
 
 if [[ -z "${INIT_CHECKPOINT}" ]]; then
   echo "Usage: bash $0 /path/to/pretrain/checkpoint_STEP" >&2
@@ -31,6 +34,9 @@ fi
 if [[ ! -f "${INIT_CHECKPOINT}/training_state.pt" || ! -f "${INIT_CHECKPOINT}/config.json" ]]; then
   echo "Initialization checkpoint is incomplete: ${INIT_CHECKPOINT}" >&2
   exit 2
+fi
+if [[ "${INIT_CHECKPOINT}" != /* ]]; then
+  INIT_CHECKPOINT="$(cd -- "${INIT_CHECKPOINT}" && pwd)"
 fi
 
 IFS=',' read -r -a GPU_IDS <<< "${GPU_LIST}"

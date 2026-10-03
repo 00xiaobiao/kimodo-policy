@@ -108,7 +108,7 @@ class IsaacLabVisionClient:
 
             # Front camera (head)
             front_rgb = images['head']
-            # IsaacLab 使用 BGR 格式，需要转换为 RGB
+            # IsaacLab uses BGR, so convert the image to RGB
             front_rgb = cv2.cvtColor(front_rgb, cv2.COLOR_BGR2RGB)
 
             # Get real depth data from IsaacLab (distance_to_image_plane)
@@ -117,7 +117,7 @@ class IsaacLabVisionClient:
                 print("[IsaacLabVisionClient] Warning: No depth data for front camera, using placeholder")
                 front_depth = np.zeros((front_rgb.shape[0], front_rgb.shape[1]), dtype=np.float32)
 
-            # 调整尺寸到目标尺寸 (360, 640)
+            # Resize to the target dimensions (360, 640)
             if front_rgb.shape[0] != 360 or front_rgb.shape[1] != 640:
                 front_rgb = cv2.resize(front_rgb, (640, 360))
                 front_depth = cv2.resize(front_depth, (640, 360))
@@ -138,7 +138,7 @@ class IsaacLabVisionClient:
                     print("[IsaacLabVisionClient] Warning: No depth data for world camera, using placeholder")
                     world_depth = np.zeros((world_rgb.shape[0], world_rgb.shape[1]), dtype=np.float32)
 
-                # 调整尺寸
+                # Resize the image
                 if world_rgb.shape[0] != 360 or world_rgb.shape[1] != 640:
                     world_rgb = cv2.resize(world_rgb, (640, 360))
                     world_depth = cv2.resize(world_depth, (640, 360))

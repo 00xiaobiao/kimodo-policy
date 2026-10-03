@@ -21,11 +21,11 @@ class JointPositionTracker:
         self.num_joints = num_joints
         self.window_size = window_size
 
-        # 数据缓冲区
+        # Data buffers
         self.errors = [deque(maxlen=window_size) for _ in range(num_joints)]
         self.timestamps = deque(maxlen=window_size)
 
-        # 关节名称（G1 29DOF）
+        # Joint names (G1 29 DOF)
         self.joint_names = [
             # Legs (12)
             "L_hip_pitch", "L_hip_roll", "L_hip_yaw", "L_knee", "L_ankle_pitch", "L_ankle_roll",
@@ -39,16 +39,16 @@ class JointPositionTracker:
             "R_wrist_roll", "R_wrist_pitch", "R_wrist_yaw",
         ]
 
-        # 统计信息
+        # Statistics
         self.max_error = np.zeros(num_joints)
         self.mean_error = np.zeros(num_joints)
         self.current_error = np.zeros(num_joints)
 
-        # 最近的目标和当前位置
+        # Latest target and current positions
         self.last_target = None
         self.last_current = None
 
-        # 更新计数
+        # Update count
         self.update_count = 0
 
     def update_data(self, target_pos, current_pos, timestamp=None):
@@ -72,7 +72,7 @@ class JointPositionTracker:
             self.errors[i].append(error)
             self.current_error[i] = error
 
-            # 更新统计
+            # Update statistics
             self.max_error[i] = max(self.max_error[i], error)
             if len(self.errors[i]) > 0:
                 self.mean_error[i] = np.mean(list(self.errors[i]))
@@ -97,21 +97,21 @@ class JointPositionTracker:
         print(f"Joint Tracking Statistics (Updates: {self.update_count}, Window: {len(self.timestamps)})")
         print("="*100)
 
-        # 按当前误差排序
+        # Sort by current error
         stats = self.get_statistics()
         sorted_joints = sorted(stats.items(), key=lambda x: x[1]['current_error'], reverse=True)
 
         print(f"{'Joint Name':<25} | {'Current Error':>12} | {'Mean Error':>12} | {'Max Error':>12}")
         print("-"*100)
 
-        # 显示前N个误差最大的关节
+        # Show the N joints with the largest errors
         for joint_name, stat in sorted_joints[:top_n]:
             print(f"{joint_name:<25} | {stat['current_error']:12.6f} | {stat['mean_error']:12.6f} | {stat['max_error']:12.6f}")
 
         if len(sorted_joints) > top_n:
             print(f"... and {len(sorted_joints) - top_n} more joints")
 
-        # 总体统计
+        # Overall statistics
         all_current_errors = [s['current_error'] for s in stats.values()]
         all_mean_errors = [s['mean_error'] for s in stats.values()]
         all_max_errors = [s['max_error'] for s in stats.values()]
@@ -129,7 +129,7 @@ class JointPositionTracker:
         all_current_errors = [s['current_error'] for s in stats.values()]
         all_mean_errors = [s['mean_error'] for s in stats.values()]
 
-        # 找出误差最大的3个关节
+        # Find the 3 joints with the largest errors
         sorted_joints = sorted(stats.items(), key=lambda x: x[1]['current_error'], reverse=True)
         top3 = sorted_joints[:3]
 
@@ -140,11 +140,11 @@ class JointPositionTracker:
               f"{top3[2][0]}({top3[2][1]['current_error']:.4f})")
 
 
-# 示例用法
+# Usage example
 if __name__ == "__main__":
     import time
 
-    # 创建跟踪器
+    # Create the tracker
     tracker = JointPositionTracker(num_joints=29, window_size=200)
 
     print("Simulating joint tracking...")
@@ -153,20 +153,20 @@ if __name__ == "__main__":
     try:
         t = 0
         while True:
-            # 生成模拟数据
+            # Generate simulated data
             target = np.sin(t * 0.1 + np.arange(29) * 0.2)
-            current = target + np.random.randn(29) * 0.05  # 添加噪声
+            current = target + np.random.randn(29) * 0.05  # Add noise
 
             tracker.update_data(target, current, timestamp=t)
 
             t += 1
             time.sleep(0.02)  # 50Hz
 
-            # 每50步打印紧凑摘要
+            # Print a compact summary every 50 steps
             if t % 50 == 0:
                 tracker.print_compact_summary()
 
-            # 每200步打印详细统计
+            # Print detailed statistics every 200 steps
             if t % 200 == 0:
                 tracker.print_statistics(top_n=10)
 

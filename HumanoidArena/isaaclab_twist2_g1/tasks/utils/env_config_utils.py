@@ -19,11 +19,11 @@ def create_enhanced_env_cfg(task_name: str, args: argparse.Namespace):
         环境配置对象
     """
     
-    # 根据任务名称选择合适的配置创建方法
+    # Choose the configuration factory for the task
     if "Isaac-PickPlace-G129" in task_name:
         return create_g129_pickplace_cfg(args)
     else:
-        # 回退到标准方法
+        # Fall back to the standard factory
         from isaaclab_tasks.utils.parse_cfg import parse_env_cfg
         return parse_env_cfg(task_name, device=args.device, num_envs=getattr(args, 'num_envs', 1))
 
@@ -41,22 +41,22 @@ def create_g129_pickplace_cfg(args: argparse.Namespace):
         PickPlaceG129DEX1JointWaistFixEnvCfg
     )
     
-    # 从args中提取参数
+    # Extract arguments from args
     num_envs = getattr(args, 'num_envs', 1)
     device = getattr(args, 'device', 'cuda')
     env_spacing = getattr(args, 'env_spacing', 2.5)
     
-    # 使用新的创建方法
+    # Use the new factory
     env_cfg = PickPlaceG129DEX1JointWaistFixEnvCfg.create_with_params(
         num_envs=num_envs,
         device=device,
         env_spacing=env_spacing
     )
     
-    # 设置任务名称
+    # Set the task name
     env_cfg.env_name = args.task
     
-    # 应用其他配置
+    # Apply additional configuration
     apply_performance_optimizations(env_cfg, args)
     apply_termination_settings(env_cfg, args)
     
@@ -71,40 +71,40 @@ def apply_performance_optimizations(env_cfg, args: argparse.Namespace):
         args: 命令行参数
     """
     
-    # 根据精度模式调整仿真参数
+    # Adjust simulation parameters for the precision mode
     precision_mode = getattr(args, 'precision_mode', 'balanced')
     
     if precision_mode == 'fast':
-        # 快速模式：降低精度，提高速度
-        env_cfg.sim.dt = 0.01  # 更大的时间步长
+        # Fast mode: reduce precision to improve speed
+        env_cfg.sim.dt = 0.01  # Larger time step
         if hasattr(env_cfg.sim, 'substeps'):
             env_cfg.sim.substeps = 1
             
     elif precision_mode == 'precise':
-        # 精确模式：提高精度，可能降低速度
-        env_cfg.sim.dt = 0.002  # 更小的时间步长
+        # Accurate mode: improve precision, possibly at lower speed
+        env_cfg.sim.dt = 0.002  # Smaller time step
         if hasattr(env_cfg.sim, 'substeps'):
             env_cfg.sim.substeps = 4
             
     else:  # balanced
-        # 平衡模式：默认设置
+        # Balanced mode: default settings
         env_cfg.sim.dt = 0.005
         if hasattr(env_cfg.sim, 'substeps'):
             env_cfg.sim.substeps = 2
     
-    # 根据优化设置调整渲染频率
+    # Adjust the render rate based on optimization settings
     if getattr(args, 'disable_optimizations', False):
-        # 禁用优化时使用标准设置
+        # Use standard settings when optimization is disabled
         pass
     else:
-        # 启用优化时调整设置
+        # Adjust settings when optimization is enabled
         if hasattr(env_cfg, 'decimation'):
-            # 根据step_hz调整decimation
+            # Adjust decimation based on step_hz
             step_hz = getattr(args, 'step_hz', 500)
             if step_hz > 300:
-                env_cfg.decimation = 2  # 更高的控制频率
+                env_cfg.decimation = 2  # Higher control frequency
             elif step_hz < 100:
-                env_cfg.decimation = 8  # 更低的控制频率
+                env_cfg.decimation = 8  # Lower control frequency
 
 
 def apply_termination_settings(env_cfg, args: argparse.Namespace):
@@ -115,12 +115,12 @@ def apply_termination_settings(env_cfg, args: argparse.Namespace):
         args: 命令行参数
     """
     
-    # 根据参数决定是否移除超时终止条件
-    if getattr(args, 'disable_timeout', True):  # 默认禁用超时
+    # Decide whether to remove timeout termination based on the options
+    if getattr(args, 'disable_timeout', True):  # Disable timeout by default
         if hasattr(env_cfg.terminations, 'time_out'):
             env_cfg.terminations.time_out = None
     
-    # 设置episode长度
+    # Set the episode length
     episode_length = getattr(args, 'episode_length', 20.0)
     env_cfg.episode_length_s = episode_length
 
@@ -132,19 +132,19 @@ def add_env_config_args(parser: argparse.ArgumentParser):
         parser: 参数解析器
     """
     
-    # 环境基本参数
+    # Basic environment parameters
     env_group = parser.add_argument_group('环境配置参数')
     env_group.add_argument("--num_envs", type=int, default=1, help="环境数量")
     env_group.add_argument("--env_spacing", type=float, default=2.5, help="环境间距")
     env_group.add_argument("--episode_length", type=float, default=20.0, help="Episode长度（秒）")
     env_group.add_argument("--disable_timeout", action="store_true", default=True, help="禁用超时终止")
     
-    # 仿真参数
+    # Simulation parameters
     sim_group = parser.add_argument_group('仿真参数')
     sim_group.add_argument("--sim_dt", type=float, default=0.005, help="仿真时间步长")
     sim_group.add_argument("--substeps", type=int, default=2, help="仿真子步数")
     
-    # 性能优化参数
+    # Performance optimization parameters
     perf_group = parser.add_argument_group('性能优化参数')
     perf_group.add_argument("--precision_mode", type=str, default="balanced", 
                            choices=["fast", "balanced", "precise"], help="精度模式")
@@ -172,7 +172,7 @@ def print_env_config_info(env_cfg, args: argparse.Namespace):
     print("==================")
 
 
-# 便捷函数
+# Convenience helpers
 def setup_env_from_args(args: argparse.Namespace):
     """从命令行参数设置环境配置
     
@@ -184,14 +184,14 @@ def setup_env_from_args(args: argparse.Namespace):
     """
     import gymnasium as gym
     
-    # 创建环境配置
+    # Create the environment configuration
     env_cfg = create_enhanced_env_cfg(args.task, args)
     
-    # 打印配置信息
+    # Print configuration information
     if getattr(args, 'verbose', False):
         print_env_config_info(env_cfg, args)
     
-    # 创建环境
+    # Create the environment
     env = gym.make(args.task, cfg=env_cfg).unwrapped
     
     return env_cfg, env 

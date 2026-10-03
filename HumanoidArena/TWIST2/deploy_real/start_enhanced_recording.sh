@@ -1,20 +1,20 @@
 #!/bin/bash
 
-# TWIST2+IsaacLab 增强数据记录系统 - 启动脚本
+# TWIST2+IsaacLab enhanced data recording system - launcher
 #
-# 功能：自动启动所有必需的组件
-# 使用方法：bash start_enhanced_recording.sh
+# Automatically start all required components
+# Usage:bash start_enhanced_recording.sh
 
-set -e  # 遇到错误立即退出
+set -e  # Exit immediately on error
 
-# 颜色定义
+# Color definitions
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# 打印带颜色的消息
+# Print a colored message
 print_info() {
     echo -e "${BLUE}[INFO]${NC} $1"
 }
@@ -39,11 +39,11 @@ print_header() {
     echo ""
 }
 
-# 检查依赖
+# Check dependencies
 check_dependencies() {
     print_header "检查系统依赖"
 
-    # 检查Redis
+    # Check Redis
     if ! command -v redis-cli &> /dev/null; then
         print_error "Redis未安装，请先安装Redis"
         exit 1
@@ -63,7 +63,7 @@ check_dependencies() {
         print_success "Redis运行正常"
     fi
 
-    # 检查Python环境
+    # Check the Python environment
     if ! command -v python3 &> /dev/null; then
         print_error "Python3未安装"
         exit 1
@@ -71,17 +71,17 @@ check_dependencies() {
     print_success "Python3已安装: $(python3 --version)"
 }
 
-# 配置参数
+# Configure parameters
 configure_params() {
     print_header "配置参数"
 
-    # 默认参数
+    # Default parameters
     DEFAULT_ROBOT_IP="192.168.123.164"
     DEFAULT_TASK_NAME="demo_$(date +%Y%m%d_%H%M%S)"
     DEFAULT_FREQUENCY="30"
     DEFAULT_DATA_FOLDER="./twist2_demonstration_smplx"
 
-    # 交互式配置（或使用默认值）
+    # Interactive configuration or use defaults
     read -p "机器人IP地址 [${DEFAULT_ROBOT_IP}]: " ROBOT_IP
     ROBOT_IP=${ROBOT_IP:-$DEFAULT_ROBOT_IP}
 
@@ -110,14 +110,14 @@ configure_params() {
     fi
 }
 
-# 检查必需的脚本
+# Check required scripts
 check_scripts() {
     print_header "检查脚本文件"
 
     TWIST2_DIR="/home/hcl4070-1/Desktop/taowen/projects/TWIST2"
     ISAACLAB_DIR="/home/hcl4070-1/Desktop/taowen/projects/isaaclab_twist2_g1"
 
-    # 检查TWIST2遥操作脚本
+    # Check the TWIST2 teleoperation script
     TELEOP_SCRIPT="${TWIST2_DIR}/deploy_real/xrobot_teleop_to_robot_w_hand.py"
     if [[ ! -f "$TELEOP_SCRIPT" ]]; then
         print_error "遥操作脚本不存在: $TELEOP_SCRIPT"
@@ -125,7 +125,7 @@ check_scripts() {
     fi
     print_success "遥操作脚本: $TELEOP_SCRIPT"
 
-    # 检查数据记录脚本
+    # Check the data recording script
     RECORD_SCRIPT="${TWIST2_DIR}/deploy_real/server_data_record_with_third_smplx_qpos.py"
     if [[ ! -f "$RECORD_SCRIPT" ]]; then
         print_error "数据记录脚本不存在: $RECORD_SCRIPT"
@@ -133,7 +133,7 @@ check_scripts() {
     fi
     print_success "数据记录脚本: $RECORD_SCRIPT"
 
-    # 检查IsaacLab sim_main
+    # Check the IsaacLab sim_main entry point
     ISAACLAB_SCRIPT="${ISAACLAB_DIR}/sim_main.py"
     if [[ ! -f "$ISAACLAB_SCRIPT" ]]; then
         print_warning "IsaacLab脚本不存在: $ISAACLAB_SCRIPT"
@@ -143,11 +143,11 @@ check_scripts() {
     fi
 }
 
-# 检查IsaacLab是否运行
+# Check whether IsaacLab is running
 check_isaaclab() {
     print_header "检查IsaacLab状态"
 
-    # 检查图像服务器端口
+    # Check the image-server port
     if nc -zv localhost 5555 2>&1 | grep -q succeeded; then
         print_success "Front camera 服务器 (Port 5555) 运行正常"
     else
@@ -175,13 +175,13 @@ check_isaaclab() {
     fi
 }
 
-# 启动遥操作系统
+# Start the teleoperation system
 start_teleop() {
     print_header "启动TWIST2遥操作系统"
 
     cd "${TWIST2_DIR}"
 
-    # 检查是否已经运行
+    # Check whether it is already running
     if pgrep -f "xrobot_teleop_to_robot_w_hand.py" > /dev/null; then
         print_success "遥操作系统已在运行"
         return 0
@@ -189,7 +189,7 @@ start_teleop() {
 
     print_info "在新终端启动遥操作系统..."
 
-    # 使用gnome-terminal或xterm启动
+    # Launch with gnome-terminal or xterm
     if command -v gnome-terminal &> /dev/null; then
         gnome-terminal -- bash -c "
             cd ${TWIST2_DIR};
@@ -217,11 +217,11 @@ start_teleop() {
         read -p "启动完成后按Enter继续..."
     fi
 
-    # 等待遥操作系统启动
+    # Wait for the teleoperation system to start
     print_info "等待遥操作系统启动..."
     sleep 5
 
-    # 检查SMPLX数据是否可用
+    # Check whether SMPL-X data is available
     for i in {1..10}; do
         if redis-cli exists smplx_data_unitree_g1_with_hands | grep -q 1; then
             print_success "SMPLX数据已就绪"
@@ -234,7 +234,7 @@ start_teleop() {
     done
 }
 
-# 启动数据记录
+# Start data recording
 start_recording() {
     print_header "启动数据记录系统"
 
@@ -261,36 +261,36 @@ start_recording() {
         --data_folder "${DATA_FOLDER}"
 }
 
-# 清理函数
+# Cleanup function
 cleanup() {
     print_header "清理资源"
 
-    # 这里可以添加清理逻辑
-    # 例如：关闭启动的进程
+    # Add cleanup logic here
+    # For example, stop the processes started by this script
 
     print_success "清理完成"
 }
 
-# 主函数
+# Run main function
 main() {
-    # 捕获Ctrl+C
+    # Handle Ctrl+C
     trap cleanup EXIT
 
     print_header "TWIST2+IsaacLab 增强数据记录系统"
 
-    # 1. 检查依赖
+    # 1. Check dependencies
     check_dependencies
 
-    # 2. 配置参数
+    # 2. Configure parameters
     configure_params
 
-    # 3. 检查脚本
+    # 3. Check scripts
     check_scripts
 
-    # 4. 检查IsaacLab
+    # 4. Check IsaacLab
     check_isaaclab
 
-    # 5. 启动遥操作（可选）
+    # 5. Start teleoperation (optional)
     read -p "是否需要启动TWIST2遥操作系统? (y/n) [y]: " START_TELEOP
     START_TELEOP=${START_TELEOP:-y}
     if [[ "$START_TELEOP" =~ ^[Yy]$ ]]; then
@@ -299,11 +299,11 @@ main() {
         print_info "跳过遥操作系统启动（假设已运行）"
     fi
 
-    # 6. 启动数据记录
+    # 6. Start data recording
     start_recording
 
     print_success "所有组件已关闭"
 }
 
-# 运行主函数
+# Run main function
 main "$@"

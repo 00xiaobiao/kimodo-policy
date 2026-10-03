@@ -78,9 +78,9 @@ class G1RobotDDS(DDSObject):
 
             motor_state = self.low_state.motor_state
             imu_state = self.low_state.imu_state
-            num_motors = min(29, len(motor_state))  # 假设最多29个电机
+            num_motors = min(29, len(motor_state))  # Assume at most 29 motors
 
-            # 使用 NumPy 批量转换 joint 数据
+            # Convert joint data in batches with NumPy
             positions = data.get("joint_positions")
             velocities = data.get("joint_velocities")
             torques = data.get("joint_torques")
@@ -96,25 +96,25 @@ class G1RobotDDS(DDSObject):
                     motor.dq = dq_array[i]
                     motor.tau_est = tau_array[i]
 
-            # 使用 NumPy 批量转换 IMU 数据
+            # Convert IMU data in batches with NumPy
             imu = data.get("imu_data")
             if imu and len(imu) >= 13:
                 imu_array = np.asarray(imu, dtype=np.float32)
 
-                # 四元数 (x, y, z, w)
+                # Quaternion (x, y, z, w)
                 imu_state.quaternion[:] = imu_array[[4, 5, 6, 3]]
 
-                # 线加速度 (加速度计)
+                # Linear acceleration (accelerometer)
                 imu_state.accelerometer[:] = imu_array[7:10]
 
-                # 角速度 (陀螺仪)
+                # Angular velocity (gyroscope)
                 imu_state.gyroscope[:] = imu_array[10:13]
 
-            # 更新时间戳和 CRC
+            # Update the timestamp and CRC
             self.low_state.tick += 1
             self.low_state.crc = self.crc.Crc(self.low_state)
 
-            # 发布 DDS 消息
+            # Publish the DDS message
             self.publisher.Write(self.low_state)
 
         except Exception as e:
@@ -144,7 +144,7 @@ class G1RobotDDS(DDSObject):
                 return {}
             
             # extract the command data
-            num_cmd_motors = min(29, len(msg.motor_cmd))  # G1机器人29个自由度
+            num_cmd_motors = min(29, len(msg.motor_cmd))  # G1 robot with 29 degrees of freedom
             cmd_data = {
                 "mode_pr": int(msg.mode_pr),
                 "mode_machine": int(msg.mode_machine),

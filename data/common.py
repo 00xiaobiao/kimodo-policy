@@ -42,7 +42,7 @@ from utils.geometry import quaternion_to_matrix
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-CHECKPOINTS_ROOT = PROJECT_ROOT.parent / "checkpoints"
+CHECKPOINTS_ROOT = PROJECT_ROOT / "checkpoints"
 XML_PATH = PROJECT_ROOT / "skeleton/assets/g1skel34/xml/g1.xml"
 STATS_PATH = CHECKPOINTS_ROOT / "Kimodo-G1-RP-v1/stats/motion"
 

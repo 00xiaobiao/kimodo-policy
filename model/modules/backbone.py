@@ -101,29 +101,29 @@ class TransformerEncoderBlock(nn.Module):
     def __init__(self, conf):
         self.nbjoints = self.skeleton.nbjoints
 
-        # 定义 positional encoding 层
+        # Define the positional encoding layer.
         self.sequence_pos_encoder = PositionalEncoding(self.latent_dim, self.pe_dropout)
 
-         # 定义 time 映射层
+         # Define the time projection layer.
         self.embed_timestep = TimestepEmbedder(self.latent_dim, self.sequence_pos_encoder)
         
-        # 定义 motion 映射层
+        # Define the motion projection layer.
         self.input_linear = nn.Linear(self.input_dim, self.latent_dim)
         self.output_linear = nn.Linear(self.latent_dim, self.output_dim)
 
-        # 定义 first_heading_angle 映射层
+        # Define the first-heading-angle projection layer.
         self.linear_first_heading_angle = nn.Linear(2, self.latent_dim)
 
-        # 定义 text 映射层
+        # Define the text projection layer.
         llm_dim = self.llm_shape[-1]
         self.embed_text = nn.Linear(llm_dim, self.latent_dim)
 
-        # 定义 text token 的最大数量
+        # Define the maximum number of text tokens.
         self.num_text_tokens = self.llm_shape[0]
         if self.num_text_tokens_override is not None:
             self.num_text_tokens = self.num_text_tokens_override
 
-        # 定义 Encoder-only Transformer Layer (Self-Attention 看所有 token)
+        # Define encoder-only Transformer layers with self-attention over all tokens.
         trans_enc_layer = TransformerEncoderLayer(
             d_model=self.latent_dim,
             nhead=self.num_heads,
@@ -134,7 +134,7 @@ class TransformerEncoderBlock(nn.Module):
             norm_first=self.norm_first,
         )
 
-        # 定义 Transformer Block ( 多 Transformer Layer 堆叠)
+        # Define a Transformer block by stacking multiple Transformer layers.
         self.seqTransEncoder = TransformerEncoder(
             trans_enc_layer,
             num_layers=self.num_layers,
@@ -166,11 +166,11 @@ class TransformerEncoderBlock(nn.Module):
         Returns:
             torch.Tensor: [B, T, output_dim]
         """
-        # 1. 将带噪声的 motion token 化
+        # 1. Tokenize the noisy motion.
         batch_size = len(x)
         x = self.input_linear(x)  # [B, T, D]
         
-        # 2. 填充 text token & text token 化
+        # 2. Pad and tokenize the text.
         if self.num_text_tokens is not None:
             text_feat, text_feat_pad_mask = pad_x_and_mask_to_fixed_size(
                 text_feat,
@@ -179,11 +179,11 @@ class TransformerEncoderBlock(nn.Module):
             )
         emb_text = self.embed_text(text_feat)  # [B, max_text_len, D]
         
-        # 3. time token 化 & 创建 time mask 
+        # 3. Tokenize time and create the time mask.
         emb_time = self.embed_timestep(timesteps)  # [B, 1, D]
         time_mask = torch.ones((batch_size, 1), dtype=bool, device=x.device)
 
-        # 4. 组合 text+time 的tokne 和 mask -> prefix token 和 prefix attention mask
+        # 4. Combine text and time tokens/masks into the prefix and its attention mask.
         prefix_feats = torch.cat((emb_text, emb_time), axis=1)
         if not self.use_text_mask:
             text_feat_pad_mask = torch.ones(
@@ -193,7 +193,7 @@ class TransformerEncoderBlock(nn.Module):
             )
         prefix_mask = torch.cat((text_feat_pad_mask, time_mask), axis=1)
 
-        # 5. 向 prefix token 和 prefix attention mask 添加 first_heading_angle token & mask
+        # 5. Add the first-heading-angle token and mask to the prefix.
         if self.input_first_heading_angle:
             assert first_heading_angle is not None, "The first heading angle is mandatory for this model"
             # cos(angle) / sin(angle)
@@ -215,19 +215,19 @@ class TransformerEncoderBlock(nn.Module):
             prefix_feats = torch.cat((prefix_feats, first_heading_angle_feats), axis=1)
             prefix_mask = torch.cat((prefix_mask, first_heading_angle_mask), axis=1)
 
-        # 6. 记录 prefix 的 token 数量
+        # 6. Record the number of prefix tokens.
         pose_start_ind = prefix_feats.shape[1]
 
-        # 7. 组织最终的输入 token 和 attention mask
+        # 7. Assemble the final input tokens and attention mask.
         xseq = torch.cat((prefix_feats, x), axis=1)
         src_key_padding_mask = ~torch.cat((prefix_mask, x_pad_mask), axis=1)
 
-        # 8. 向输入 token 添加位置编码
+        # 8. Add positional encodings to the input tokens.
         xseq = self.sequence_pos_encoder(xseq)
         if isinstance(self.seqTransEncoder, nn.TransformerEncoder):
             assert not self.seqTransEncoder.use_nested_tensor, "Flash attention should be disabled due to bug!"
         
-        # 9. 过 transformer block，并在指定层将视觉信息只注入 future motion tokens。
+        # 9. Run the Transformer blocks and inject visual features only into future motion tokens at selected layers.
         if hints is not None and control_visual_tokens is not None:
             raise ValueError("Static hints and dynamic control fusion cannot be used together")
         if (control_visual_tokens is None) != (hint_fuser is None):
@@ -275,10 +275,10 @@ class TransformerEncoderBlock(nn.Module):
         else:
             output = self.seqTransEncoder(xseq, src_key_padding_mask=src_key_padding_mask)
 
-        # 10. 提取 motion tokne 输出
+        # 10. Extract the motion-token outputs.
         hidden_output = output[:, pose_start_ind:]  # [B, T, D]
 
-        # 11. 输出 motion 标准输出
+        # 11. Return the standard motion output.
         output = self.output_linear(hidden_output)  # [B, T, OD]
 
         if return_hidden:

@@ -1,6 +1,8 @@
 # 环境
-/root/miniconda3/envs/kimodo/bin/python
-/ai/Yichi/0_Systems/miniconda3/envs/unitree_sim_env/bin/python
+conda activate kimodo
+python
+conda activate unitree_sim_env
+python
 
 # SONIC 单任务评估
 ```bash
@@ -74,15 +76,15 @@ TWIST2 任务的官方 runner 自动读取对应的 `MAX_STEPS`（football 为 2
 ```bash
 tmux new -s football_twist2_formal
 
-cd /ai/Yichi/yunhengwang/Kimodo-Policy/controlnet_v1.2
-export CONDA_BASE=/ai/Yichi/0_Systems/miniconda3
+cd "$(git rev-parse --show-toplevel)"
+export CONDA_BASE="$(conda info --base)"
 export KIMODO_SERVER_PYTHON="$CONDA_BASE/envs/lerobot/bin/python"
 export VLA_MAX_ROOT_DELTA_DEG=26.0
 
 bash evaluation/humanoidarena_eval_signal_task_twist2.sh \
-  --project /ai/Yichi/yunhengwang/Kimodo-Policy/controlnet_v1.2 \
+  --project . \
   --task football \
-  --checkpoint /ai/Yichi/yunhengwang/Kimodo-Policy/controlnet_v1.2/log/experiments/scratch_sonic_8/humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse_HOI_football_twist2/2026-08-28_16-23-14/checkpoint_200000 \
+  --checkpoint log/experiments/scratch_sonic_8/humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse_HOI_football_twist2/2026-08-28_16-23-14/checkpoint_200000 \
   --gpus 5,6,7 \
   --seeds 0,1,2 \
   --repeats 20 \
@@ -97,14 +99,14 @@ bash evaluation/humanoidarena_eval_signal_task_twist2.sh \
   --port-base 19420 \
   --server-port-max 20000 \
   --trace 0 \
-  --results-dir /ai/Yichi/yunhengwang/Kimodo-Policy/controlnet_v1.2/eval_results/football_twist2_checkpoint200000_formal
+  --results-dir ./eval_results/football_twist2_checkpoint200000_formal
 ```
 
 完成后可用以下命令查看总体结果：
 
 ```bash
 jq '.overall_success_rate, .failure_reason_counts' \
-  /ai/Yichi/yunhengwang/Kimodo-Policy/controlnet_v1.2/eval_results/football_twist2_checkpoint200000_formal/summary.json
+  ./eval_results/football_twist2_checkpoint200000_formal/summary.json
 ```
 
 结果目录中的 `summary.json`、`final.csv` 和 `episodes/` 保存统计与逐回合结果，
@@ -123,7 +125,7 @@ TWIST2 的 checkpoint 是 Kimodo 目录（必须包含 `config.json` 和
 
 ```bash
 conda activate unitree_sim_env
-export CONDA_BASE=/ai/Yichi/0_Systems/miniconda3
+export CONDA_BASE="$(conda info --base)"
 # 当前远端部署使用 lerobot 环境；若存在独立 kimodo 环境可替换此路径。
 export KIMODO_SERVER_PYTHON="$CONDA_BASE/envs/lerobot/bin/python"
 export MODEL_PATHS_CSV=/path/to/kimodo/checkpoint_200000

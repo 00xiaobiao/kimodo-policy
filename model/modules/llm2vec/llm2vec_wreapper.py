@@ -18,15 +18,15 @@ class LLM2VecEncoder(torch.nn.Module):
         checkpoint_path: str,
     ) -> None:
         super().__init__()
-        # 1. 模型的基本配置
+        # 1. Configure the model.
         self.llm_dim = 4096
-        # 2. 加载模型
+        # 2. Load the model.
         self.model = LLM2Vec.from_pretrained(
             base_model_name_or_path=os.path.join(checkpoint_path, "LLM2Vec-Meta-Llama-3-8B-Instruct-mntp"),
             peft_model_name_or_path=os.path.join(checkpoint_path, "LLM2Vec-Meta-Llama-3-8B-Instruct-mntp-supervised"),
             torch_dtype=torch.bfloat16,
         )
-        # 3. 冻结模型
+        # 3. Freeze the model.
         self.model.eval()
         for p in self.model.parameters():
             p.requires_grad = False

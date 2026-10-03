@@ -136,8 +136,16 @@ fi
 if [[ "$CHECKPOINT" != /* ]]; then CHECKPOINT="${PROJECT_ROOT}/${CHECKPOINT}"; fi
 CHECKPOINT="$(readlink -m "$CHECKPOINT")"
 
-CONDA_BASE="${CONDA_BASE:-/ai/Yichi/0_Systems/miniconda3}"; CONDA_ENV_NAME="${CONDA_ENV_NAME:-unitree_sim_env}"
-EVAL_PYTHON="${EVAL_PYTHON:-${CONDA_BASE}/envs/${CONDA_ENV_NAME}/bin/python}"
+CONDA_ENV_NAME="${CONDA_ENV_NAME:-unitree_sim_env}"
+if [[ -z "${CONDA_BASE:-}" ]]; then
+  CONDA_BASE="$(conda info --base 2>/dev/null || true)"
+fi
+if [[ -z "${CONDA_BASE}" ]]; then
+  echo "Set CONDA_BASE or initialize Conda before running this evaluator." >&2
+  exit 2
+fi
+CONDA_ENV_PREFIX="${CONDA_PREFIX:-${CONDA_BASE}/envs/${CONDA_ENV_NAME}}"
+EVAL_PYTHON="${EVAL_PYTHON:-${CONDA_ENV_PREFIX}/bin/python}"
 KIMODO_SERVER_PYTHON="${KIMODO_SERVER_PYTHON:-${CONDA_BASE}/envs/kimodo/bin/python}"
 if [[ ! -x "$KIMODO_SERVER_PYTHON" && -x "${CONDA_BASE}/envs/lerobot/bin/python" ]]; then
   # Current HumanoidArena installs the Kimodo HTTP server in the lerobot env.

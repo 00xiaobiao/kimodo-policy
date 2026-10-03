@@ -47,7 +47,7 @@ TASK_INDEX_BY_TASK_ID = {
     for task_index, task_id in enumerate(TASK_KEY_BY_TASK_ID)
 }
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
-_CHECKPOINTS_ROOT = _PROJECT_ROOT.parent / "checkpoints"
+_CHECKPOINTS_ROOT = _PROJECT_ROOT / "checkpoints"
 _XML_PATH = _PROJECT_ROOT / "skeleton/assets/g1skel34/xml/g1.xml"
 _STATS_PATH = _CHECKPOINTS_ROOT / "Kimodo-G1-RP-v1/stats/motion"
 _VIDEO_READ_MAX_ATTEMPTS = 4

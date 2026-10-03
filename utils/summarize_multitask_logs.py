@@ -15,7 +15,7 @@ import statistics
 from pathlib import Path
 
 
-ROOT = Path("/ai/Yichi/yunhengwang/Kimodo-Policy/controlnet_v1.2")
+ROOT = Path(__file__).resolve().parents[1]
 LINE_RE = re.compile(
     r"Step: (\d+)/(\d+) \| Loss: ([0-9.eE+-]+) \| Motion: ([0-9.eE+-]+)"
     r" \| Root: ([0-9.eE+-]+) \| Body: ([0-9.eE+-]+) \| Hand: ([0-9.eE+-]+)"
