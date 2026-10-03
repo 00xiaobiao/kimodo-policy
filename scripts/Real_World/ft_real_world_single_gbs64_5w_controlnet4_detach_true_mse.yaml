@@ -1,0 +1,107 @@
+main:
+  batch_size: 8
+  max_steps: 50000
+  save_steps: 10000
+  action_chunk: 50
+  action_history: 100
+  sample_stride: 1
+  seed: 42
+  # 4 ranks x batch_size 16 = global batch size 64 (the launcher defaults to 4 GPUs).
+  save_root: "${oc.env:KIMODO_FT_SAVE_ROOT,log/Real_World/ft_real_world_single_gbs64_5w_controlnet4_detach_true_mse_${oc.env:REAL_WORLD_DATASET,all}/}"
+  dtype: "bf16"
+
+  dataset_roots:
+    RealWorld: "${oc.env:REAL_WORLD_ROOT,real-world}"
+
+  dataset_selection:
+    RealWorld:
+      # Set REAL_WORLD_DATASET to a folder name or glob. "*" includes every
+      # compatible dataset below REAL_WORLD_ROOT/data.
+      dataset: "${oc.env:REAL_WORLD_DATASET,*}"
+      # Use the selected dataset folder for task/text-cache names, e.g.
+      # 00_SingleManipulation -> SingleManipulation.
+      task_name_mode: dataset
+      camera: "observation.images.ego_view"
+      # Supervise the hand head with the operator's held trigger action:
+      # action.hand_binary (0=open/released, 1=close/held).
+      hand_control_mode: binary
+      # Condition on measured hand-joint closure from observation.state.
+      hand_observation_mode: continuous
+
+  # Training-only image augmentation. Omitted transforms remain disabled.
+  domain_randomization:
+    enabled: true
+    color_jitter:
+      probability: 0.8
+      brightness: 0.2
+      contrast: 0.2
+      saturation: 0.2
+      hue: 0.02
+    # Keep approximately 95%-100% of each side, then resize to the original size.
+    # Omit this section or set enabled: false to disable cropping independently.
+    view_crop:
+      enabled: true
+      probability: 0.3
+      min_scale: 0.95
+
+  sampling:
+    mode: "episode_uniform"
+
+  episode_cache_size: 100
+  cpu_workers_num: 8
+  precompute_text_embeddings: true
+  wandb: "offline"
+  wandb_project: "Kimodo-Policy"
+  wandb_run_name: "${oc.env:KIMODO_FT_RUN_NAME,ft_real_world_single_gbs64_5w_controlnet4_detach_true_mse}"
+  gradient:
+    grad_clip_norm: 1.0
+    hand_grad_clip_norm: 1.0
+    grad_accumulation_steps: 1
+
+model:
+  fps: 30
+  motion_mask_mode: "concat"
+  dinov3_model_name: "dinov3-vitl16-pretrain-lvd1689m"
+  dinov3_checkpoint: null
+  text_feature_dim: 4096
+  controlnet_num_layers: 4
+  detach_root_control_for_body: true
+  control_fusion_mode: "both"
+  hand_control_mode: binary
+  hand_observation_mode: continuous
+  hand_hidden_dim: 256
+  hand_num_layers: 4
+  hand_num_heads: 4
+  hand_ffn_dim: 1024
+  hand_init_seed: 3407
+  compile: true
+  compile_mode: "reduce-overhead"
+
+training:
+  loss:
+    motion_loss_type: mse
+    kimodo_smooth_l1_weights:
+      root_position: 10.0
+      root_heading: 2.0
+      joint_position: 10.0
+      joint_velocity: 3.0
+      joint_rotation: 10.0
+      foot_contact: 4.0
+      fk: 5.0
+    mse_weights:
+      root: 4.0
+      body: 1.0
+      hand: 1.0
+      hand_transition: 0.2
+  optimizer:
+    control_backbone_lr: 3.0e-5
+    control_adapter_lr: 1.0e-4
+    hand_lr: 1.0e-4
+    weight_decay: 0.01
+    betas: [0.9, 0.999]
+    eps: 1.0e-8
+    fused: true
+  scheduler:
+    warmup_ratio: 0.01
+    num_cycles: 0.5
+    min_lr_ratio: 0.1

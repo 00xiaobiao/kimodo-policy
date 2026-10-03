@@ -771,9 +771,9 @@ class TrainingResumeTest(unittest.TestCase):
     def test_dataset_receives_opt_in_randomization_and_arena_defaults_to_off(self):
         project_root = Path(__file__).resolve().parents[1]
         for filename, enabled in (
-            ("scripts/experiments/humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse.yaml", False),
-            ("scripts/experiments/simple/ft_simple_single_gbs64_20w_controlnet4_detach_true_mse_continuous_hand.yaml", True),
-            ("scripts/experiments/real_world/ft_real_world_single_gbs64_5w_controlnet4_detach_true_mse.yaml", True),
+            ("scripts/HumanoidArena_Multi_Task/humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse.yaml", False),
+            ("scripts/Simple_Single_Task/ft_simple_single_gbs64_20w_controlnet4_detach_true_mse_continuous_hand.yaml", True),
+            ("scripts/Real_World/ft_real_world_single_gbs64_5w_controlnet4_detach_true_mse.yaml", True),
         ):
             config = OmegaConf.load(project_root / filename)
             with self.subTest(filename=filename), patch("train.MultiSourceG1Dataset") as dataset:
