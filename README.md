@@ -35,79 +35,307 @@ The policy is built on a frozen Kimodo motion backbone. DINOv3 extracts image fe
 
 ## SETUP
 
-### General Requirements
-
-- Linux, an NVIDIA GPU, and a CUDA-compatible PyTorch installation.
-- Training launchers use BF16 by default. Use a GPU with BF16 support and install a PyTorch CUDA wheel compatible with the host driver.
-- Git LFS is required for large model files. Git submodules are required for the vendored external code.
-- The repository does not currently provide a single root requirements.txt or a locked training environment. The commands below install the main dependencies used directly by the training code; select PyTorch and Python wheels that match your CUDA and driver versions.
-
-Clone the repository and initialize external code:
+This project uses three separate runtime environments. Keep the Kimodo training environment, the HumanoidArena simulator environment, the HumanoidArena model-server environment, and the SIMPLE evaluation environment isolated from one another. The commands below assume that the repository has been cloned with its submodules:
 
 ~~~bash
 git clone --recurse-submodules https://github.com/Yunheng-Wang/kimodo-policy.git
 cd kimodo-policy
 git lfs install
 git submodule update --init --recursive
+PROJECT_ROOT="$(git rev-parse --show-toplevel)"
 ~~~
 
-### Kimodo Training Environment
+### 1. Kimodo Training and Model-Inference Environment
 
-Keep model training and the Kimodo inference service in a dedicated Conda environment. The code uses Python 3.10+ syntax, and the SIMPLE integration environment is pinned to Python 3.10.
+Use this environment for pretraining, task fine-tuning, standalone Kimodo inference, and the model-side dependencies used by the evaluation server. The local reference environment for this release is named kimodo and currently reports Python 3.10.20 and PyTorch 2.11.0+cu126. The environment name can be changed; launchers only require KIMODO_ENV to point to the active environment.
+
+The core versions in the local reference snapshot are:
+
+| Package | Version |
+| --- | --- |
+| Python | 3.10.20 |
+| PyTorch | 2.11.0+cu126 |
+| TorchVision | 0.26.0+cu126 |
+| TorchAudio | 2.11.0+cu126 |
+| Accelerate | 1.13.0 |
+| Transformers | 5.1.0 |
+| NumPy | 2.2.6 |
+| SciPy | 1.15.3 |
+| OmegaConf | 2.3.0 |
+| PEFT | 0.18.1 |
+| Safetensors | 0.7.0 |
+
+Requirements:
+
+- Linux and an NVIDIA GPU with a driver compatible with the selected CUDA PyTorch wheel.
+- Python 3.10. The training configurations use BF16 by default, so BF16-capable GPUs are recommended.
+- The Kimodo, DINOv3, Llama/LLM2Vec, and task checkpoint files described in [Model Checkpoints](#model-checkpoints).
+
+Create or reuse the local Kimodo environment:
 
 ~~~bash
-conda create -n kimodo-env python=3.10 -y
-conda activate kimodo-env
+conda create -n kimodo python=3.10 -y
+conda activate kimodo
 python -m pip install --upgrade pip
 
-# Install PyTorch using the NVIDIA driver/CUDA combination on your machine.
-# Choose the matching wheel at https://pytorch.org/get-started/locally/
+# Select the PyTorch wheel that matches the host NVIDIA driver and CUDA runtime.
+# The local reference environment uses torch 2.11.0+cu126.
+pip install torch torchvision torchaudio
+
 pip install accelerate omegaconf wandb numpy av pyarrow scipy einops \
-  pydantic safetensors transformers peft tqdm packaging
+  pydantic safetensors transformers peft tqdm packaging huggingface_hub
 ~~~
 
-Training launchers use Accelerate for multi-GPU execution. Set KIMODO_ENV so the launchers can locate Accelerate from the active environment:
+Verify the environment from the repository root:
 
 ~~~bash
 export KIMODO_ENV="$CONDA_PREFIX"
 python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+python -c "import model.kimodo_policy, motion.g1_reference, skeleton.definitions; print('Kimodo imports OK')"
 accelerate --version
 ~~~
 
-The pretraining configurations precompute text embeddings, so LLM2Vec/Llama weights must be available. DINOv3 and the Kimodo motion backbone must also be placed under the repository checkpoints/ directory. See Model Checkpoints below.
+Training launchers use Accelerate and resolve the project root from the launcher location. Set KIMODO_ENV before launching any script under scripts/. Pretraining also requires the text-embedding dependencies and the base model directories under checkpoints/. Missing paths are reported before training starts.
 
-### HumanoidArena Simulation Environment
+### 2. HumanoidArena Evaluation Environment
 
-HumanoidArena simulation evaluation uses a separate Isaac Sim/Isaac Lab environment. The included setup documentation targets Ubuntu 22.04+, Isaac Sim 5.0.0, and Isaac Lab release/2.2.0, with Python 3.11 and PyTorch 2.7.0/CUDA 12.8. The setup helper prints commands by default:
+The HumanoidArena setup follows the [open-source-prep guide](https://github.com/William-wAng618/HumanoidArena/tree/release/open-source-prep) and the local [HumanoidArena environment guide](HumanoidArena/docs/04_environment_setup.md). Evaluation uses two Conda environments because Isaac Sim/Isaac Lab and the Kimodo/LeRobot model server have different Python requirements.
+
+| Environment | Target configuration | Role |
+| --- | --- | --- |
+| unitree_sim_env | Python 3.11, Isaac Sim 5.0.0, Isaac Lab release/2.2.0, PyTorch 2.7.0 with CUDA 12.8 | Isaac Sim/Isaac Lab simulator and evaluation workers |
+| lerobot | Python 3.12, LeRobot with the pi extra, PyTorch and Kimodo dependencies | Kimodo HTTP inference server |
+
+The target host is Ubuntu 22.04 or newer with an NVIDIA GPU, a CUDA 12.x-compatible driver, Git LFS, and network access to the Isaac Sim, GitHub, and Hugging Face packages. Accept the Isaac Sim license in every simulator process:
 
 ~~~bash
-cd HumanoidArena
+export OMNI_KIT_ACCEPT_EULA=YES
+~~~
+
+#### 2.1 Install unitree_sim_env
+
+The repository includes a dry-run-first installer. Review its output before executing it:
+
+~~~bash
+cd "$PROJECT_ROOT/HumanoidArena"
+CONDA_BASE="$(conda info --base)"
 bash isaaclab_twist2_g1/tools/setup_humanoidarena_envs.sh --dry-run
+CONDA_BASE="$CONDA_BASE" \
+  bash isaaclab_twist2_g1/tools/setup_humanoidarena_envs.sh --execute
 ~~~
 
-Review the output, then run the installation:
+The installer targets the following stack:
 
 ~~~bash
-CONDA_BASE=/path/to/conda bash isaaclab_twist2_g1/tools/setup_humanoidarena_envs.sh --execute
+conda create -n unitree_sim_env python=3.11 -y
+conda activate unitree_sim_env
+python -m pip install --upgrade pip
+pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 \
+  --index-url https://download.pytorch.org/whl/cu128
+pip install "isaacsim[all,extscache]==5.0.0" \
+  --extra-index-url https://pypi.nvidia.com
 ~~~
 
-The default environment name is unitree_sim_env. Evaluation also requires the HumanoidArena simulation assets and SONIC policy artifacts. Download locations, directory layout, and the complete installation procedure are documented in [HumanoidArena Environment Setup](HumanoidArena/docs/04_environment_setup.md). The evaluation code treats HumanoidArena/ as the simulator project root. Native HumanoidArena LeRobot training requires a separate lerobot environment and is outside the Kimodo training and evaluation workflow documented here.
+Isaac Lab release/2.2.0 and the project dependencies are installed by the helper. The simulator-specific dependencies are listed in HumanoidArena/isaaclab_twist2_g1/requirements.txt:
 
-### SIMPLE Simulation Environment
+~~~text
+rerun-sdk==0.20.1
+pyzmq==27.0.0
+logging_mp==0.1.5
+onnxruntime==1.22.1
+onnx
+pynput==1.8.1
+redis
+coverage
+~~~
 
-SIMPLE provides its own Python 3.10 environment definition with PyTorch 2.7.0, TorchVision 0.22.0, and NumPy 1.26.4. The upstream baseline targets Ubuntu 22.04, Isaac Sim 4.5/MuJoCo 3.3, CUDA 12, and NVIDIA driver 535+. An RTX 3080 Ti/4090 or better is recommended, with at least 100 GB of free disk space. Keep the SIMPLE simulator environment separate from kimodo-env.
+If you install manually, follow the complete [HumanoidArena setup guide](HumanoidArena/docs/04_environment_setup.md), including the Isaac Lab checkout and any required system packages. Validate the simulator environment before evaluation:
 
 ~~~bash
-cd SIMPLE
-# Install uv according to the SIMPLE documentation.
+conda run -n unitree_sim_env python -c \
+  "import sys, torch, isaacsim; print(sys.version); print(torch.__version__); print('isaacsim import OK')"
+~~~
+
+The release target is Python 3.11. A Python 3.10 simulator environment may fail while importing torch or isaacsim; do not reuse the Python 3.10 Kimodo environment as unitree_sim_env. Recreate the simulator environment if this check fails.
+
+#### 2.2 Restore HumanoidArena assets and policy artifacts
+
+The simulator requires the HumanoidArena asset package at these exact paths:
+
+~~~text
+HumanoidArena/isaaclab_twist2_g1/assets/objects
+HumanoidArena/isaaclab_twist2_g1/assets/robots
+~~~
+
+Download the release asset archive from the link in [HumanoidArena Environment Setup](HumanoidArena/docs/04_environment_setup.md), extract it under HumanoidArena/isaaclab_twist2_g1/assets, and verify both directories exist. SONIC evaluation additionally requires the GEAR-SONIC release artifacts:
+
+~~~bash
+cd "$PROJECT_ROOT/HumanoidArena"
+export SONIC_POLICY_ROOT="$PROJECT_ROOT/HumanoidArena/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release"
+mkdir -p "$SONIC_POLICY_ROOT"
+hf download nvidia/GEAR-SONIC \
+  model_encoder.onnx model_decoder.onnx observation_config.yaml \
+  --local-dir "$SONIC_POLICY_ROOT"
+~~~
+
+The language embedding cache is loaded by the Kimodo server from data/cache/HumanoidArena by default. It must contain the task-specific .pt files required by the selected evaluation task:
+
+~~~bash
+test -d "$PROJECT_ROOT/data/cache/HumanoidArena"
+find "$PROJECT_ROOT/data/cache/HumanoidArena" -name '*.pt' -print
+~~~
+
+TWIST2 evaluation also requires:
+
+~~~text
+HumanoidArena/TWIST2/assets/ckpts/twist2_1017_20k.onnx
+~~~
+
+#### 2.3 Install the lerobot model-server environment
+
+Install LeRobot separately from the simulator:
+
+~~~bash
+conda create -n lerobot python=3.12 -y
+conda activate lerobot
+python -m pip install --upgrade pip
+cd "$PROJECT_ROOT/HumanoidArena/lerobot"
+pip install -e ".[pi]"
+cd "$PROJECT_ROOT"
+~~~
+
+The server environment must be able to import the Kimodo modules and its model dependencies:
+
+~~~bash
+PYTHONPATH="$PROJECT_ROOT:$PROJECT_ROOT/HumanoidArena/lerobot/src" \
+  python -c "import torch, transformers, scipy, omegaconf, einops, safetensors, peft; import model.kimodo_policy, motion.g1_reference, skeleton.definitions; print('Kimodo server imports OK')"
+~~~
+
+Before running a wrapper, export the two environment paths and the cache location:
+
+~~~bash
+export HUMANOIDARENA_ROOT="$PROJECT_ROOT/HumanoidArena"
+export CONDA_BASE="$(conda info --base)"
+export KIMODO_SIM_ENV="$CONDA_BASE/envs/unitree_sim_env"
+export KIMODO_SERVER_PYTHON="$CONDA_BASE/envs/lerobot/bin/python"
+export SONIC_POLICY_ROOT="$HUMANOIDARENA_ROOT/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release"
+export TEXT_EMBEDDING_CACHE="$PROJECT_ROOT/data/cache/HumanoidArena"
+~~~
+
+Every Kimodo evaluation checkpoint must be a training checkpoint directory, not only a base model directory. It must contain at least:
+
+~~~text
+checkpoint/
+├── config.json
+├── training_state.pt
+└── other model and RNG state files
+~~~
+
+The SONIC and TWIST2 wrappers check config.json and training_state.pt before starting. A TWIST2 ONNX checkpoint is a simulator asset and cannot be passed as a LeRobot pretrained model.
+
+#### 2.4 Validate the evaluation environment
+
+Run a dry run before starting a simulator worker. This checks the task YAML, checkpoint files, model-server Python, simulator Python, SONIC artifacts, and cache paths without launching Isaac Sim:
+
+~~~bash
+bash evaluation/humanoidarena_eval_signal_task_sonic.sh \
+  --project "$PROJECT_ROOT" \
+  --task doubledesk \
+  --checkpoint /path/to/checkpoint_200000 \
+  --gpus 5,6,7 \
+  --dry-run
+~~~
+
+For TWIST2, use the corresponding wrapper and ensure the TWIST2 ONNX file is present:
+
+~~~bash
+bash evaluation/humanoidarena_eval_signal_task_twist2.sh \
+  --project "$PROJECT_ROOT" \
+  --task football \
+  --checkpoint /path/to/checkpoint_200000 \
+  --gpus 5,6,7 \
+  --seeds 0,1,2 \
+  --repeats 20 \
+  --dry-run
+~~~
+
+### 3. SIMPLE Evaluation Environment
+
+The SIMPLE setup follows the [upstream SIMPLE repository](https://github.com/physical-superintelligence-lab/SIMPLE) and the checked-in SIMPLE directory. SIMPLE targets Ubuntu 22.04, Isaac Sim 4.5, MuJoCo 3.3, CUDA 12.x, NVIDIA driver 535+, and Python 3.10. An RTX 3080 Ti/4090 or better and at least 100 GB of free disk space are recommended. Keep this environment separate from kimodo, unitree_sim_env, and lerobot.
+
+#### 3.1 Install the uv environment
+
+Install the host packages and uv, then synchronize the dependencies from the local SIMPLE project:
+
+~~~bash
+cd "$PROJECT_ROOT/SIMPLE"
+sudo apt-get update
+sudo apt-get install -y curl cmake python3-dev ffmpeg gstreamer1.0-libav git-lfs
+git lfs install
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
 UV_HTTP_TIMEOUT=3000 GIT_LFS_SKIP_SMUDGE=1 \
   uv sync --all-groups --index-strategy unsafe-best-match
 bash scripts/install_curobo.sh
+source .venv/bin/activate
+python -c "import simple; print(simple.__version__)"
 ~~~
 
-The CuRobo CUDA extension requires a local CUDA toolkit and a matching GPU architecture; the first build may take some time. See [SIMPLE Installation](SIMPLE/docs/source/tutorials/installation.md) for system dependencies, optional assets, and installation details. To download the minimal SIMPLE scene resources, run bash scripts/pre-minimal-download.sh from the SIMPLE root.
+The CuRobo build needs a local CUDA toolkit and a compatible GPU architecture. The first compilation can take several minutes. Download the minimal scene resources when they are not already present:
 
-The current SIMPLE configuration targets Isaac Sim 4.5/MuJoCo 3.3, and pyproject.toml intentionally does not install Isaac Sim. Full evaluation still requires a compatible Isaac Sim runtime. SIMPLE/scripts/install_isaaclab.sh assumes that SIMPLE/third_party/IsaacLab has already been checked out; the current release tree does not include that directory or its submodule metadata. Prepare a compatible Isaac Lab checkout before using that workflow. The evaluation launchers start the simulator with SIMPLE/.venv/bin/python; if that environment lacks transformers or safetensors, set KIMODO_MODEL_SITE_PACKAGES to a Python 3.10 site-packages directory that contains them.
+~~~bash
+bash scripts/pre-minimal-download.sh
+~~~
+
+The evaluation wrapper uses SIMPLE/.venv/bin/python by default. If that environment does not contain the Kimodo model dependencies, expose the Python 3.10 site-packages from the Kimodo environment:
+
+~~~bash
+export KIMODO_MODEL_SITE_PACKAGES="$CONDA_BASE/envs/kimodo/lib/python3.10/site-packages"
+~~~
+
+#### 3.2 Prepare SIMPLE evaluation data
+
+SIMPLE simulator resources and official Level data are provided through SIMPLE_DATA_DIR. The evaluation wrapper expects task-specific Level directories below the SIMPLE data root, for example:
+
+~~~text
+SIMPLE_DATA_DIR/
+└── simple-eval/
+    └── G1WholebodyXMoveBendPickTeleop-v0/
+        ├── dr-level-0/
+        ├── dr-level-1/
+        └── dr-level-2/
+~~~
+
+Each Level directory must contain meta/episodes.jsonl. The Kimodo language embedding cache is read from data/cache/Simple by default:
+
+~~~bash
+export SIMPLE_DATA_DIR=/path/to/simple-eval-data
+test -d "$SIMPLE_DATA_DIR"
+test -d "$PROJECT_ROOT/data/cache/Simple"
+find "$PROJECT_ROOT/data/cache/Simple" -name '*.pt' -print
+~~~
+
+The current release tree does not include SIMPLE/third_party/IsaacLab or its submodule metadata. The optional SIMPLE/scripts/install_isaaclab.sh workflow therefore requires a compatible Isaac Lab checkout to be prepared separately. The local SIMPLE pyproject intentionally does not install Isaac Sim; install a compatible Isaac Sim 4.5 runtime according to the upstream SIMPLE documentation before running the full mujoco_isaac evaluation.
+
+#### 3.3 Verify the evaluation wrapper
+
+Use a released Kimodo task checkpoint and run a dry run before launching simulation:
+
+~~~bash
+export CONDA_BASE="$(conda info --base)"
+export KIMODO_MODEL_SITE_PACKAGES="$CONDA_BASE/envs/kimodo/lib/python3.10/site-packages"
+bash evaluation/simple_eval_signal_task_sonic.sh \
+  --task G1WholebodyXMoveBendPickTeleop-v0 \
+  --checkpoint /path/to/checkpoint_200000 \
+  --simple-data-dir "$SIMPLE_DATA_DIR" \
+  --gpus 0 \
+  --levels 0 \
+  --seeds 0 \
+  --episodes 1 \
+  --dry-run
+~~~
+
+For the official protocol, use levels 0, 1, and 2 with the task-matched checkpoint and evaluation data. Do not mix the Kimodo training environment with the SIMPLE simulator environment; only the model dependency path should be shared through KIMODO_MODEL_SITE_PACKAGES when needed.
 
 ## Model Checkpoints
 
@@ -245,7 +473,7 @@ Each shell launcher reads the same-name YAML in its directory by default. Set KI
 Download the base models and prepare the three pretraining datasets first. The 419h configuration uses the full data mixture, trains for up to 1,000,000 steps, and saves every 200,000 steps:
 
 ~~~bash
-conda activate kimodo-env
+conda activate kimodo
 export KIMODO_ENV="$CONDA_PREFIX"
 PROJECT_ROOT="$(git rev-parse --show-toplevel)"
 export UNIFOLM_ROOT="$PROJECT_ROOT/datasets/UnifoLM_WBT_Dataset"
@@ -267,7 +495,7 @@ Use the [105h](scripts/Pre_Train/pt_105h_gbs1024_100w_controlnet4_detach_true_ms
 The multi-task SONIC configuration uses the repository's seven-task Sonic RefPose training set. The following example trains from scratch; the ft launcher additionally takes an initialization checkpoint:
 
 ~~~bash
-conda activate kimodo-env
+conda activate kimodo
 export KIMODO_ENV="$CONDA_PREFIX"
 PROJECT_ROOT="$(git rev-parse --show-toplevel)"
 export HUMANOID_ARENA_ROOT="$PROJECT_ROOT/datasets/HumanoidArena_dataset_v3_1"
@@ -312,7 +540,7 @@ Available tasks and backends depend on the labels present in the dataset. Common
 This workflow uses the Kimodo training environment. KIMODO_SIMPLE_ROOT must point to the formatted SIMPLE training-data root; SIMPLE simulator dependencies are only needed for evaluation:
 
 ~~~bash
-conda activate kimodo-env
+conda activate kimodo
 export KIMODO_ENV="$CONDA_PREFIX"
 PROJECT_ROOT="$(git rev-parse --show-toplevel)"
 export KIMODO_SIMPLE_ROOT="$PROJECT_ROOT/datasets/Simple"
@@ -346,7 +574,7 @@ CHECKPOINT=/path/to/downloaded/checkpoint_200000
 
 export HUMANOIDARENA_ROOT="$PROJECT_ROOT/HumanoidArena"
 export KIMODO_SIM_ENV="$CONDA_BASE/envs/unitree_sim_env"
-export KIMODO_SERVER_PYTHON="$CONDA_BASE/envs/kimodo-env/bin/python"
+export KIMODO_SERVER_PYTHON="$CONDA_BASE/envs/lerobot/bin/python"
 
 bash evaluation/humanoidarena_eval_signal_task_sonic.sh \
   --project "$PROJECT_ROOT" \
@@ -374,7 +602,7 @@ CONDA_BASE="$(conda info --base)"
 CHECKPOINT=/path/to/Simple_Single_Task/checkpoint_200000
 export SIMPLE_DATA_DIR=/path/to/simple-eval-data
 # Set this only when SIMPLE/.venv lacks transformers or safetensors.
-export KIMODO_MODEL_SITE_PACKAGES="$CONDA_BASE/envs/kimodo-env/lib/python3.10/site-packages"
+export KIMODO_MODEL_SITE_PACKAGES="$CONDA_BASE/envs/kimodo/lib/python3.10/site-packages"
 
 bash evaluation/simple_eval_signal_task_sonic.sh \
   --task G1WholebodyXMoveBendPickTeleop-v0 \
