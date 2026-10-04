@@ -383,20 +383,7 @@ hf download WilliamWang16/HumanoidArena_dataset_v3_1 \
   --local-dir "$PROJECT_ROOT/datasets/HumanoidArena_dataset_v3_1"
 ~~~
 
-If the dataset is gated or requires authentication, run hf auth login first. The Arena training configurations read the dataset root from HUMANOID_ARENA_ROOT. The expected default layout is:
-
-~~~text
-datasets/HumanoidArena_dataset_v3_1/
-├── HOI_double_desk/
-├── HOI_football/
-├── HOI_pp_box/
-├── HSI_boxing/
-├── HSI_open_door/
-├── HSI_sit_sofa/
-└── HSI_vision_navi/
-~~~
-
-The exact directory names and episode schema are defined by the HumanoidArena release. Do not create empty placeholder directories. Each selected task must contain compatible LeRobot episodes, camera observations, language instructions, and G1 reference-pose actions.
+If the dataset is gated or requires authentication, run hf auth login first. The Arena training configurations read the dataset root from HUMANOID_ARENA_ROOT. Each selected task must contain compatible LeRobot episodes, camera observations, language instructions, and G1 reference-pose actions.
 
 The multi-task SONIC YAML selects the Sonic RefPose collection through sonic_8_refpose_v3_1 and excludes the extra HOI_grap_cup entry, resulting in the official seven-task training set. Single-task YAML files select one task and backend through KIMODO_ARENA_TASK and KIMODO_ARENA_BACKEND.
 
