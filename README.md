@@ -26,6 +26,7 @@ The policy is built on a frozen Kimodo motion backbone. DINOv3 extracts image fe
 ## Contents
 
 - [SETUP](#setup)
+- [HumanoidArena Training & Evaluation](#humanoidarena-training--evaluation)
 - [Model Checkpoints](#model-checkpoints)
 - [Data Preparation](#data-preparation)
 - [Training](#training)
@@ -336,6 +337,199 @@ bash evaluation/simple_eval_signal_task_sonic.sh \
 ~~~
 
 For the official protocol, use levels 0, 1, and 2 with the task-matched checkpoint and evaluation data. Do not mix the Kimodo training environment with the SIMPLE simulator environment; only the model dependency path should be shared through KIMODO_MODEL_SITE_PACKAGES when needed.
+
+## HumanoidArena Training & Evaluation
+
+This section gives the complete Arena workflow after the environments in [SETUP](#setup) are installed. Training runs in the Kimodo Conda environment. Evaluation uses the HumanoidArena simulator in unitree_sim_env and the Kimodo model server in lerobot.
+
+### Environment Setup
+
+Complete [SETUP, Part 2](#2-humanoidarena-evaluation-environment) before training or evaluation. For training, activate the Kimodo environment and point the dataset variable to the local HumanoidArena dataset:
+
+~~~bash
+conda activate kimodo
+export KIMODO_ENV="$CONDA_PREFIX"
+PROJECT_ROOT="$(git rev-parse --show-toplevel)"
+export HUMANOID_ARENA_ROOT="$PROJECT_ROOT/datasets/HumanoidArena_dataset_v3_1"
+test -d "$HUMANOID_ARENA_ROOT" || {
+  echo "Missing HumanoidArena dataset: $HUMANOID_ARENA_ROOT" >&2
+  exit 2
+}
+~~~
+
+For evaluation, keep the simulator and model server in separate environments:
+
+~~~bash
+export CONDA_BASE="$(conda info --base)"
+export HUMANOIDARENA_ROOT="$PROJECT_ROOT/HumanoidArena"
+export KIMODO_SIM_ENV="$CONDA_BASE/envs/unitree_sim_env"
+export KIMODO_SERVER_PYTHON="$CONDA_BASE/envs/lerobot/bin/python"
+export SONIC_POLICY_ROOT="$HUMANOIDARENA_ROOT/GR00T-WholeBodyControl/gear_sonic_deploy/policy/release"
+export TEXT_EMBEDDING_CACHE="$PROJECT_ROOT/data/cache/HumanoidArena"
+export OMNI_KIT_ACCEPT_EULA=YES
+~~~
+
+Before a full run, verify that the simulator Python, model-server Python, SONIC artifacts, text cache, and Isaac Lab task YAML are available. The evaluation wrappers provide dry-run validation without launching Isaac Sim.
+
+### Data Preparation
+
+The Arena training configurations read the dataset root from HUMANOID_ARENA_ROOT. The expected default layout is:
+
+~~~text
+datasets/HumanoidArena_dataset_v3_1/
+├── HOI_double_desk/
+├── HOI_football/
+├── HOI_pp_box/
+├── HSI_boxing/
+├── HSI_open_door/
+├── HSI_sit_sofa/
+└── HSI_vision_navi/
+~~~
+
+The exact directory names and episode schema are defined by the HumanoidArena release. Do not create empty placeholder directories. Each selected task must contain compatible LeRobot episodes, camera observations, language instructions, and G1 reference-pose actions.
+
+The multi-task SONIC YAML selects the Sonic RefPose collection through sonic_8_refpose_v3_1 and excludes the extra HOI_grap_cup entry, resulting in the official seven-task training set. Single-task YAML files select one task and backend through KIMODO_ARENA_TASK and KIMODO_ARENA_BACKEND.
+
+Audit the dataset before training:
+
+~~~bash
+PROJECT_ROOT="$(git rev-parse --show-toplevel)"
+python utils/check_datasets.py \
+  --config scripts/HumanoidArena_Multi_Task/humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse.yaml \
+  --workers 1 \
+  --limit 5 \
+  --output "$PROJECT_ROOT/log/humanoidarena_dataset_audit.json"
+~~~
+
+The checker validates episode metadata, task selection, and action continuity. It does not replace a small GPU run that verifies video decoding and memory usage.
+
+### Kimodo-Policy Checkpoints
+
+The base Kimodo, DINOv3, Llama/LLM2Vec, and released Arena checkpoints are hosted in the [Hugging Face model repository](https://huggingface.co/YunhengWang/kimodo-policy/tree/main). Download the base dependencies before training, then choose an Arena checkpoint from the catalog below.
+
+| Arena experiment | Hugging Face directory | Published checkpoints |
+| --- | --- | --- |
+| SONIC multi-task from scratch | [humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Multi_Task/humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse) | 500k |
+| SONIC multi-task initialized from 105h pretraining | [ft_humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Multi_Task/ft_105h_humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse) | 100k, 200k, 300k, 400k, 500k |
+| SONIC multi-task initialized from 419h pretraining | [ft_humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Multi_Task/ft_419h_humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse) | 100k, 200k, 300k, 400k, 500k |
+| SONIC multi-task with SEED motion backbone | [humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse_SEED](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Multi_Task/humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse_SEED) | 500k |
+| SONIC multi-task large hand head | [large_hand4](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Multi_Task/humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse_large_hand4) and [large_hand8](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Multi_Task/humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse_large_hand8) | 500k each |
+| Arena single-task from scratch | [HumanoidArena_Single_Task](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Single_Task) | 200k per task |
+| Arena single-task initialized from 419h pretraining | [HumanoidArena_Single_Task](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Single_Task) | 200k per task |
+
+The single-task release contains DoubleDesk, Football, P&P Box, Boxing, Open Door, Sit Sofa, and Vision Navigation. The exact task names and checkpoint directories are listed in the [released checkpoint catalog](#released-checkpoint-catalog). A checkpoint passed to a training or evaluation script must be the directory containing config.json and training_state.pt, for example checkpoint_200000.
+
+For Arena fine-tuning, the standard initialization is the 419h pretraining checkpoint:
+
+~~~text
+Pre_Train/pt_419h_gbs1024_100w_controlnet4_detach_true_mse/
+└── <date>/checkpoint_1000000/
+    ├── config.json
+    ├── training_state.pt
+    └── model and RNG state files
+~~~
+
+### Training on Arena
+
+All Arena launchers use BF16 and Accelerate. KIMODO_GPUS controls the visible GPUs, and the global batch size changes when the number of GPUs changes. Set a different KIMODO_MASTER_PORT for simultaneous jobs on one host.
+
+#### Multi-task SONIC training from scratch
+
+This configuration trains one policy on the seven-task Sonic RefPose mixture for 500,000 steps and saves to log/HumanoidArena_Multi_Task/ by default:
+
+~~~bash
+conda activate kimodo
+export KIMODO_ENV="$CONDA_PREFIX"
+PROJECT_ROOT="$(git rev-parse --show-toplevel)"
+export HUMANOID_ARENA_ROOT="$PROJECT_ROOT/datasets/HumanoidArena_dataset_v3_1"
+
+KIMODO_GPUS=0,1,2,3 \
+  bash scripts/HumanoidArena_Multi_Task/humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse.sh
+~~~
+
+Use the SEED, large_hand4, or large_hand8 launcher in the same directory for the corresponding model variant.
+
+#### Multi-task fine-tuning from a Kimodo checkpoint
+
+Pass a complete pretraining checkpoint as the only positional argument:
+
+~~~bash
+INIT_CKPT=/path/to/checkpoint_1000000
+KIMODO_GPUS=0,1,2,3 \
+  bash scripts/HumanoidArena_Multi_Task/ft_humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse.sh \
+  "$INIT_CKPT"
+~~~
+
+The 105h and 419h released fine-tuning families use the same launcher interface; select the matching YAML through KIMODO_CONFIG when reproducing a particular published run.
+
+#### Single-task training
+
+Train one task from scratch:
+
+~~~bash
+conda activate kimodo
+export KIMODO_ENV="$CONDA_PREFIX"
+PROJECT_ROOT="$(git rev-parse --show-toplevel)"
+export HUMANOID_ARENA_ROOT="$PROJECT_ROOT/datasets/HumanoidArena_dataset_v3_1"
+
+KIMODO_GPUS=0,1,2,3 \
+  bash scripts/HumanoidArena_Single_Task/humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse.sh \
+  doubledesk sonic
+~~~
+
+Fine-tune the same task from a pretrained checkpoint:
+
+~~~bash
+KIMODO_GPUS=0,1,2,3 \
+  bash scripts/HumanoidArena_Single_Task/ft_humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse.sh \
+  doubledesk sonic /path/to/checkpoint_1000000
+~~~
+
+Supported task aliases include doubledesk, football, pp_box, boxing, open_door, sit_sofa, and vision_navi. The script maps these aliases to the task names used by the dataset adapter. Outputs are saved under log/HumanoidArena_Single_Task/ with the task and backend included in the run name.
+
+### Evaluation
+
+Evaluation starts two processes: an Isaac Sim/Isaac Lab worker from unitree_sim_env and a Kimodo inference server from lerobot. Set the environment variables from the Environment Setup subsection first. The checkpoint passed to the wrapper must be a Kimodo training checkpoint; SONIC and TWIST2 simulator assets are separate files.
+
+#### SONIC evaluation
+
+The following command evaluates one task with three GPUs, deterministic simulator startup, and no persistent simulator reuse:
+
+~~~bash
+bash evaluation/humanoidarena_eval_signal_task_sonic.sh \
+  --project "$PROJECT_ROOT" \
+  --task doubledesk \
+  --checkpoint /path/to/checkpoint_200000 \
+  --gpus 5,6,7 \
+  --seeds 0,1,2 \
+  --repeats 20 \
+  --dtype fp32 \
+  --diffusion-steps 10 \
+  --execution-frames 15 \
+  --rtc 0 \
+  --persistent-sim 0 \
+  --deterministic-eval 1 \
+  --results-dir "$PROJECT_ROOT/eval_results/arena_doubledesk"
+~~~
+
+For continuous multi-task evaluation, use evaluation/humanoidarena_eval_multi_task_sonic.sh and pass the task list in the order required by the benchmark. See [HumanoidArena Evaluation](evaluation/humanoidarena_eval.md) for video recording, RTC, seeds, and result aggregation.
+
+#### TWIST2 evaluation
+
+TWIST2 uses the same Kimodo server environment but requires the TWIST2 ONNX asset and the task-specific Isaac Lab YAML:
+
+~~~bash
+bash evaluation/humanoidarena_eval_signal_task_twist2.sh \
+  --project "$PROJECT_ROOT" \
+  --task football \
+  --checkpoint /path/to/checkpoint_200000 \
+  --gpus 5,6,7 \
+  --seeds 0,1,2 \
+  --repeats 20 \
+  --results-dir "$PROJECT_ROOT/eval_results/twist2_football"
+~~~
+
+Every evaluation run should have its own results directory. The wrappers write summary statistics, per-episode outputs, and optional videos there. A failed preflight usually indicates a missing simulator asset, cache file, environment variable, or incomplete checkpoint; the wrapper prints the missing path before launching the worker.
 
 ## Model Checkpoints
 
