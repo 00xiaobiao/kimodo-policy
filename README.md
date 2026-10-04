@@ -400,29 +400,17 @@ The checker validates episode metadata, task selection, and action continuity. I
 
 ### Kimodo-Policy Checkpoints
 
-The base Kimodo, DINOv3, Llama/LLM2Vec, and released Arena checkpoints are hosted in the [Hugging Face model repository](https://huggingface.co/YunhengWang/kimodo-policy/tree/main). Download the base dependencies before training, then choose an Arena checkpoint from the catalog below.
+The table below lists the released single-task Arena checkpoints. Result links are reserved for future evaluation reports.
 
-| Arena experiment | Hugging Face directory | Published checkpoints |
+| Task | Kimodo-Policy checkpoint | Results |
 | --- | --- | --- |
-| SONIC multi-task from scratch | [humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Multi_Task/humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse) | 500k |
-| SONIC multi-task initialized from 105h pretraining | [ft_humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Multi_Task/ft_105h_humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse) | 100k, 200k, 300k, 400k, 500k |
-| SONIC multi-task initialized from 419h pretraining | [ft_humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Multi_Task/ft_419h_humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse) | 100k, 200k, 300k, 400k, 500k |
-| SONIC multi-task with SEED motion backbone | [humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse_SEED](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Multi_Task/humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse_SEED) | 500k |
-| SONIC multi-task large hand head | [large_hand4](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Multi_Task/humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse_large_hand4) and [large_hand8](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Multi_Task/humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse_large_hand8) | 500k each |
-| Arena single-task from scratch | [HumanoidArena_Single_Task](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Single_Task) | 200k per task |
-| Arena single-task initialized from 419h pretraining | [HumanoidArena_Single_Task](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Single_Task) | 200k per task |
-
-The single-task release contains DoubleDesk, Football, P&P Box, Boxing, Open Door, Sit Sofa, and Vision Navigation. The exact task names and checkpoint directories are listed in the [released checkpoint catalog](#released-checkpoint-catalog). A checkpoint passed to a training or evaluation script must be the directory containing config.json and training_state.pt, for example checkpoint_200000.
-
-For Arena fine-tuning, the standard initialization is the 419h pretraining checkpoint:
-
-~~~text
-Pre_Train/pt_419h_gbs1024_100w_controlnet4_detach_true_mse/
-└── <date>/checkpoint_1000000/
-    ├── config.json
-    ├── training_state.pt
-    └── model and RNG state files
-~~~
+| doubledesk | [from scratch](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Single_Task/humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse_HOI_double_desk_sonic) · [419h fine-tuned](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Single_Task/ft_419h_humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse_HOI_double_desk_sonic) | |
+| football | [from scratch](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Single_Task/humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse_HOI_football_sonic) · [419h fine-tuned](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Single_Task/ft_419h_humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse_HOI_football_sonic) | |
+| pp_box | [from scratch](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Single_Task/humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse_HOI_pp_box_sonic) · [419h fine-tuned](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Single_Task/ft_419h_humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse_HOI_pp_box_sonic) | |
+| boxing | [from scratch](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Single_Task/humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse_HSI_boxing_sonic) · [419h fine-tuned](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Single_Task/ft_419h_humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse_HSI_boxing_sonic) | |
+| open_door | [from scratch](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Single_Task/humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse_HSI_open_door_sonic) · [419h fine-tuned](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Single_Task/ft_419h_humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse_HSI_open_door_sonic) | |
+| sit_sofa | [from scratch](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Single_Task/humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse_HSI_sit_sofa_sonic) · [419h fine-tuned](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Single_Task/ft_419h_humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse_HSI_sit_sofa_sonic) | |
+| vision_navi | [from scratch](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Single_Task/humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse_HSI_vision_navi_sonic) · [419h fine-tuned](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Single_Task/ft_419h_humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse_HSI_vision_navi_sonic) | |
 
 ### Training on Arena
 
