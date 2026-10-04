@@ -27,10 +27,7 @@ The policy is built on a frozen Kimodo motion backbone. DINOv3 extracts image fe
 
 - [SETUP](#setup)
 - [HumanoidArena Training & Evaluation](#humanoidarena-training--evaluation)
-- [Model Checkpoints](#model-checkpoints)
-- [Data Preparation](#data-preparation)
-- [Training](#training)
-- [Inference and Evaluation](#inference-and-evaluation)
+- [Simple Training & Evaluation](#simple-training--evaluation)
 - [Real-World Deployment](#real-world-deployment)
 - [Troubleshooting](#troubleshooting)
 
@@ -70,7 +67,7 @@ Requirements:
 
 - Linux and an NVIDIA GPU with a driver compatible with the selected CUDA PyTorch wheel.
 - Python 3.10. The training configurations use BF16 by default, so BF16-capable GPUs are recommended.
-- The Kimodo, DINOv3, Llama/LLM2Vec, and task checkpoint files described in [Model Checkpoints](#model-checkpoints).
+- The Kimodo, DINOv3, Llama/LLM2Vec, and task checkpoint files hosted in the [Hugging Face model repository](https://huggingface.co/YunhengWang/kimodo-policy/tree/main).
 
 Create or reuse the local Kimodo environment:
 
@@ -400,7 +397,7 @@ The checker validates episode metadata, task selection, and action continuity. I
 
 ### Kimodo-Policy Checkpoints
 
-The table below lists the released single-task Arena checkpoints. Results are single-task success rates (SR) from Table 1 of the paper.
+This release provides the trained Kimodo-Policy weights used for the HumanoidArena experiments. It includes single-task Arena policies fine-tuned from the large-scale Kimodo-Policy pretraining stage, together with policies trained directly from scratch on each Arena task. Every row corresponds to an independently trained single-task policy; the `Pretrain` column indicates whether the policy uses the pretrained initialization. Results are single-task success rates (SR) from Table 1 of the paper.
 
 | Task | Pretrain | Kimodo-Policy checkpoint | Results&nbsp;(SR) |
 | --- | --- | --- | --- |
@@ -521,293 +518,61 @@ bash evaluation/humanoidarena_eval_signal_task_twist2.sh \
 
 Every evaluation run should have its own results directory. The wrappers write summary statistics, per-episode outputs, and optional videos there. A failed preflight usually indicates a missing simulator asset, cache file, environment variable, or incomplete checkpoint; the wrapper prints the missing path before launching the worker.
 
-## Model Checkpoints
+## Simple Training & Evaluation
 
-All Kimodo training checkpoints and base model weights are hosted in [YunhengWang/kimodo-policy](https://huggingface.co/YunhengWang/kimodo-policy/tree/main). The Git repository does not include these large files. The model repository follows the relative paths shown below.
+Complete [SETUP, Part 3](#3-simple-evaluation-environment) before using SIMPLE. Policy fine-tuning runs in the Kimodo training environment, while evaluation runs in the SIMPLE simulator environment. A checkpoint passed to either workflow must contain both `config.json` and `training_state.pt`.
 
-### Download Base Models
+### Training
 
-From the repository root:
-
-~~~bash
-python -m pip install --upgrade huggingface_hub
-python - <<'PY'
-from huggingface_hub import snapshot_download
-
-snapshot_download(
-    repo_id="YunhengWang/kimodo-policy",
-    repo_type="model",
-    local_dir=".",
-    allow_patterns=["checkpoints/**"],
-)
-PY
-~~~
-
-Expected base-model layout:
-
-~~~text
-checkpoints/
-├── Kimodo-G1-RP-v1/                         # Default Kimodo motion backbone
-├── Kimodo-G1-SEED-v1/                       # Backbone used by the SEED experiments
-├── dinov3-vitl16-pretrain-lvd1689m/         # DINOv3 image encoder
-├── LLM2Vec-Meta-Llama-3-8B-Instruct-mntp/  # LLM2Vec base model
-├── LLM2Vec-Meta-Llama-3-8B-Instruct-mntp-supervised/
-└── Meta-Llama-3-8B-Instruct/               # Llama base weights and tokenizer
-~~~
-
-Fine-tuning requires a pretrained training checkpoint in addition to the base models. The following example downloads the released 419h, 1,000,000-step pretraining checkpoint:
-
-~~~bash
-python - <<'PY'
-from huggingface_hub import snapshot_download
-
-snapshot_download(
-    repo_id="YunhengWang/kimodo-policy",
-    repo_type="model",
-    local_dir=".",
-    allow_patterns=[
-        "Pre_Train/pt_419h_gbs1024_100w_controlnet4_detach_true_mse/2026-08-26_17-06-35/checkpoint_1000000/**"
-    ],
-)
-PY
-~~~
-
-The resulting checkpoint path is:
-
-~~~text
-Pre_Train/pt_419h_gbs1024_100w_controlnet4_detach_true_mse/
-└── 2026-08-26_17-06-35/
-    └── checkpoint_1000000/
-        ├── config.json
-        ├── training_state.pt
-        └── ...
-~~~
-
-Inference and fine-tuning entry points require at least config.json and training_state.pt in the checkpoint directory. Use --init-checkpoint to initialize a new task from a trained model, and --resume to continue the same training run. Exact distributed RNG recovery also requires the corresponding rng_state_rank_*.pt files, so downloading the complete checkpoint directory is recommended.
-
-### Released Checkpoint Catalog
-
-The directories below are available in the model repository (checked on 2026-10-04). Open a link, enter the experiment directory, and select a date and checkpoint_<step>. Download a checkpoint that matches the evaluation task.
-
-| Use | Hugging Face directory | Published checkpoints |
-| --- | --- | --- |
-| Shared base-model dependencies | [checkpoints/](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/checkpoints) | Kimodo-G1-RP-v1, Kimodo-G1-SEED-v1, DINOv3, Llama/LLM2Vec |
-| Base pretraining | [Pre_Train/pt_419h_gbs1024_100w_controlnet4_detach_true_mse](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/Pre_Train/pt_419h_gbs1024_100w_controlnet4_detach_true_mse) | 200k, 400k, 600k, 800k, 1,000k |
-| HumanoidArena multi-task, 105h initialization | [ft_105h...](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Multi_Task/ft_105h_humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse) | 100k, 200k, 300k, 400k, 500k |
-| HumanoidArena multi-task, 419h initialization | [ft_419h...](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Multi_Task/ft_419h_humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse) | 100k, 200k, 300k, 400k, 500k |
-| HumanoidArena multi-task, base variant | [SONIC x7](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Multi_Task/humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse) | 500k |
-| HumanoidArena multi-task, SEED backbone | [SONIC x7 SEED](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Multi_Task/humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse_SEED) | 500k |
-| HumanoidArena multi-task, hand-head variants | [large_hand4](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Multi_Task/humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse_large_hand4) and [large_hand8](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Multi_Task/humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse_large_hand8) | 500k each |
-| HumanoidArena single-task, from scratch | [double desk](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Single_Task/humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse_HOI_double_desk_sonic), [football](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Single_Task/humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse_HOI_football_sonic), [pp box](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Single_Task/humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse_HOI_pp_box_sonic), [boxing](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Single_Task/humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse_HSI_boxing_sonic), [open door](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Single_Task/humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse_HSI_open_door_sonic), [sit sofa](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Single_Task/humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse_HSI_sit_sofa_sonic), [vision navi](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Single_Task/humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse_HSI_vision_navi_sonic) | 200k each |
-| HumanoidArena single-task, 419h initialization | [double desk](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Single_Task/ft_419h_humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse_HOI_double_desk_sonic), [football](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Single_Task/ft_419h_humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse_HOI_football_sonic), [pp box](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Single_Task/ft_419h_humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse_HOI_pp_box_sonic), [boxing](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Single_Task/ft_419h_humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse_HSI_boxing_sonic), [open door](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Single_Task/ft_419h_humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse_HSI_open_door_sonic), [sit sofa](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Single_Task/ft_419h_humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse_HSI_sit_sofa_sonic), [vision navi](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Single_Task/ft_419h_humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse_HSI_vision_navi_sonic) | 200k each |
-| SIMPLE single-task, continuous hand | [CloseDoor](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/Simple_Single_Task/ft_simple_single_gbs64_20w_controlnet4_detach_true_mse_continuous_hand_G1WholebodyCloseDoorTeleop-v0), [Handover](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/Simple_Single_Task/ft_simple_single_gbs64_20w_controlnet4_detach_true_mse_continuous_hand_G1WholebodyHandoverTeleop-v0), [LocomotionPickBetweenTables](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/Simple_Single_Task/ft_simple_single_gbs64_20w_controlnet4_detach_true_mse_continuous_hand_G1WholebodyLocomotionPickBetweenTablesTeleop-v0), [OpenFaucet](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/Simple_Single_Task/ft_simple_single_gbs64_20w_controlnet4_detach_true_mse_continuous_hand_G1WholebodyOpenFaucetTeleop-v0), [OpenOven](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/Simple_Single_Task/ft_simple_single_gbs64_20w_controlnet4_detach_true_mse_continuous_hand_G1WholebodyOpenOvenTeleop-v0), [OpenTrashCan](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/Simple_Single_Task/ft_simple_single_gbs64_20w_controlnet4_detach_true_mse_continuous_hand_G1WholebodyOpenTrashCanTeleop-v0), [PushOfficeChair](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/Simple_Single_Task/ft_simple_single_gbs64_20w_controlnet4_detach_true_mse_continuous_hand_G1WholebodyPushOfficeChairTeleop-v0), [XMoveBendPick](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/Simple_Single_Task/ft_simple_single_gbs64_20w_controlnet4_detach_true_mse_continuous_hand_G1WholebodyXMoveBendPickTeleop-v0) | 200k each |
-| Real_World | [Model repository](https://huggingface.co/YunhengWang/kimodo-policy/tree/main) | No released Real_World training checkpoint at this time |
-
-HumanoidArena and SIMPLE single-task directories contain separate task-named subdirectories. The checkpoint_200000 directory inside each experiment directory is the checkpoint passed to the evaluator. The 105h/210h pretraining launchers are included in the code, but the current Hugging Face release lists the 419h pretraining run.
-
-Kimodo, DINOv3, Llama, and LLM2Vec weights have their own license terms. Read the Hugging Face model card and upstream licenses before use or redistribution. Training data, HumanoidArena simulator assets, and SIMPLE Level evaluation data are not included in the checkpoint download steps.
-
-## Data Preparation
-
-Dataset roots can be overridden with environment variables or set in the experiment YAML under main.dataset_roots. Each directory must follow the format expected by its adapter in data/; an empty directory is not sufficient.
-
-| Dataset | Environment variable | Default directory or selection |
-| --- | --- | --- |
-| HumanoidArena | HUMANOID_ARENA_ROOT | datasets/HumanoidArena_dataset_v3_1; multi-task configurations select the SONIC RefPose data |
-| UnifoLM whole-body | UNIFOLM_ROOT | datasets/UnifoLM_WBT_Dataset; uses the head stereo-left camera |
-| HumanoidEveryday | HUMANOID_EVERYDAY_ROOT | datasets/HumanoidEveryday |
-| HIW500 | HIW500_ROOT | datasets/HIW500 |
-| SIMPLE training data | KIMODO_SIMPLE_ROOT | datasets/Simple; the task directory is selected by the launcher argument |
-| RealWorld offline data | REAL_WORLD_ROOT | real-world |
-
-The pretraining configurations combine UnifoLM, HumanoidEveryday, and HIW500 data. They use 25%, 50%, or 100% of the available episodes through pretrain_data_fraction, corresponding to the 105h, 210h, and 419h experiment names. HumanoidArena multi-task data is selected by the YAML configuration. Single-task experiments select the task and backend through launcher arguments. The SIMPLE training-data root and the official SIMPLE Level 0/1/2 evaluation data are separate inputs; the latter is provided through SIMPLE_DATA_DIR during evaluation.
-
-The data adapter raises an error when a path is missing, no episodes are selected, or the format is incompatible. Before a full run, use the checker to audit a sample of the data. Pass the current YAML explicitly instead of relying on an old checker default. The checker audits episode/schema information and action continuity; it does not decode video:
-
-~~~bash
-PROJECT_ROOT="$(git rev-parse --show-toplevel)"
-python utils/check_datasets.py \
-  --config scripts/Pre_Train/pt_419h_gbs1024_100w_controlnet4_detach_true_mse.yaml \
-  --workers 1 \
-  --limit 5 \
-  --output "$PROJECT_ROOT/log/pretrain_dataset_audit.json"
-~~~
-
-A small-scale job is still recommended before formal training to validate video loading and GPU memory usage.
-
-## Training
-
-Each launcher locates the repository root and its companion YAML, then starts accelerate launch with the requested GPUs. Training outputs are saved by default as log/<task-category>/<run-name>/<timestamp>/checkpoint_<step>. Set KIMODO_GPUS to select GPUs. Pretraining launchers default to eight GPUs; the other commonly used launchers default to four. Changing the GPU count changes the global batch size, so the gbs value in a filename is only valid when the YAML process count is used.
-
-### Launcher Overview
-
-Each shell launcher reads the same-name YAML in its directory by default. Set KIMODO_CONFIG to use a custom configuration.
-
-| Task | Launcher | Initialization and default output |
-| --- | --- | --- |
-| Pretraining | [105h](scripts/Pre_Train/pt_105h_gbs1024_100w_controlnet4_detach_true_mse.sh), [210h](scripts/Pre_Train/pt_210h_gbs1024_100w_controlnet4_detach_true_mse.sh), [419h](scripts/Pre_Train/pt_419h_gbs1024_100w_controlnet4_detach_true_mse.sh) | Starts from Kimodo base weights; log/Pre_Train/<run-name>/ |
-| HumanoidArena multi-task | [from scratch](scripts/HumanoidArena_Multi_Task/humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse.sh), [fine-tuning](scripts/HumanoidArena_Multi_Task/ft_humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse.sh) | Fine-tuning requires a checkpoint; log/HumanoidArena_Multi_Task/<run-name>/ |
-| HumanoidArena multi-task variants | [SEED](scripts/HumanoidArena_Multi_Task/humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse_SEED.sh), [large_hand4](scripts/HumanoidArena_Multi_Task/humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse_large_hand4.sh), [large_hand8](scripts/HumanoidArena_Multi_Task/humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse_large_hand8.sh) | Variant settings are in the companion YAML; output is under log/HumanoidArena_Multi_Task/ |
-| HumanoidArena single-task | [from scratch](scripts/HumanoidArena_Single_Task/humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse.sh), [fine-tuning](scripts/HumanoidArena_Single_Task/ft_humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse.sh) | From-scratch training takes TASK BACKEND; fine-tuning also takes CHECKPOINT; log/HumanoidArena_Single_Task/<run-name>/ |
-| SIMPLE single-task fine-tuning | [continuous hand](scripts/Simple_Single_Task/ft_simple_single_gbs64_20w_controlnet4_detach_true_mse_continuous_hand.sh) | Takes TASK CHECKPOINT; log/Simple_Single_Task/<run-name>_<TASK>/ |
-| RealWorld offline fine-tuning | [Real_World](scripts/Real_World/ft_real_world_single_gbs64_5w_controlnet4_detach_true_mse.sh) | Takes CHECKPOINT and an optional dataset name; log/Real_World/<run-name>_<dataset>/ |
-
-### Multi-Source Pretraining
-
-Download the base models and prepare the three pretraining datasets first. The 419h configuration uses the full data mixture, trains for up to 1,000,000 steps, and saves every 200,000 steps:
-
-~~~bash
-conda activate kimodo
-export KIMODO_ENV="$CONDA_PREFIX"
-PROJECT_ROOT="$(git rev-parse --show-toplevel)"
-export UNIFOLM_ROOT="$PROJECT_ROOT/datasets/UnifoLM_WBT_Dataset"
-export HUMANOID_EVERYDAY_ROOT="$PROJECT_ROOT/datasets/HumanoidEveryday"
-export HIW500_ROOT="$PROJECT_ROOT/datasets/HIW500"
-
-for data_root in "$UNIFOLM_ROOT" "$HUMANOID_EVERYDAY_ROOT" "$HIW500_ROOT"; do
-  test -d "$data_root" || { echo "Missing dataset directory: $data_root" >&2; exit 2; }
-done
-
-KIMODO_GPUS=0,1,2,3,4,5,6,7 \
-  bash scripts/Pre_Train/pt_419h_gbs1024_100w_controlnet4_detach_true_mse.sh
-~~~
-
-Use the [105h](scripts/Pre_Train/pt_105h_gbs1024_100w_controlnet4_detach_true_mse.sh) or [210h](scripts/Pre_Train/pt_210h_gbs1024_100w_controlnet4_detach_true_mse.sh) launcher for the other data fractions.
-
-### HumanoidArena Multi-Task Training
-
-The multi-task SONIC configuration uses the repository's seven-task Sonic RefPose training set. The following example trains from scratch; the ft launcher additionally takes an initialization checkpoint:
-
-~~~bash
-conda activate kimodo
-export KIMODO_ENV="$CONDA_PREFIX"
-PROJECT_ROOT="$(git rev-parse --show-toplevel)"
-export HUMANOID_ARENA_ROOT="$PROJECT_ROOT/datasets/HumanoidArena_dataset_v3_1"
-test -d "$HUMANOID_ARENA_ROOT" || { echo "Missing dataset directory: $HUMANOID_ARENA_ROOT" >&2; exit 2; }
-
-KIMODO_GPUS=0,1,2,3 \
-  bash scripts/HumanoidArena_Multi_Task/humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse.sh
-
-INIT_CKPT=/path/to/checkpoint_1000000
-KIMODO_GPUS=0,1,2,3 \
-  bash scripts/HumanoidArena_Multi_Task/ft_humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse.sh \
-  "$INIT_CKPT"
-~~~
-
-The same ft_humanoidarena_sonicx7 launcher accepts an initialization checkpoint from either the 105h or 419h pretraining run. SEED, large_hand4, and large_hand8 each have an independent configuration in [HumanoidArena_Multi_Task](scripts/HumanoidArena_Multi_Task/).
-
-### HumanoidArena Single-Task Training
-
-From-scratch training:
-
-~~~bash
-PROJECT_ROOT="$(git rev-parse --show-toplevel)"
-export HUMANOID_ARENA_ROOT="$PROJECT_ROOT/datasets/HumanoidArena_dataset_v3_1"
-test -d "$HUMANOID_ARENA_ROOT" || { echo "Missing dataset directory: $HUMANOID_ARENA_ROOT" >&2; exit 2; }
-KIMODO_GPUS=0,1,2,3 \
-  bash scripts/HumanoidArena_Single_Task/humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse.sh \
-  doubledesk sonic
-~~~
-
-Fine-tuning from a multi-source pretraining checkpoint:
-
-~~~bash
-KIMODO_GPUS=0,1,2,3 \
-  bash scripts/HumanoidArena_Single_Task/ft_humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse.sh \
-  doubledesk sonic /path/to/checkpoint_1000000
-~~~
-
-Available tasks and backends depend on the labels present in the dataset. Common SONIC tasks are doubledesk, football, pp_box, boxing, open_door, sit_sofa, and vision_navi. The default single-task configuration uses a per-process batch size of 16 and trains for 200,000 steps.
-
-### SIMPLE Single-Task Fine-Tuning
-
-This workflow uses the Kimodo training environment. KIMODO_SIMPLE_ROOT must point to the formatted SIMPLE training-data root; SIMPLE simulator dependencies are only needed for evaluation:
+The continuous-hand launcher fine-tunes one policy on one SIMPLE task. `KIMODO_SIMPLE_ROOT` must contain the selected task directory:
 
 ~~~bash
 conda activate kimodo
 export KIMODO_ENV="$CONDA_PREFIX"
 PROJECT_ROOT="$(git rev-parse --show-toplevel)"
 export KIMODO_SIMPLE_ROOT="$PROJECT_ROOT/datasets/Simple"
-test -d "$KIMODO_SIMPLE_ROOT" || { echo "Missing dataset directory: $KIMODO_SIMPLE_ROOT" >&2; exit 2; }
+test -d "$KIMODO_SIMPLE_ROOT/G1WholebodyXMoveBendPickTeleop-v0" || {
+  echo "Missing SIMPLE task directory" >&2
+  exit 2
+}
 
 KIMODO_GPUS=0,1,2,3 \
   bash scripts/Simple_Single_Task/ft_simple_single_gbs64_20w_controlnet4_detach_true_mse_continuous_hand.sh \
-  G1WholebodyXMovePickTeleop-v0 /path/to/checkpoint_1000000
+  G1WholebodyXMoveBendPickTeleop-v0 /path/to/checkpoint_1000000
 ~~~
 
-The launcher writes the task name into the run directory, with output under log/Simple_Single_Task/. Other tasks require a matching task directory under the training-data root.
+Use a task-specific checkpoint and matching task directory for other SIMPLE tasks. Outputs are written to `log/Simple_Single_Task/<run-name>_<TASK>/`.
 
-### RealWorld Offline Fine-Tuning
+### Evaluation
 
-The offline demonstration fine-tuning launcher is in [scripts/Real_World](scripts/Real_World/). It requires a compatible dataset under REAL_WORLD_ROOT and an initialization checkpoint. The real-robot deployment workflow is not released yet; see [Real-World Deployment](#real-world-deployment).
-
-Set KIMODO_CONFIG=/path/to/experiment.yaml to override the default YAML. Set KIMODO_GPUS to select processes. When multiple jobs run on one machine, set a different KIMODO_MASTER_PORT for each job if the default port is already in use.
-
-## Inference and Evaluation
-
-Evaluation checkpoints must contain both config.json and training_state.pt. The HumanoidArena and SIMPLE wrappers start the Kimodo inference server, run the corresponding simulator, and write evaluation results. The checkpoint, task environment, and evaluation data must match.
-
-### HumanoidArena SONIC
-
-Prepare the HumanoidArena unitree_sim_env, assets, and SONIC policy artifacts. The shell wrapper starts the simulator from KIMODO_SIM_ENV and the model server from KIMODO_SERVER_PYTHON:
-
-~~~bash
-PROJECT_ROOT="$(git rev-parse --show-toplevel)"
-CONDA_BASE="$(conda info --base)"
-CHECKPOINT=/path/to/downloaded/checkpoint_200000
-
-export HUMANOIDARENA_ROOT="$PROJECT_ROOT/HumanoidArena"
-export KIMODO_SIM_ENV="$CONDA_BASE/envs/unitree_sim_env"
-export KIMODO_SERVER_PYTHON="$CONDA_BASE/envs/lerobot/bin/python"
-
-bash evaluation/humanoidarena_eval_signal_task_sonic.sh \
-  --project "$PROJECT_ROOT" \
-  --task doubledesk \
-  --checkpoint "$CHECKPOINT" \
-  --gpus 0,1,2 \
-  --seeds 0,1,2 \
-  --repeats 20 \
-  --dtype fp32 \
-  --diffusion-steps 10 \
-  --execution-frames 15 \
-  --rtc 0 \
-  --results-dir "$PROJECT_ROOT/eval_results/doubledesk"
-~~~
-
-For continuous multi-task evaluation, use [humanoidarena_eval_multi_task_sonic.sh](evaluation/humanoidarena_eval_multi_task_sonic.sh) and pass tasks in order with --task doubledesk football pp_box. TWIST2 uses the independent [humanoidarena_eval_signal_task_twist2.sh](evaluation/humanoidarena_eval_signal_task_twist2.sh) wrapper. See [HumanoidArena Evaluation](evaluation/humanoidarena_eval.md) for seeds, RTC, video recording, and reporting parameters.
-
-### SIMPLE Level 0/1/2
-
-The SIMPLE evaluation wrapper starts the simulator with SIMPLE/.venv/bin/python. SIMPLE_DATA_DIR must point to the SIMPLE data root containing simulator resources and official Level data. The wrapper looks for simple-eval/<task>/dr-level-0/, dr-level-1/, and dr-level-2/ under that root; some releases use level-0/1/2 names instead. Each Level directory must contain meta/episodes.jsonl.
+The evaluator uses `SIMPLE/.venv/bin/python` by default and runs the official Level 0, Level 1, and Level 2 splits. Set `SIMPLE_DATA_DIR` to the SIMPLE data root containing simulator resources and `simple-eval/<task>/level-{0,1,2}` or `dr-level-{0,1,2}` directories. Each Level directory must contain `meta/episodes.jsonl`.
 
 ~~~bash
 PROJECT_ROOT="$(git rev-parse --show-toplevel)"
 CONDA_BASE="$(conda info --base)"
 CHECKPOINT=/path/to/Simple_Single_Task/checkpoint_200000
 export SIMPLE_DATA_DIR=/path/to/simple-eval-data
-# Set this only when SIMPLE/.venv lacks transformers or safetensors.
+# Set this when SIMPLE/.venv lacks transformers or safetensors.
 export KIMODO_MODEL_SITE_PACKAGES="$CONDA_BASE/envs/kimodo/lib/python3.10/site-packages"
 
 bash evaluation/simple_eval_signal_task_sonic.sh \
   --task G1WholebodyXMoveBendPickTeleop-v0 \
   --checkpoint "$CHECKPOINT" \
-  --gpus 0,1,2 \
+  --gpus 0 \
   --levels 0,1,2 \
   --seeds 0 \
   --episodes 10 \
   --simple-data-dir "$SIMPLE_DATA_DIR" \
   --dtype fp32 \
   --diffusion-steps 10 \
-  --execution-frames 15 \
+  --execution-frames 50 \
   --rtc 0 \
-  --max-navigation-speed 10.0 \
+  --max-navigation-speed 1.5 \
   --max-steps auto \
   --results-dir "$PROJECT_ROOT/eval_results/simple_xmove_bendpick"
 ~~~
 
-Official Level data must match --task, and each Level usually contains fixed environment episodes. The SIMPLE task selects the Teleop/SONIC or motion-planning/AMO action adapter; do not evaluate a checkpoint from one controller family by changing only the task string. See [SIMPLE Evaluation](evaluation/simple_eval.md) for the complete input layout, episode outputs, videos, and success-rate statistics.
-
-Evaluation outputs are written to eval_results/ by default. HumanoidArena wrappers produce summary.json, final.csv, per-episode results, and optional videos. SIMPLE wrappers save logs, statistics, and videos separately for each Level. Use a separate --results-dir for each formal experiment.
+The task name and evaluation data must match the checkpoint. Results, per-level summaries, and optional videos are written under `eval_results/`. See [SIMPLE Evaluation](evaluation/simple_eval.md) for the complete input layout and reporting details.
 
 ## Real-World Deployment
 
