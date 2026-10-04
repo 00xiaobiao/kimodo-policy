@@ -25,7 +25,7 @@ The policy is built on a frozen Kimodo motion backbone. DINOv3 extracts image fe
 
 ## Contents
 
-- [Environment Setup](#environment-setup)
+- [SETUP](#setup)
 - [Model Checkpoints](#model-checkpoints)
 - [Data Preparation](#data-preparation)
 - [Training](#training)
@@ -33,7 +33,7 @@ The policy is built on a frozen Kimodo motion backbone. DINOv3 extracts image fe
 - [Real-World Deployment](#real-world-deployment)
 - [Troubleshooting](#troubleshooting)
 
-## Environment Setup
+## SETUP
 
 ### General Requirements
 
