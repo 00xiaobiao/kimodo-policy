@@ -373,7 +373,17 @@ Before a full run, verify that the simulator Python, model-server Python, SONIC 
 
 ### Data Preparation
 
-The Arena training configurations read the dataset root from HUMANOID_ARENA_ROOT. The expected default layout is:
+Download the official [HumanoidArena_dataset_v3_1 dataset](https://huggingface.co/datasets/WilliamWang16/HumanoidArena_dataset_v3_1/tree/main) before training. From the repository root, download it into the default directory used by the Arena YAML files:
+
+~~~bash
+PROJECT_ROOT="$(git rev-parse --show-toplevel)"
+python -m pip install --upgrade huggingface_hub
+hf download WilliamWang16/HumanoidArena_dataset_v3_1 \
+  --repo-type dataset \
+  --local-dir "$PROJECT_ROOT/datasets/HumanoidArena_dataset_v3_1"
+~~~
+
+If the dataset is gated or requires authentication, run hf auth login first. The Arena training configurations read the dataset root from HUMANOID_ARENA_ROOT. The expected default layout is:
 
 ~~~text
 datasets/HumanoidArena_dataset_v3_1/
