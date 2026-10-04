@@ -420,10 +420,10 @@ This release provides the trained Kimodo-Policy weights used for the HumanoidAre
 
 Each row below is one policy jointly trained on the seven HumanoidArena tasks. The Results column reports the Overall SR from Table 2.
 
-| Task | Pretrain | Kimodo-Policy checkpoint | Overall Results |
-| --- | --- | --- | --- |
-| multi-task | ✗ | [humanoidarena_sonicx7_gbs128_50w](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Multi_Task/humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse) | 67.6% |
-| multi-task | ✓ | [ft_419h_humanoidarena_sonicx7_gbs128_50w](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Multi_Task/ft_419h_humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse) | 72.1% |
+| Task | Pretrain | Kimodo-Policy checkpoint | HOI Avg. | HSI Avg. | Overall Results |
+| --- | --- | --- | --- | --- | --- |
+| multi-task | ✗ | [humanoidarena_sonicx7_gbs128_50w](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Multi_Task/humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse) | 51.7 ± 20.7% | 79.6 ± 16.5% | 67.6% |
+| multi-task | ✓ | [ft_419h_humanoidarena_sonicx7_gbs128_50w](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Multi_Task/ft_419h_humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse) | 56.1 ± 24.2% | 84.2 ± 14.1% | 72.1% |
 
 ### Training on Arena
 
