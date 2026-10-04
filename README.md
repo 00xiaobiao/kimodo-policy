@@ -8,7 +8,6 @@
   <a href=""><img src="https://img.shields.io/badge/Project_Page-Kimodo--Policy-blue?logo=googlechrome&logoColor=white" alt="Project Page"></a>
   <a href=""><img src="https://img.shields.io/badge/HuggingFace-Checkpoints-yellow?logo=huggingface&logoColor=black" alt="Hugging Face checkpoints"></a>
   <a href=""><img src="https://img.shields.io/badge/HuggingFace-Datasets-yellow?logo=huggingface&logoColor=black" alt="Hugging Face datasets"></a>
-  <a href=""><img src="https://img.shields.io/badge/GitHub-Code-black?logo=github" alt="GitHub code"></a>
 </p>
 
 <p align="center">
