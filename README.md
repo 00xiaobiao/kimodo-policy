@@ -25,7 +25,6 @@ The policy is built on a frozen Kimodo motion backbone. DINOv3 extracts image fe
 
 ## Contents
 
-- [Repository Layout](#repository-layout)
 - [Environment Setup](#environment-setup)
 - [Model Checkpoints](#model-checkpoints)
 - [Data Preparation](#data-preparation)
@@ -33,24 +32,6 @@ The policy is built on a frozen Kimodo motion backbone. DINOv3 extracts image fe
 - [Inference and Evaluation](#inference-and-evaluation)
 - [Real-World Deployment](#real-world-deployment)
 - [Troubleshooting](#troubleshooting)
-
-## Repository Layout
-
-| Path | Description |
-| --- | --- |
-| train.py, train.yaml | General training entry point and default configuration. Use the experiment-specific YAML for released runs. |
-| model/, motion/, skeleton/ | Kimodo policy, visual ControlNet, motion representations, and the G1 skeleton. |
-| data/ | Dataset adapters for HumanoidArena, SIMPLE, HIW500, HumanoidEveryday, UnifoLM, and RealWorld data. |
-| scripts/Pre_Train/ | Multi-source pretraining launchers. |
-| scripts/HumanoidArena_Multi_Task/ | HumanoidArena SONIC multi-task training and fine-tuning. |
-| scripts/HumanoidArena_Single_Task/ | HumanoidArena single-task training and fine-tuning. |
-| scripts/Simple_Single_Task/ | SIMPLE single-task continuous-hand fine-tuning. |
-| scripts/Real_World/ | Offline RealWorld fine-tuning launcher. |
-| evaluation/ | Kimodo inference-server and simulator evaluation launchers. |
-| HumanoidArena/ | HumanoidArena simulator, evaluation, and dataset tools. |
-| SIMPLE/ | SIMPLE simulator and task code. |
-| checkpoints/ | Local base-model and vision/text-pretraining dependencies; download them from the model repository. |
-| log/, eval_results/ | Training outputs and evaluation results; excluded from Git by default. |
 
 ## Environment Setup
 
