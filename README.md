@@ -397,7 +397,7 @@ The checker validates episode metadata, task selection, and action continuity. I
 
 ### Kimodo-Policy Checkpoints
 
-This release provides the trained Kimodo-Policy weights used for the HumanoidArena experiments. It includes single-task Arena policies fine-tuned from the large-scale Kimodo-Policy pretraining stage, together with policies trained directly from scratch on each Arena task. Every row corresponds to an independently trained single-task policy; the `Pretrain` column indicates whether the policy uses the pretrained initialization. Results are single-task success rates (SR) from Table 1 of the paper.
+This release provides the trained Kimodo-Policy weights used for the HumanoidArena experiments. The first table lists policies trained independently on each Arena task, either from the large-scale Kimodo-Policy pretraining stage or directly from scratch. The second table lists policies trained jointly on all seven Arena tasks, again with either scratch or 419h-pretrained initialization. The `Pretrain` column identifies the initialization, and the reported results are taken from Tables 1 and 2 of the paper.
 
 | Task | Pretrain | Kimodo-Policy checkpoint | Results&nbsp;(SR) |
 | --- | --- | --- | --- |
@@ -415,6 +415,15 @@ This release provides the trained Kimodo-Policy weights used for the HumanoidAre
 | sit_sofa | ✓ | [ft_419h_humanoidarena_single_gbs64_20w_HSI_sit_sofa](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Single_Task/ft_419h_humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse_HSI_sit_sofa_sonic) | 96.7 ± 2.4% |
 | vision_navi | ✗ | [humanoidarena_single_gbs64_20w_HSI_vision_navi](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Single_Task/humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse_HSI_vision_navi_sonic) | 75.0 ± 10.8% |
 | vision_navi | ✓ | [ft_419h_humanoidarena_single_gbs64_20w_HSI_vision_navi](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Single_Task/ft_419h_humanoidarena_single_gbs64_20w_controlnet4_detach_true_mse_HSI_vision_navi_sonic) | 76.7 ± 18.9% |
+
+#### HumanoidArena Multi-Task Checkpoints
+
+Each row below is one policy jointly trained on the seven HumanoidArena tasks. The metrics reproduce Table 2: AFR is the average fall rate, task columns and grouped averages are success rates, and Overall SR is the overall success rate.
+
+| Pretrain | Kimodo-Policy checkpoint | AFR (↓) | Football | DoubleDesk | P&Pbox | HOI Avg. | OpenDoor | SitSofa | Boxing | VisNavi | HSI Avg. | Overall SR |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| ✗ | [humanoidarena_x7_gbs128_50w](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Multi_Task/humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse) | 5.0% | 35.0 ± 7.1% | 40.0 ± 0.0% | 80.0 ± 4.1% | 51.7 ± 20.7% | 93.3 ± 6.2% | 96.7 ± 4.7% | 66.7 ± 4.7% | 61.7 ± 6.2% | 79.6 ± 16.5% | 67.6% |
+| ✓ | [ft_419h_humanoidarena_x7_gbs128_50w](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Multi_Task/ft_419h_humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse) | 4.3% | 40.0 ± 4.1% | 38.3 ± 2.4% | 90.0 ± 4.1% | 56.1 ± 24.2% | 95.0 ± 4.1% | 96.7 ± 4.7% | 68.3 ± 10.3% | 76.7 ± 8.5% | 84.2 ± 14.1% | 72.1% |
 
 ### Training on Arena
 
