@@ -1,4 +1,15 @@
-# Kimodo-Policy
+<h1 align="center">
+  Kimodo-Policy: From Text-to-Motion Generators to<br/>
+  Humanoid Vision-Language-Action Policies
+</h1>
+
+<p align="center">
+  <a href=""><img src="https://img.shields.io/badge/arXiv-Paper-b31b1b?logo=arxiv" alt="arXiv"></a>
+  <a href=""><img src="https://img.shields.io/badge/Project_Page-Kimodo--Policy-blue?logo=googlechrome&logoColor=white" alt="Project Page"></a>
+  <a href=""><img src="https://img.shields.io/badge/HuggingFace-Checkpoints-yellow?logo=huggingface&logoColor=black" alt="Hugging Face checkpoints"></a>
+  <a href=""><img src="https://img.shields.io/badge/HuggingFace-Datasets-yellow?logo=huggingface&logoColor=black" alt="Hugging Face datasets"></a>
+  <a href=""><img src="https://img.shields.io/badge/GitHub-Code-black?logo=github" alt="GitHub code"></a>
+</p>
 
 <p align="center">
   <img src="asset/picture/teaser.png" alt="Kimodo-Policy overview" width="96%">
