@@ -418,12 +418,12 @@ This release provides the trained Kimodo-Policy weights used for the HumanoidAre
 
 #### HumanoidArena Multi-Task Checkpoints
 
-Each row below is one policy jointly trained on the seven HumanoidArena tasks. The metrics reproduce Table 2: AFR is the average fall rate, task columns and grouped averages are success rates, and Overall SR is the overall success rate.
+Each row below is one policy jointly trained on the seven HumanoidArena tasks. The Results column reports the Overall SR from Table 2.
 
-| Pretrain | Kimodo-Policy checkpoint | AFR (↓) | Football | DoubleDesk | P&Pbox | HOI Avg. | OpenDoor | SitSofa | Boxing | VisNavi | HSI Avg. | Overall SR |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| ✗ | [humanoidarena_x7_gbs128_50w](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Multi_Task/humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse) | 5.0% | 35.0 ± 7.1% | 40.0 ± 0.0% | 80.0 ± 4.1% | 51.7 ± 20.7% | 93.3 ± 6.2% | 96.7 ± 4.7% | 66.7 ± 4.7% | 61.7 ± 6.2% | 79.6 ± 16.5% | 67.6% |
-| ✓ | [ft_419h_humanoidarena_x7_gbs128_50w](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Multi_Task/ft_419h_humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse) | 4.3% | 40.0 ± 4.1% | 38.3 ± 2.4% | 90.0 ± 4.1% | 56.1 ± 24.2% | 95.0 ± 4.1% | 96.7 ± 4.7% | 68.3 ± 10.3% | 76.7 ± 8.5% | 84.2 ± 14.1% | 72.1% |
+| Task | Pretrain | Kimodo-Policy checkpoint | Results&nbsp;(SR) |
+| --- | --- | --- | --- |
+| multi-task | ✗ | [humanoidarena_x7_gbs128_50w](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Multi_Task/humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse) | 67.6% |
+| multi-task | ✓ | [ft_419h_humanoidarena_x7_gbs128_50w](https://huggingface.co/YunhengWang/kimodo-policy/tree/main/HumanoidArena_Multi_Task/ft_419h_humanoidarena_sonicx7_gbs128_50w_controlnet4_detach_true_mse) | 72.1% |
 
 ### Training on Arena
 
